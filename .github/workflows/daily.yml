@@ -11,10 +11,10 @@ on:
     inputs:
       skipjobs:
         description: 'jobs to skip (delete the ones you wanna keep)'
-        default: 'valgrind,tls,freebsd,macos,alpine,32bit'
+        default: ''
       skiptests:
         description: 'tests to skip (delete the ones you wanna keep)'
-        default: 'redis,modules,sentinel,cluster'
+        default: 'sentinel,cluster'
       test_args:
         description: 'extra test arguments'
         default: ''
@@ -23,7 +23,7 @@ on:
         default: ''
       use_repo:
         description: 'repo owner and name'
-        default: 'redis/redis'
+        default: 'sundb/redis'
       use_git_ref:
         description: 'git branch or sha to use'
         default: 'unstable'
