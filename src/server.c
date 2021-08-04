@@ -404,6 +404,10 @@ struct redisCommand redisCommandTable[] = {
      "read-only to-sort @set",
      0,NULL,1,-1,1,0,0,0},
 
+    {"sintercard",sinterCardCommand,-2,
+     "read-only @set",
+     0,NULL,1,-1,1,0,0,0},
+
     {"sinterstore",sinterstoreCommand,-3,
      "write use-memory @set",
      0,NULL,1,-1,1,0,0,0},
@@ -473,6 +477,10 @@ struct redisCommand redisCommandTable[] = {
      0,zunionInterDiffGetKeys,0,0,0,0,0,0},
 
     {"zinter",zinterCommand,-3,
+     "read-only @sortedset",
+     0,zunionInterDiffGetKeys,0,0,0,0,0,0},
+
+    {"zintercard",zinterCardCommand,-3,
      "read-only @sortedset",
      0,zunionInterDiffGetKeys,0,0,0,0,0,0},
 
@@ -678,19 +686,19 @@ struct redisCommand redisCommandTable[] = {
      "write fast @keyspace",
      0,NULL,1,2,1,0,0,0},
 
-    {"expire",expireCommand,3,
+    {"expire",expireCommand,-3,
      "write fast @keyspace",
      0,NULL,1,1,1,0,0,0},
 
-    {"expireat",expireatCommand,3,
+    {"expireat",expireatCommand,-3,
      "write fast @keyspace",
      0,NULL,1,1,1,0,0,0},
 
-    {"pexpire",pexpireCommand,3,
+    {"pexpire",pexpireCommand,-3,
      "write fast @keyspace",
      0,NULL,1,1,1,0,0,0},
 
-    {"pexpireat",pexpireatCommand,3,
+    {"pexpireat",pexpireatCommand,-3,
      "write fast @keyspace",
      0,NULL,1,1,1,0,0,0},
 
@@ -2879,7 +2887,7 @@ int setOOMScoreAdj(int process_class) {
 
     fd = open("/proc/self/oom_score_adj", O_WRONLY);
     if (fd < 0 || write(fd, buf, strlen(buf)) < 0) {
-        serverLog(LOG_WARNING, "Unable to write oom_score_adj: %s", strerror(errno));
+        serverLog(LL_WARNING, "Unable to write oom_score_adj: %s", strerror(errno));
         if (fd != -1) close(fd);
         return C_ERR;
     }
