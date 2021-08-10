@@ -5987,9 +5987,9 @@ void dismissMemoryInChild(void) {
     /* madvise(MADV_DONTNEED) may not work if Transparent Huge Pages is enabled. */
     if (server.thp_enabled) return;
 
-    /* Currently we use zmadvise_dontneed only when we use jemalloc.
+    /* Currently we use zmadvise_dontneed only when we use jemalloc with Linux.
      * so we avoid these pointless loops when they're not going to do anything. */
-#if defined(USE_JEMALLOC)
+#if defined(USE_JEMALLOC) && defined(__linux__)
 
     /* Dismiss replication backlog. */
     if (server.repl_backlog != NULL) {
@@ -6241,7 +6241,8 @@ struct redisTest {
     {"crc64", crc64Test},
     {"zmalloc", zmalloc_test},
     {"sds", sdsTest},
-    {"dict", dictTest}
+    {"dict", dictTest},
+    {"listpack", listpackTest}
 };
 redisTestProc *getTestProcByName(const char *name) {
     int numtests = sizeof(redisTests)/sizeof(struct redisTest);
