@@ -2933,6 +2933,11 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * our clients. */
     updateFailoverStatus();
 
+    /* Since we rely on current_client to send scheduled invalidation messages
+     * we have to flush them after each command, so when we get here, the list
+     * must be empty. */
+    serverAssert(listLength(server.tracking_pending_keys) == 0);
+
     /* Send the invalidation messages to clients participating to the
      * client side caching protocol in broadcasting (BCAST) mode. */
     trackingBroadcastInvalidationMessages();
@@ -2941,16 +2946,16 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     if (server.aof_state == AOF_ON)
         flushAppendOnlyFile(0);
 
+    /* Try to process blocked clients every once in while. Example: A module
+     * calls RM_SignalKeyAsReady from within a timer callback (So we don't
+     * visit processCommand() at all). */
+    handleClientsBlockedOnKeys();
+
     /* Handle writes with pending output buffers. */
     handleClientsWithPendingWritesUsingThreads();
 
     /* Close clients that need to be closed asynchronous */
     freeClientsInAsyncFreeQueue();
-
-    /* Try to process blocked clients every once in while. Example: A module
-     * calls RM_SignalKeyAsReady from within a timer callback (So we don't
-     * visit processCommand() at all). */
-    handleClientsBlockedOnKeys();
 
     /* Disconnect some clients if they are consuming too much memory. */
     evictClients();
@@ -2973,7 +2978,15 @@ void afterSleep(struct aeEventLoop *eventLoop) {
 
     /* Acquire the modules GIL so that their threads won't touch anything. */
     if (!ProcessingEventsWhileBlocked) {
-        if (moduleCount()) moduleAcquireGIL();
+        if (moduleCount()) {
+            mstime_t latency;
+            latencyStartMonitor(latency);
+
+            moduleAcquireGIL();
+
+            latencyEndMonitor(latency);
+            latencyAddSampleIfNeeded("module-acquire-GIL",latency);
+        }
     }
 }
 
@@ -3655,6 +3668,7 @@ void initServer(void) {
     server.current_client = NULL;
     server.errors = raxNew();
     server.fixed_time_expire = 0;
+    server.in_nested_call = 0;
     server.clients = listCreate();
     server.clients_index = raxNew();
     server.clients_to_close = listCreate();
@@ -3667,6 +3681,7 @@ void initServer(void) {
     server.slaveseldb = -1; /* Force to emit the first SELECT command. */
     server.unblocked_clients = listCreate();
     server.ready_keys = listCreate();
+    server.tracking_pending_keys = listCreate();
     server.clients_waiting_acks = listCreate();
     server.get_ack_from_slaves = 0;
     server.client_pause_type = CLIENT_PAUSE_OFF;
@@ -4314,6 +4329,7 @@ void call(client *c, int flags) {
     if (server.fixed_time_expire++ == 0) {
         updateCachedTime(0);
     }
+    server.in_nested_call++;
 
     elapsedStart(&call_timer);
     c->cmd->proc(c);
@@ -4321,6 +4337,8 @@ void call(client *c, int flags) {
     c->duration = duration;
     dirty = server.dirty-dirty;
     if (dirty < 0) dirty = 0;
+
+    server.in_nested_call--;
 
     /* Update failed command calls if required.
      * We leverage a static variable (prev_err_count) to retain
@@ -4496,6 +4514,9 @@ void call(client *c, int flags) {
     size_t zmalloc_used = zmalloc_used_memory();
     if (zmalloc_used > server.stat_peak_memory)
         server.stat_peak_memory = zmalloc_used;
+
+    /* Do some maintenance job and cleanup */
+    afterCommand(c);
 }
 
 /* Used when a command that is ready for execution needs to be rejected, due to
@@ -4531,6 +4552,14 @@ void rejectCommandFormat(client *c, const char *fmt, ...) {
         /* The following frees 's'. */
         addReplyErrorSds(c, s);
     }
+}
+
+/* This is called after a command in call, we can do some maintenance job in it. */
+void afterCommand(client *c) {
+    UNUSED(c);
+    /* Flush pending invalidation messages only when we are not in nested call.
+     * So the messages are not interleaved with transaction response. */
+    if (!server.in_nested_call) trackingHandlePendingKeyInvalidations();
 }
 
 /* Returns 1 for commands that may have key names in their arguments, but the legacy range
@@ -4623,13 +4652,8 @@ int processCommand(client *c) {
     int is_may_replicate_command = (c->cmd->flags & (CMD_WRITE | CMD_MAY_REPLICATE)) ||
                                    (c->cmd->proc == execCommand && (c->mstate.cmd_flags & (CMD_WRITE | CMD_MAY_REPLICATE)));
 
-    /* Check if the user is authenticated. This check is skipped in case
-     * the default user is flagged as "nopass" and is active. */
-    int auth_required = (!(DefaultUser->flags & USER_FLAG_NOPASS) ||
-                          (DefaultUser->flags & USER_FLAG_DISABLED)) &&
-                        !c->authenticated;
-    if (auth_required) {
-        /* AUTH and HELLO and no auth modules are valid even in
+    if (authRequired(c)) {
+        /* AUTH and HELLO and no auth commands are valid even in
          * non-authenticated state. */
         if (!(c->cmd->flags & CMD_NO_AUTH)) {
             rejectCommand(c,shared.noautherr);
@@ -4710,6 +4734,13 @@ int processCommand(client *c) {
      * propagation of DELs due to eviction. */
     if (server.maxmemory && !server.lua_timedout) {
         int out_of_memory = (performEvictions() == EVICT_FAIL);
+
+        /* performEvictions may evict keys, so we need flush pending tracking
+         * invalidation keys. If we don't do this, we may get an invalidation
+         * message after we perform operation on the key, where in fact this
+         * message belongs to the old value of the key before it gets evicted.*/
+        trackingHandlePendingKeyInvalidations();
+
         /* performEvictions may flush slave output buffers. This may result
          * in a slave, that may be the active client, to be freed. */
         if (server.current_client == NULL) return C_ERR;
@@ -6265,7 +6296,7 @@ int linuxMadvFreeForkBugCheck(void) {
     *(volatile char*)q = 0;
 
     /* Create a pipe for the child to return the info to the parent. */
-    ret = pipe(pipefd);
+    ret = anetPipe(pipefd, 0, 0);
     if (ret < 0) {
         serverLog(LL_WARNING, "Failed to create pipe: %s", strerror(errno));
         bug_found = -1;
