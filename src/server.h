@@ -106,6 +106,7 @@ typedef long long ustime_t; /* microsecond time type. */
 #define LOG_MAX_LEN    1024 /* Default maximum length of syslog messages.*/
 #define AOF_REWRITE_ITEMS_PER_CMD 64
 #define AOF_READ_DIFF_INTERVAL_BYTES (1024*10)
+#define AOF_ANNOTATION_LINE_MAX_LEN 1024
 #define CONFIG_AUTHPASS_MAX_LEN 512
 #define CONFIG_RUN_ID_SIZE 40
 #define RDB_EOF_MARK_SIZE 40
@@ -930,21 +931,17 @@ typedef struct {
      * understand if the command can be executed. */
     uint64_t allowed_commands[USER_COMMAND_BITS_COUNT/64];
 
-    /* NOTE: allowed_firstargs is a transformation of the old mechanism for allowing
-     * subcommands (now, subcommands are actually commands, with their own
-     * ACL ID)
-     * We had to keep allowed_firstargs (previously called allowed_subcommands)
-     * in order to support the widespread abuse of ACL rules to block a command
-     * with a specific argv[1] (which is not a subcommand at all).
+    /* allowed_firstargs is used by ACL rules to block access to a command unless a
+     * specific argv[1] is given (or argv[2] in case it is applied on a sub-command).
      * For example, a user can use the rule "-select +select|0" to block all
      * SELECT commands, except "SELECT 0".
-     * It can also be applied for subcommands: "+config -config|set +config|set|loglevel"
+     * And for a sub-command: "+config -config|set +config|set|loglevel"
      *
-     * This array points, for each command ID (corresponding to the command
-     * bit set in allowed_commands), to an array of SDS strings, terminated by
-     * a NULL pointer, with all the first-args that are allowed for
-     * this command. When no first-arg matching is used, the field is just
-     * set to NULL to avoid allocating USER_COMMAND_BITS_COUNT pointers. */
+     * For each command ID (corresponding to the command bit set in allowed_commands),
+     * This array points to an array of SDS strings, terminated by a NULL pointer,
+     * with all the first-args that are allowed for this command. When no first-arg
+     * matching is used, the field is just set to NULL to avoid allocating
+     * USER_COMMAND_BITS_COUNT pointers. */
     sds **allowed_firstargs;
     list *passwords; /* A list of SDS valid passwords for this user. */
     list *patterns;  /* A list of allowed key patterns. If this field is NULL
@@ -1508,6 +1505,8 @@ struct redisServer {
     time_t aof_last_fsync;            /* UNIX time of last fsync() */
     time_t aof_rewrite_time_last;   /* Time used by last AOF rewrite run. */
     time_t aof_rewrite_time_start;  /* Current AOF rewrite start time. */
+    time_t aof_cur_timestamp;       /* Current record timestamp in AOF */
+    int aof_timestamp_enabled;      /* Enable record timestamp in AOF */
     int aof_lastbgrewrite_status;   /* C_OK or C_ERR */
     unsigned long aof_delayed_fsync;  /* delayed AOF fsync() counter */
     int aof_rewrite_incremental_fsync;/* fsync incrementally while aof rewriting? */
