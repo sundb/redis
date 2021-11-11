@@ -45,7 +45,7 @@ jobs:
     - name: test
       run: ./runtest --accurate --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: module api test
-      run: ./runtest-moduleapi --verbose ${{github.event.inputs.test_args}}
+      run: ./runtest-moduleapi --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: sentinel tests
       run: ./runtest-sentinel ${{github.event.inputs.cluster_test_args}}
     - name: cluster tests
@@ -73,7 +73,7 @@ jobs:
     - name: test
       run: ./runtest --accurate --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: module api test
-      run: ./runtest-moduleapi --verbose ${{github.event.inputs.test_args}}
+      run: ./runtest-moduleapi --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: sentinel tests
       run: ./runtest-sentinel ${{github.event.inputs.cluster_test_args}}
     - name: cluster tests
@@ -99,7 +99,7 @@ jobs:
     - name: test
       run: ./runtest --accurate --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: module api test
-      run: ./runtest-moduleapi --verbose ${{github.event.inputs.test_args}}
+      run: ./runtest-moduleapi --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: sentinel tests
       run: ./runtest-sentinel ${{github.event.inputs.cluster_test_args}}
     - name: cluster tests
@@ -129,7 +129,7 @@ jobs:
     - name: module api test
       run: |
         make -C tests/modules 32bit # the script below doesn't have an argument, we must build manually ahead of time
-        ./runtest-moduleapi --verbose ${{github.event.inputs.test_args}}
+        ./runtest-moduleapi --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: sentinel tests
       run: ./runtest-sentinel ${{github.event.inputs.cluster_test_args}}
     - name: cluster tests
@@ -163,8 +163,8 @@ jobs:
         ./runtest --accurate --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: module api test
       run: |
-        ./runtest-moduleapi --verbose --tls ${{github.event.inputs.test_args}}
-        ./runtest-moduleapi --verbose ${{github.event.inputs.test_args}}
+        ./runtest-moduleapi --verbose --tls --dump-logs ${{github.event.inputs.test_args}}
+        ./runtest-moduleapi --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: sentinel tests
       run: |
         ./runtest-sentinel --tls ${{github.event.inputs.cluster_test_args}}
@@ -217,9 +217,9 @@ jobs:
         sudo apt-get update
         sudo apt-get install tcl8.6 tclx valgrind -y
     - name: test
-      run: ./runtest --valgrind --verbose --clients 1 --dump-logs ${{github.event.inputs.test_args}}
+      run: ./runtest --valgrind --verbose --clients 1 --timeout 2400 --dump-logs ${{github.event.inputs.test_args}}
     - name: module api test
-      run: ./runtest-moduleapi --valgrind --no-latency --verbose --clients 1 ${{github.event.inputs.test_args}}
+      run: ./runtest-moduleapi --valgrind --no-latency --verbose --clients 1 --timeout 2400 --dump-logs ${{github.event.inputs.test_args}}
     - name: unittest
       run: |
         valgrind --track-origins=yes --suppressions=./src/valgrind.sup --show-reachable=no --show-possibly-lost=no --leak-check=full --log-file=err.txt ./src/redis-server test all
@@ -245,9 +245,9 @@ jobs:
         sudo apt-get update
         sudo apt-get install tcl8.6 tclx valgrind -y
     - name: test
-      run: ./runtest --valgrind --verbose --clients 1 --dump-logs ${{github.event.inputs.test_args}}
+      run: ./runtest --valgrind --verbose --clients 1 --timeout 2400 --dump-logs ${{github.event.inputs.test_args}}
     - name: module api test
-      run: ./runtest-moduleapi --valgrind --no-latency --verbose --clients 1 ${{github.event.inputs.test_args}}
+      run: ./runtest-moduleapi --valgrind --no-latency --verbose --clients 1 --timeout 2400 --dump-logs ${{github.event.inputs.test_args}}
 
   test-centos7-jemalloc:
     runs-on: ubuntu-latest
@@ -272,7 +272,7 @@ jobs:
     - name: test
       run: ./runtest --accurate --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: module api test
-      run: ./runtest-moduleapi --verbose ${{github.event.inputs.test_args}}
+      run: ./runtest-moduleapi --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: sentinel tests
       run: ./runtest-sentinel ${{github.event.inputs.cluster_test_args}}
     - name: cluster tests
@@ -307,8 +307,8 @@ jobs:
         ./runtest --accurate --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: module api test
       run: |
-        ./runtest-moduleapi --verbose --tls ${{github.event.inputs.test_args}}
-        ./runtest-moduleapi --verbose ${{github.event.inputs.test_args}}
+        ./runtest-moduleapi --verbose --tls --dump-logs ${{github.event.inputs.test_args}}
+        ./runtest-moduleapi --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: sentinel tests
       run: |
         ./runtest-sentinel --tls ${{github.event.inputs.cluster_test_args}}
@@ -336,7 +336,7 @@ jobs:
     - name: test
       run: ./runtest --accurate --verbose --no-latency --dump-logs ${{github.event.inputs.test_args}}
     - name: module api test
-      run: ./runtest-moduleapi --verbose ${{github.event.inputs.test_args}}
+      run: ./runtest-moduleapi --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: sentinel tests
       run: ./runtest-sentinel ${{github.event.inputs.cluster_test_args}}
     - name: cluster tests
@@ -363,8 +363,8 @@ jobs:
         prepare: pkg install -y bash gmake lang/tcl86 lang/tclx
         run: >
           gmake || exit 1 ;
-          ./runtest --accurate --verbose --no-latency --dump-logs ${{github.event.inputs.test_args}} || exit 1 ;
-          MAKE=gmake ./runtest-moduleapi --verbose ${{github.event.inputs.test_args}} || exit 1 ;
+          ./runtest --verbose --no-latency --dump-logs ${{github.event.inputs.test_args}} || exit 1 ;
+          MAKE=gmake ./runtest-moduleapi --verbose --dump-logs ${{github.event.inputs.test_args}} || exit 1 ;
           ./runtest-sentinel ${{github.event.inputs.cluster_test_args}} || exit 1 ;
           ./runtest-cluster ${{github.event.inputs.cluster_test_args}} || exit 1 ;
 
@@ -390,7 +390,7 @@ jobs:
     - name: test
       run: ./runtest --accurate --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: module api test
-      run: ./runtest-moduleapi --verbose ${{github.event.inputs.test_args}}
+      run: ./runtest-moduleapi --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: sentinel tests
       run: ./runtest-sentinel ${{github.event.inputs.cluster_test_args}}
     - name: cluster tests
@@ -418,7 +418,7 @@ jobs:
     - name: test
       run: ./runtest --accurate --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: module api test
-      run: ./runtest-moduleapi --verbose ${{github.event.inputs.test_args}}
+      run: ./runtest-moduleapi --verbose --dump-logs ${{github.event.inputs.test_args}}
     - name: sentinel tests
       run: ./runtest-sentinel ${{github.event.inputs.cluster_test_args}}
     - name: cluster tests
