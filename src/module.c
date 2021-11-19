@@ -6249,7 +6249,7 @@ RedisModuleBlockedClient *moduleBlockClient(RedisModuleCtx *ctx, RedisModuleCmdF
             "Blocking module command called from transaction");
     } else {
         if (keys) {
-            blockForKeys(c,BLOCKED_MODULE,keys,numkeys,0,timeout,NULL,NULL,NULL);
+            blockForKeys(c,BLOCKED_MODULE,keys,numkeys,-1,timeout,NULL,NULL,NULL);
         } else {
             blockClient(c,BLOCKED_MODULE);
         }
@@ -8435,7 +8435,6 @@ int moduleUnregisterFilters(RedisModule *module) {
  * If multiple filters are registered (by the same or different modules), they
  * are executed in the order of registration.
  */
-
 RedisModuleCommandFilter *RM_RegisterCommandFilter(RedisModuleCtx *ctx, RedisModuleCommandFilterFunc callback, int flags) {
     RedisModuleCommandFilter *filter = zmalloc(sizeof(*filter));
     filter->module = ctx->module;
