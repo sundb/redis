@@ -822,11 +822,17 @@ proc punsubscribe {client {channels {}}} {
 }
 
 proc debug_digest_value {key} {
-    if {!$::ignoredigest} {
-        r debug digest-value $key
-    } else {
+    if {[lsearch $::denytags "needs:debug"] >= 0 || $::ignoredigest} {
         return "dummy-digest-value"
     }
+    r debug digest-value $key
+}
+
+proc debug_digest {{level 0}} {
+    if {[lsearch $::denytags "needs:debug"] >= 0 || $::ignoredigest} {
+        return "dummy-digest"
+    }
+    r $level debug digest
 }
 
 proc wait_for_blocked_client {} {
@@ -906,6 +912,16 @@ proc delete_lines_with_pattern {filename tmpfilename pattern} {
     close $fh_in
     close $fh_out
     file rename -force $tmpfilename $filename
+}
+
+proc get_nonloopback_addr {} {
+    set addrlist [list {}]
+    catch { set addrlist [exec hostname -I] }
+    return [lindex $addrlist 0]
+}
+
+proc get_nonloopback_client {} {
+    return [redis [get_nonloopback_addr] [srv 0 "port"] 0 $::tls]
 }
 
 # The following functions and variables are used only when running large-memory
