@@ -1191,7 +1191,8 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     /* Start a scheduled AOF rewrite if this was requested by the user while
      * a BGSAVE was in progress. */
     if (!hasActiveChildProcess() &&
-        server.aof_rewrite_scheduled)
+        server.aof_rewrite_scheduled &&
+        !aofRewriteLimited())
     {
         rewriteAppendOnlyFileBackground();
     }
@@ -1230,7 +1231,8 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         if (server.aof_state == AOF_ON &&
             !hasActiveChildProcess() &&
             server.aof_rewrite_perc &&
-            server.aof_current_size > server.aof_rewrite_min_size)
+            server.aof_current_size > server.aof_rewrite_min_size &&
+            !aofRewriteLimited())
         {
             long long base = server.aof_rewrite_base_size ?
                 server.aof_rewrite_base_size : 1;
@@ -1248,8 +1250,11 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* AOF postponed flush: Try at every cron cycle if the slow fsync
      * completed. */
-    if (server.aof_state == AOF_ON && server.aof_flush_postponed_start)
+    if ((server.aof_state == AOF_ON || server.aof_state == AOF_WAIT_REWRITE) &&
+        server.aof_flush_postponed_start)
+    {
         flushAppendOnlyFile(0);
+    }
 
     /* AOF write errors: in this case we have a buffer to flush as well and
      * clear the AOF error in case of success to make the DB writable again,
@@ -1506,7 +1511,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     trackingBroadcastInvalidationMessages();
 
     /* Write the AOF buffer on disk */
-    if (server.aof_state == AOF_ON)
+    if (server.aof_state == AOF_ON || server.aof_state == AOF_WAIT_REWRITE)
         flushAppendOnlyFile(0);
 
     /* Try to process blocked clients every once in while. Example: A module
@@ -1648,6 +1653,8 @@ void createSharedObjects(void) {
     shared.pmessagebulk = createStringObject("$8\r\npmessage\r\n",14);
     shared.subscribebulk = createStringObject("$9\r\nsubscribe\r\n",15);
     shared.unsubscribebulk = createStringObject("$11\r\nunsubscribe\r\n",18);
+    shared.ssubscribebulk = createStringObject("$10\r\nssubscribe\r\n", 17);
+    shared.sunsubscribebulk = createStringObject("$12\r\nsunsubscribe\r\n", 19);
     shared.psubscribebulk = createStringObject("$10\r\npsubscribe\r\n",17);
     shared.punsubscribebulk = createStringObject("$12\r\npunsubscribe\r\n",19);
 
@@ -1759,6 +1766,7 @@ void initServerConfig(void) {
     server.aof_fd = -1;
     server.aof_selected_db = -1; /* Make sure the first time will not match */
     server.aof_flush_postponed_start = 0;
+    server.aof_last_incr_size = 0;
     server.active_defrag_running = 0;
     server.notify_keyspace_events = 0;
     server.blocked_clients = 0;
@@ -2291,6 +2299,7 @@ void initServer(void) {
     server.blocked_last_cron = 0;
     server.blocking_op_nesting = 0;
     server.thp_enabled = 0;
+    server.cluster_drop_packet_filter = -1;
     resetReplicationBuffer();
 
     if ((server.tls_port || server.tls_replication || server.tls_cluster)
@@ -2367,6 +2376,7 @@ void initServer(void) {
     evictionPoolAlloc(); /* Initialize the LRU keys pool. */
     server.pubsub_channels = dictCreate(&keylistDictType);
     server.pubsub_patterns = dictCreate(&keylistDictType);
+    server.pubsubshard_channels = dictCreate(&keylistDictType);
     server.cronloops = 0;
     server.in_script = 0;
     server.in_exec = 0;
@@ -2386,7 +2396,6 @@ void initServer(void) {
     server.child_info_pipe[0] = -1;
     server.child_info_pipe[1] = -1;
     server.child_info_nread = 0;
-    aofRewriteBufferReset();
     server.aof_buf = sdsempty();
     server.lastsave = time(NULL); /* At startup we consider the DB saved. */
     server.lastbgsave_try = 0;    /* At startup we never tried to BGSAVE. */
@@ -3447,7 +3456,10 @@ int processCommand(client *c) {
         /* Save out_of_memory result at script start, otherwise if we check OOM
          * until first write within script, memory used by lua stack and
          * arguments might interfere. */
-        if (c->cmd->proc == evalCommand || c->cmd->proc == evalShaCommand) {
+        if (c->cmd->proc == evalCommand ||
+            c->cmd->proc == evalShaCommand ||
+            c->cmd->proc == fcallCommand)
+        {
             server.script_oom = out_of_memory;
         }
     }
@@ -3499,14 +3511,16 @@ int processCommand(client *c) {
     if ((c->flags & CLIENT_PUBSUB && c->resp == 2) &&
         c->cmd->proc != pingCommand &&
         c->cmd->proc != subscribeCommand &&
+        c->cmd->proc != ssubscribeCommand &&
         c->cmd->proc != unsubscribeCommand &&
+        c->cmd->proc != sunsubscribeCommand &&
         c->cmd->proc != psubscribeCommand &&
         c->cmd->proc != punsubscribeCommand &&
         c->cmd->proc != quitCommand &&
         c->cmd->proc != resetCommand) {
         rejectCommandFormat(c,
-            "Can't execute '%s': only (P)SUBSCRIBE / "
-            "(P)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context",
+            "Can't execute '%s': only (P|S)SUBSCRIBE / "
+            "(P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context",
             c->cmd->name);
         return C_OK;
     }
@@ -3850,6 +3864,9 @@ int finishShutdown(void) {
         }
     }
 
+    /* Free the AOF manifest. */
+    if (server.aof_manifest) aofManifestFree(server.aof_manifest);
+
     /* Fire the shutdown modules event. */
     moduleFireServerEvent(REDISMODULE_EVENT_SHUTDOWN,0,NULL);
 
@@ -4001,6 +4018,7 @@ void addReplyFlagsForKeyArgs(client *c, uint64_t flags) {
     void *flaglen = addReplyDeferredLen(c);
     flagcount += addReplyCommandFlag(c,flags,CMD_KEY_WRITE, "write");
     flagcount += addReplyCommandFlag(c,flags,CMD_KEY_READ, "read");
+    flagcount += addReplyCommandFlag(c,flags,CMD_KEY_SHARD_CHANNEL, "shard_channel");
     flagcount += addReplyCommandFlag(c,flags,CMD_KEY_INCOMPLETE, "incomplete");
     setDeferredSetLen(c, flaglen, flagcount);
 }
@@ -4968,14 +4986,12 @@ sds genRedisInfoString(const char *section) {
                 "aof_base_size:%lld\r\n"
                 "aof_pending_rewrite:%d\r\n"
                 "aof_buffer_length:%zu\r\n"
-                "aof_rewrite_buffer_length:%lu\r\n"
                 "aof_pending_bio_fsync:%llu\r\n"
                 "aof_delayed_fsync:%lu\r\n",
                 (long long) server.aof_current_size,
                 (long long) server.aof_rewrite_base_size,
                 server.aof_rewrite_scheduled,
                 sdslen(server.aof_buf),
-                aofRewriteBufferSize(),
                 bioPendingJobsOfType(BIO_AOF_FSYNC),
                 server.aof_delayed_fsync);
         }
@@ -6007,12 +6023,9 @@ int checkForSentinelMode(int argc, char **argv, char *exec_name) {
 void loadDataFromDisk(void) {
     long long start = ustime();
     if (server.aof_state == AOF_ON) {
-        /* It's not a failure if the file is empty or doesn't exist (later we will create it) */
-        int ret = loadAppendOnlyFile(server.aof_filename);
+        int ret = loadAppendOnlyFiles(server.aof_manifest);
         if (ret == AOF_FAILED || ret == AOF_OPEN_ERR)
             exit(1);
-        if (ret == AOF_OK)
-            serverLog(LL_NOTICE,"DB loaded from append only file: %.3f seconds",(float)(ustime()-start)/1000000);
     } else {
         rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
         errno = 0; /* Prevent a stale value from affecting error checking */
@@ -6482,17 +6495,10 @@ int main(int argc, char **argv) {
         moduleLoadFromQueue();
         ACLLoadUsersAtStartup();
         InitServerLast();
+        aofLoadManifestFromDisk();
         loadDataFromDisk();
-        /* Open the AOF file if needed. */
-        if (server.aof_state == AOF_ON) {
-            server.aof_fd = open(server.aof_filename,
-                                 O_WRONLY|O_APPEND|O_CREAT,0644);
-            if (server.aof_fd == -1) {
-                serverLog(LL_WARNING, "Can't open the append-only file: %s",
-                          strerror(errno));
-                exit(1);
-            }
-        }
+        aofOpenIfNeededOnServerStart();
+        aofDelHistoryFiles();
         if (server.cluster_enabled) {
             if (verifyClusterConfigWithData() == C_ERR) {
                 serverLog(LL_WARNING,

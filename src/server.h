@@ -105,7 +105,6 @@ typedef long long ustime_t; /* microsecond time type. */
 #define OBJ_SHARED_BULKHDR_LEN 32
 #define LOG_MAX_LEN    1024 /* Default maximum length of syslog messages.*/
 #define AOF_REWRITE_ITEMS_PER_CMD 64
-#define AOF_READ_DIFF_INTERVAL_BYTES (1024*10)
 #define AOF_ANNOTATION_LINE_MAX_LEN 1024
 #define CONFIG_AUTHPASS_MAX_LEN 512
 #define CONFIG_RUN_ID_SIZE 40
@@ -233,9 +232,12 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 
 /* Key argument flags. Please check the command table defined in the server.c file
  * for more information about the meaning of every flag. */
-#define CMD_KEY_WRITE (1ULL<<0)
-#define CMD_KEY_READ (1ULL<<1)
-#define CMD_KEY_INCOMPLETE (1ULL<<2)   /* meaning that the keyspec might not point out to all keys it should cover */
+#define CMD_KEY_WRITE (1ULL<<0)             /* "write" flag */
+#define CMD_KEY_READ (1ULL<<1)              /* "read" flag */
+#define CMD_KEY_SHARD_CHANNEL (1ULL<<2)     /* "shard_channel" flag */
+#define CMD_KEY_INCOMPLETE (1ULL<<3)        /* "incomplete" flag (meaning that
+                                             * the keyspec might not point out
+                                             * to all keys it should cover) */
 
 /* AOF states */
 #define AOF_OFF 0             /* AOF is off */
@@ -248,6 +250,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define AOF_EMPTY 2
 #define AOF_OPEN_ERR 3
 #define AOF_FAILED 4
+#define AOF_TRUNCATED 5
 
 /* Command doc flags */
 #define CMD_DOC_NONE 0
@@ -523,6 +526,13 @@ typedef struct {
     pause_type type;
     mstime_t end;
 } pause_event;
+
+/* Ways that a clusters endpoint can be described */
+typedef enum {
+    CLUSTER_ENDPOINT_TYPE_IP = 0,          /* Show IP address */
+    CLUSTER_ENDPOINT_TYPE_HOSTNAME,        /* Show hostname */
+    CLUSTER_ENDPOINT_TYPE_UNKNOWN_ENDPOINT /* Show NULL or empty */
+} cluster_endpoint_type;
 
 /* RDB active child save type. */
 #define RDB_CHILD_TYPE_NONE 0
@@ -1086,6 +1096,7 @@ typedef struct client {
     list *watched_keys;     /* Keys WATCHED for MULTI/EXEC CAS */
     dict *pubsub_channels;  /* channels a client is interested in (SUBSCRIBE) */
     list *pubsub_patterns;  /* patterns a client is interested in (SUBSCRIBE) */
+    dict *pubsubshard_channels;  /* shard level channels a client is interested in (SSUBSCRIBE) */
     sds peerid;             /* Cached peer ID. */
     sds sockname;           /* Cached connection target address. */
     listNode *client_list_node; /* list node in client list */
@@ -1174,6 +1185,7 @@ struct sharedObjectsStruct {
     *time, *pxat, *absttl, *retrycount, *force, *justid, 
     *lastid, *ping, *setid, *keepttl, *load, *createconsumer,
     *getack, *special_asterick, *special_equals, *default_username, *redacted,
+    *ssubscribebulk,*sunsubscribebulk,
     *select[PROTO_SHARED_SELECT_CMDS],
     *integers[OBJ_SHARED_INTEGERS],
     *mbulkhdr[OBJ_SHARED_BULKHDR_LEN], /* "*<value>\r\n" */
@@ -1326,6 +1338,33 @@ typedef struct redisTLSContextConfig {
     int session_cache_size;
     int session_cache_timeout;
 } redisTLSContextConfig;
+
+/*-----------------------------------------------------------------------------
+ * AOF manifest definition
+ *----------------------------------------------------------------------------*/
+typedef enum {
+    AOF_FILE_TYPE_BASE  = 'b', /* BASE file */
+    AOF_FILE_TYPE_HIST  = 'h', /* HISTORY file */
+    AOF_FILE_TYPE_INCR  = 'i', /* INCR file */
+} aof_file_type;
+
+typedef struct {
+    sds           file_name;  /* file name */
+    long long     file_seq;   /* file sequence */
+    aof_file_type file_type;  /* file type */
+} aofInfo;
+
+typedef struct {
+    aofInfo     *base_aof_info;       /* BASE file information. NULL if there is no BASE file. */
+    list        *incr_aof_list;       /* INCR AOFs list. We may have multiple INCR AOF when rewrite fails. */
+    list        *history_aof_list;    /* HISTORY AOF list. When the AOFRW success, The aofInfo contained in
+                                         `base_aof_info` and `incr_aof_list` will be moved to this list. We
+                                         will delete these AOF files when AOFRW finish. */
+    long long   curr_base_file_seq;   /* The sequence number used by the current BASE file. */
+    long long   curr_incr_file_seq;   /* The sequence number used by the current INCR file. */
+    int         dirty;                /* 1 Indicates that the aofManifest in the memory is inconsistent with
+                                         disk, we need to persist it immediately. */
+} aofManifest;
 
 /*-----------------------------------------------------------------------------
  * Global server state
@@ -1544,12 +1583,14 @@ struct redisServer {
     int aof_enabled;                /* AOF configuration */
     int aof_state;                  /* AOF_(ON|OFF|WAIT_REWRITE) */
     int aof_fsync;                  /* Kind of fsync() policy */
-    char *aof_filename;             /* Name of the AOF file */
+    char *aof_filename;             /* Basename of the AOF file and manifest file */
+    char *aof_dirname;              /* Name of the AOF directory */
     int aof_no_fsync_on_rewrite;    /* Don't fsync if a rewrite is in prog. */
     int aof_rewrite_perc;           /* Rewrite AOF if % growth is > M and... */
     off_t aof_rewrite_min_size;     /* the AOF file is at least N bytes. */
     off_t aof_rewrite_base_size;    /* AOF size on latest startup or rewrite. */
-    off_t aof_current_size;         /* AOF current size. */
+    off_t aof_current_size;         /* AOF current size (Including BASE + INCRs). */
+    off_t aof_last_incr_size;       /* The size of the latest incr AOF. */
     off_t aof_fsync_offset;         /* AOF offset which is already synced to disk. */
     int aof_flush_sleep;            /* Micros to sleep before flush. (used by tests) */
     int aof_rewrite_scheduled;      /* Rewrite once BGSAVE terminates. */
@@ -1573,16 +1614,10 @@ struct redisServer {
     int aof_use_rdb_preamble;       /* Use RDB preamble on AOF rewrites. */
     redisAtomic int aof_bio_fsync_status; /* Status of AOF fsync in bio job. */
     redisAtomic int aof_bio_fsync_errno;  /* Errno of AOF fsync in bio job. */
-    /* AOF pipes used to communicate between parent and child during rewrite. */
-    int aof_pipe_write_data_to_child;
-    int aof_pipe_read_data_from_parent;
-    int aof_pipe_write_ack_to_parent;
-    int aof_pipe_read_ack_from_child;
-    int aof_pipe_write_ack_to_child;
-    int aof_pipe_read_ack_from_parent;
-    int aof_stop_sending_diff;     /* If true stop sending accumulated diffs
-                                      to child process. */
-    sds aof_child_diff;             /* AOF diff accumulator child side. */
+    aofManifest *aof_manifest;       /* Used to track AOFs. */
+    int aof_disable_auto_gc;         /* If disable automatically deleting HISTORY type AOFs?
+                                        default no. (for testings). */
+
     /* RDB persistence */
     long long dirty;                /* Changes to DB from the last save */
     long long dirty_before_bgsave;  /* Used to restore dirty on failed BGSAVE */
@@ -1751,6 +1786,7 @@ struct redisServer {
     dict *pubsub_patterns;  /* A dict of pubsub_patterns */
     int notify_keyspace_events; /* Events to propagate via Pub/Sub. This is an
                                    xor of NOTIFY_... flags. */
+    dict *pubsubshard_channels;  /* Map channels to list of subscribed clients */
     /* Cluster */
     int cluster_enabled;      /* Is cluster enabled? */
     int cluster_port;         /* Set the cluster port for a node. */
@@ -1765,6 +1801,8 @@ struct redisServer {
     int cluster_slave_no_failover;  /* Prevent slave from starting a failover
                                        if the master is in failure state. */
     char *cluster_announce_ip;  /* IP address to announce on cluster bus. */
+    char *cluster_announce_hostname;  /* IP address to announce on cluster bus. */
+    int cluster_preferred_endpoint_type; /* Use the announced hostname when available. */
     int cluster_announce_port;     /* base port to announce on cluster bus. */
     int cluster_announce_tls_port; /* TLS port to announce on cluster bus. */
     int cluster_announce_bus_port; /* bus port to announce on cluster bus. */
@@ -1776,6 +1814,8 @@ struct redisServer {
                                         is down? */
     int cluster_config_file_lock_fd;   /* cluster config fd, will be flock */
     unsigned long long cluster_link_sendbuf_limit_bytes;  /* Memory usage limit on individual link send buffers*/
+    int cluster_drop_packet_filter; /* Debug config that allows tactically
+                                   * dropping packets of a specific type */
     /* Scripting */
     client *script_caller;       /* The client running script right now, or NULL */
     mstime_t script_time_limit;  /* Script timeout in milliseconds */
@@ -1821,6 +1861,8 @@ struct redisServer {
                                 * failover then any replica can be used. */
     int target_replica_port; /* Failover target port */
     int failover_state; /* Failover state */
+    int cluster_allow_pubsubshard_when_down; /* Is pubsubshard allowed when the cluster
+                                                is down, doesn't affect pubsub global. */
 };
 
 #define MAX_KEYS_BUFFER 256
@@ -2552,10 +2594,12 @@ void abortFailover(const char *err);
 const char *getFailoverStateString();
 
 /* Generic persistence functions */
-void startLoadingFile(FILE* fp, char* filename, int rdbflags);
+void startLoadingFile(size_t size, char* filename, int rdbflags);
 void startLoading(size_t size, int rdbflags, int async);
-void loadingProgress(off_t pos);
+void loadingAbsProgress(off_t pos);
+void loadingIncrProgress(off_t size);
 void stopLoading(int success);
+void updateLoadingFileName(char* filename);
 void startSaving(int rdbflags);
 void stopSaving(int success);
 int allPersistenceDisabled(void);
@@ -2575,16 +2619,18 @@ void flushAppendOnlyFile(int force);
 void feedAppendOnlyFile(int dictid, robj **argv, int argc);
 void aofRemoveTempFile(pid_t childpid);
 int rewriteAppendOnlyFileBackground(void);
-int loadAppendOnlyFile(char *filename);
+int loadAppendOnlyFiles(aofManifest *am);
 void stopAppendOnly(void);
 int startAppendOnly(void);
 void backgroundRewriteDoneHandler(int exitcode, int bysignal);
-void aofRewriteBufferReset(void);
-unsigned long aofRewriteBufferSize(void);
-unsigned long aofRewriteBufferMemoryUsage(void);
 ssize_t aofReadDiffFromParent(void);
 void killAppendOnlyChild(void);
 void restartAOFAfterSYNC();
+void aofLoadManifestFromDisk(void);
+void aofOpenIfNeededOnServerStart(void);
+void aofManifestFree(aofManifest *am);
+int aofDelHistoryFiles(void);
+int aofRewriteLimited(void);
 
 /* Child info */
 void openChildInfoPipe(void);
@@ -2816,9 +2862,14 @@ robj *hashTypeDup(robj *o);
 
 /* Pub / Sub */
 int pubsubUnsubscribeAllChannels(client *c, int notify);
+int pubsubUnsubscribeShardAllChannels(client *c, int notify);
+void pubsubUnsubscribeShardChannels(robj **channels, unsigned int count);
 int pubsubUnsubscribeAllPatterns(client *c, int notify);
 int pubsubPublishMessage(robj *channel, robj *message);
+int pubsubPublishMessageShard(robj *channel, robj *message);
 void addReplyPubsubMessage(client *c, robj *channel, robj *msg);
+int serverPubsubSubscriptionCount();
+int serverPubsubShardSubscriptionCount();
 
 /* Keyspace events notification */
 void notifyKeyspaceEvent(int type, char *event, robj *key, int dbid);
@@ -2902,6 +2953,7 @@ void freeReplicationBacklogRefMemAsync(list *blocks, rax *index);
 /* API to get key arguments from commands */
 int *getKeysPrepareResult(getKeysResult *result, int numkeys);
 int getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result);
+int getChannelsFromCommand(struct redisCommand *cmd, int argc, getKeysResult *result);
 void getKeysFreeResult(getKeysResult *result);
 int sintercardGetKeys(struct redisCommand *cmd,robj **argv, int argc, getKeysResult *result);
 int zunionInterDiffGetKeys(struct redisCommand *cmd,robj **argv, int argc, getKeysResult *result);
@@ -2992,7 +3044,7 @@ unsigned long LFUDecrAndReturn(robj *o);
 #define EVICT_RUNNING 1
 #define EVICT_FAIL 2
 int performEvictions(void);
-
+void startEvictionTimeProc(void);
 
 /* Keys hashing / comparison functions for dict.c hash tables. */
 uint64_t dictSdsHash(const void *key);
@@ -3184,6 +3236,9 @@ void psubscribeCommand(client *c);
 void punsubscribeCommand(client *c);
 void publishCommand(client *c);
 void pubsubCommand(client *c);
+void spublishCommand(client *c);
+void ssubscribeCommand(client *c);
+void sunsubscribeCommand(client *c);
 void watchCommand(client *c);
 void unwatchCommand(client *c);
 void clusterCommand(client *c);
@@ -3316,5 +3371,8 @@ int isTlsConfigured(void);
     printf("-- MARK %s:%d --\n", __FILE__, __LINE__)
 
 int iAmMaster(void);
+
+#define STRINGIFY_(x) #x
+#define STRINGIFY(x) STRINGIFY_(x)
 
 #endif
