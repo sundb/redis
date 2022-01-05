@@ -206,6 +206,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CMD_MODULE_GETKEYS (1ULL<<21)  /* Use the modules getkeys interface. */
 #define CMD_MODULE_NO_CLUSTER (1ULL<<22) /* Deny on Redis Cluster. */
 #define CMD_NO_ASYNC_LOADING (1ULL<<23)
+#define CMD_NO_MULTI (1ULL<<24)
 
 /* Command flags that describe ACLs categories. */
 #define ACL_CATEGORY_KEYSPACE (1ULL<<0)
@@ -386,7 +387,10 @@ typedef enum {
 
 /* Slave requirements */
 #define SLAVE_REQ_NONE 0
-#define SLAVE_REQ_RDB_FUNCTIONS_ONLY (1 << 0)
+#define SLAVE_REQ_RDB_EXCLUDE_DATA (1 << 0)      /* Exclude data from RDB */
+#define SLAVE_REQ_RDB_EXCLUDE_FUNCTIONS (1 << 1) /* Exclude functions from RDB */
+/* Mask of all bits in the slave requirements bitfield that represent non-standard (filtered) RDB requirements */
+#define SLAVE_REQ_RDB_MASK (SLAVE_REQ_RDB_EXCLUDE_DATA | SLAVE_REQ_RDB_EXCLUDE_FUNCTIONS)
 
 /* Synchronous read timeout - slave side */
 #define CONFIG_REPL_SYNCIO_TIMEOUT 5
@@ -2081,7 +2085,7 @@ typedef int redisGetKeysProc(struct redisCommand *cmd, robj **argv, int argc, ge
  * CMD_LOADING:     Allow the command while loading the database.
  *
  * CMD_NO_ASYNC_LOADING: Deny during async loading (when a replica uses diskless
-                         sync swapdb, and allows access to the old dataset)
+ *                       sync swapdb, and allows access to the old dataset)
  *
  * CMD_STALE:       Allow the command while a slave has stale data but is not
  *                  allowed to serve this data. Normally no command is accepted
@@ -2114,6 +2118,8 @@ typedef int redisGetKeysProc(struct redisCommand *cmd, robj **argv, int argc, ge
  * CMD_SENTINEL_ONLY: This command is present only when in sentinel mode.
  *
  * CMD_NO_MANDATORY_KEYS: This key arguments for this command are optional.
+ *
+ * CMD_NO_MULTI: The command is nt allowed inside a transaction
  *
  * The following additional flags are only used in order to put commands
  * in a specific ACL category. Commands can have multiple ACL categories.
@@ -2909,7 +2915,7 @@ int objectSetLRUOrLFU(robj *val, long long lfu_freq, long long lru_idle,
 #define LOOKUP_NONE 0
 #define LOOKUP_NOTOUCH (1<<0)  /* Don't update LRU. */
 #define LOOKUP_NONOTIFY (1<<1) /* Don't trigger keyspace event on key misses. */
-#define LOOKUP_NOSTATS (1<<2)  /* Don't update keyspace hits/misses couters. */
+#define LOOKUP_NOSTATS (1<<2)  /* Don't update keyspace hits/misses counters. */
 #define LOOKUP_WRITE (1<<3)    /* Delete expired keys even in replicas. */
 
 void dbAdd(redisDb *db, robj *key, robj *val);
