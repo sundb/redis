@@ -1782,7 +1782,6 @@ void initServerConfig(void) {
     server.page_size = sysconf(_SC_PAGESIZE);
     server.pause_cron = 0;
 
-    server.latency_tracking_enabled = 1;
     server.latency_tracking_info_percentiles_len = 3;
     server.latency_tracking_info_percentiles = zmalloc(sizeof(double)*(server.latency_tracking_info_percentiles_len));
     server.latency_tracking_info_percentiles[0] = 50.0;  /* p50 */
@@ -2766,6 +2765,12 @@ void redisOpArrayFree(redisOpArray *oa) {
 
 /* ====================== Commands lookup and execution ===================== */
 
+int isContainerCommandBySds(sds s) {
+    struct redisCommand *base_cmd = dictFetchValue(server.commands, s);
+    int has_subcommands = base_cmd && base_cmd->subcommands_dict;
+    return has_subcommands;
+}
+
 struct redisCommand *lookupCommandLogic(dict *commands, robj **argv, int argc) {
     struct redisCommand *base_cmd = dictFetchValue(commands, argv[0]->ptr);
     int has_subcommands = base_cmd && base_cmd->subcommands_dict;
@@ -3330,10 +3335,14 @@ int processCommand(client *c) {
      * such as wrong arity, bad command name and so forth. */
     c->cmd = c->lastcmd = lookupCommand(c->argv,c->argc);
     if (!c->cmd) {
-        if (lookupCommandBySds(c->argv[0]->ptr)) {
+        if (isContainerCommandBySds(c->argv[0]->ptr)) {
             /* If we can't find the command but argv[0] by itself is a command
              * it means we're dealing with an invalid subcommand. Print Help. */
-            addReplySubcommandSyntaxError(c);
+            sds cmd = sdsnew((char *)c->argv[0]->ptr);
+            sdstoupper(cmd);
+            rejectCommandFormat(c, "Unknown subcommand '%.128s'. Try %s HELP.",
+                                (char *)c->argv[1]->ptr, cmd);
+            sdsfree(cmd);
             return C_OK;
         }
         sds args = sdsempty();
@@ -4618,7 +4627,10 @@ void bytesToHuman(char *s, unsigned long long n) {
 sds fillPercentileDistributionLatencies(sds info, const char* histogram_name, struct hdr_histogram* histogram) {
     info = sdscatfmt(info,"latency_percentiles_usec_%s:",histogram_name);
     for (int j = 0; j < server.latency_tracking_info_percentiles_len; j++) {
-        info = sdscatprintf(info,"p%f=%.3f", server.latency_tracking_info_percentiles[j],
+        char fbuf[128];
+        size_t len = sprintf(fbuf, "%f", server.latency_tracking_info_percentiles[j]);
+        len = trimDoubleString(fbuf, len);
+        info = sdscatprintf(info,"p%s=%.3f", fbuf,
             ((double)hdr_value_at_percentile(histogram,server.latency_tracking_info_percentiles[j]))/1000.0f);
         if (j != server.latency_tracking_info_percentiles_len-1)
             info = sdscatlen(info,",",1);
