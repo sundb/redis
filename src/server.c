@@ -2121,6 +2121,10 @@ void checkTcpBacklogSettings(void) {
             serverLog(LL_WARNING,"WARNING: The TCP backlog setting of %d cannot be enforced because kern.somaxconn is set to the lower value of %d.", server.tcp_backlog, somaxconn);
         }
     }
+#elif defined(SOMAXCONN)
+    if (SOMAXCONN < server.tcp_backlog) {
+        serverLog(LL_WARNING,"WARNING: The TCP backlog setting of %d cannot be enforced because SOMAXCONN is set to the lower value of %d.", server.tcp_backlog, SOMAXCONN);
+    }
 #endif
 }
 
@@ -3543,7 +3547,8 @@ int processCommand(client *c) {
          * arguments might interfere. */
         if (c->cmd->proc == evalCommand ||
             c->cmd->proc == evalShaCommand ||
-            c->cmd->proc == fcallCommand)
+            c->cmd->proc == fcallCommand ||
+            c->cmd->proc == fcallroCommand)
         {
             server.script_oom = out_of_memory;
         }
