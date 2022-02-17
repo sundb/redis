@@ -5817,15 +5817,16 @@ void restoreCommand(client *c) {
 
     /* Remove the old key if needed. */
     int deleted = 0;
+    char *deleted_typename = NULL;
     if (replace)
-        deleted = dbDelete(c->db,key);
+        deleted = dbDelete(c->db,key,&deleted_typename);
 
     if (ttl && !absttl) ttl+=mstime();
     if (ttl && checkAlreadyExpired(ttl)) {
         if (deleted) {
             rewriteClientCommandVector(c,2,shared.del,key);
             signalModifiedKey(c,c->db,key);
-            notifyKeyspaceEvent(NOTIFY_GENERIC,"del",key,c->db->id);
+            notifyKeyspaceEvent(NOTIFY_GENERIC,deleted_typename,"del",key,c->db->id);
             server.dirty++;
         }
         decrRefCount(obj);
@@ -5847,7 +5848,7 @@ void restoreCommand(client *c) {
     }
     objectSetLRUOrLFU(obj,lfu_freq,lru_idle,lru_clock,1000);
     signalModifiedKey(c,c->db,key);
-    notifyKeyspaceEvent(NOTIFY_GENERIC,"restore",key,c->db->id);
+    notifyKeyspaceEvent(NOTIFY_GENERIC,getObjectTypeName(obj),"restore",key,c->db->id);
     addReply(c,shared.ok);
     server.dirty++;
 }
@@ -6209,9 +6210,10 @@ try_again:
         } else {
             if (!copy) {
                 /* No COPY option: remove the local key, signal the change. */
-                dbDelete(c->db,kv[j]);
+                char *deleted_typename = NULL;
+                dbDelete(c->db,kv[j],&deleted_typename);
                 signalModifiedKey(c,c->db,kv[j]);
-                notifyKeyspaceEvent(NOTIFY_GENERIC,"del",kv[j],c->db->id);
+                notifyKeyspaceEvent(NOTIFY_GENERIC,deleted_typename,"del",kv[j],c->db->id);
                 server.dirty++;
 
                 /* Populate the argument vector to replace the old one. */
@@ -6783,7 +6785,7 @@ unsigned int delKeysInSlot(unsigned int hashslot) {
         sds sdskey = dictGetKey(de);
         de = dictEntryNextInSlot(de);
         robj *key = createStringObject(sdskey, sdslen(sdskey));
-        dbDelete(&server.db[0], key);
+        dbDelete(&server.db[0], key, NULL);
         decrRefCount(key);
         j++;
     }

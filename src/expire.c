@@ -584,7 +584,8 @@ void expireGenericCommand(client *c, long long basetime, int unit) {
     when += basetime;
 
     /* No key, return zero. */
-    if (lookupKeyWrite(c->db,key) == NULL) {
+    robj *obj = lookupKeyWrite(c->db,key); 
+    if (obj == NULL) {
         addReply(c,shared.czero);
         return;
     }
@@ -635,9 +636,10 @@ void expireGenericCommand(client *c, long long basetime, int unit) {
 
     if (checkAlreadyExpired(when)) {
         robj *aux;
+        char *deleted_typename = NULL;
 
-        int deleted = server.lazyfree_lazy_expire ? dbAsyncDelete(c->db,key) :
-                                                    dbSyncDelete(c->db,key);
+        int deleted = server.lazyfree_lazy_expire ? dbAsyncDelete(c->db,key,&deleted_typename) :
+                                                    dbSyncDelete(c->db,key,&deleted_typename);
         serverAssertWithInfo(c,key,deleted);
         server.dirty++;
 
@@ -645,7 +647,7 @@ void expireGenericCommand(client *c, long long basetime, int unit) {
         aux = server.lazyfree_lazy_expire ? shared.unlink : shared.del;
         rewriteClientCommandVector(c,2,aux,key);
         signalModifiedKey(c,c->db,key);
-        notifyKeyspaceEvent(NOTIFY_GENERIC,"del",key,c->db->id);
+        notifyKeyspaceEvent(NOTIFY_GENERIC,deleted_typename,"del",key,c->db->id);
         addReply(c, shared.cone);
         return;
     } else {
@@ -656,7 +658,7 @@ void expireGenericCommand(client *c, long long basetime, int unit) {
         rewriteClientCommandVector(c, 3, shared.pexpireat, key, when_obj);
         decrRefCount(when_obj);
         signalModifiedKey(c,c->db,key);
-        notifyKeyspaceEvent(NOTIFY_GENERIC,"expire",key,c->db->id);
+        notifyKeyspaceEvent(NOTIFY_GENERIC,getObjectTypeName(obj),"expire",key,c->db->id);
         server.dirty++;
         return;
     }
@@ -728,10 +730,11 @@ void pexpiretimeCommand(client *c) {
 
 /* PERSIST key */
 void persistCommand(client *c) {
-    if (lookupKeyWrite(c->db,c->argv[1])) {
+    robj *obj = lookupKeyWrite(c->db,c->argv[1]);
+    if (obj) {
         if (removeExpire(c->db,c->argv[1])) {
             signalModifiedKey(c,c->db,c->argv[1]);
-            notifyKeyspaceEvent(NOTIFY_GENERIC,"persist",c->argv[1],c->db->id);
+            notifyKeyspaceEvent(NOTIFY_GENERIC,getObjectTypeName(obj),"persist",c->argv[1],c->db->id);
             addReply(c,shared.cone);
             server.dirty++;
         } else {

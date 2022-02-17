@@ -590,6 +590,8 @@ typedef enum {
 #define NOTIFY_KEY_MISS (1<<11)   /* m (Note: This one is excluded from NOTIFY_ALL on purpose) */
 #define NOTIFY_LOADED (1<<12)     /* module only key space notification, indicate a key loaded from rdb */
 #define NOTIFY_MODULE (1<<13)     /* d, module key space notification */
+#define NOTIFY_KEYSPACE_1 (1<<14) /* L */
+#define NOTIFY_KEYEVENT_1 (1<<15) /* F */
 #define NOTIFY_ALL (NOTIFY_GENERIC | NOTIFY_STRING | NOTIFY_LIST | NOTIFY_SET | NOTIFY_HASH | NOTIFY_ZSET | NOTIFY_EXPIRED | NOTIFY_EVICTED | NOTIFY_STREAM | NOTIFY_MODULE) /* A flag */
 
 /* Using the following macro you can run code inside serverCron() with the
@@ -640,6 +642,13 @@ typedef enum {
  * encoding version. */
 #define OBJ_MODULE 5    /* Module object. */
 #define OBJ_STREAM 6    /* Stream object. */
+
+#define TYPENAME_STRING "string"
+#define TYPENAME_LIST "list"
+#define TYPENAME_SET "set"
+#define TYPENAME_ZSET "zset"
+#define TYPENAME_HASH "hash"
+#define TYPENAME_STREAM "stream"
 
 /* Extract encver / signature from a module type ID. */
 #define REDISMODULE_TYPE_ENCVER_BITS 10
@@ -2917,13 +2926,15 @@ int pubsubUnsubscribeShardAllChannels(client *c, int notify);
 void pubsubUnsubscribeShardChannels(robj **channels, unsigned int count);
 int pubsubUnsubscribeAllPatterns(client *c, int notify);
 int pubsubPublishMessage(robj *channel, robj *message);
+typedef void (*pubsubMessageCB)(client *c, void* userdata);
+int pubsubPublishMessageWithCallback(robj *channel, pubsubMessageCB cb, void *userdata);
 int pubsubPublishMessageShard(robj *channel, robj *message);
 void addReplyPubsubMessage(client *c, robj *channel, robj *msg);
 int serverPubsubSubscriptionCount();
 int serverPubsubShardSubscriptionCount();
 
 /* Keyspace events notification */
-void notifyKeyspaceEvent(int type, char *event, robj *key, int dbid);
+void notifyKeyspaceEvent(int type, char *typename, char *event, robj *key, int dbid);
 int keyspaceEventsStringToFlags(char *classes);
 sds keyspaceEventsFlagsToString(int flags);
 
@@ -2973,8 +2984,6 @@ void dbOverwrite(redisDb *db, robj *key, robj *val);
 #define SETKEY_DOESNT_EXIST 8
 void setKey(client *c, redisDb *db, robj *key, robj *val, int flags);
 robj *dbRandomKey(redisDb *db);
-int dbSyncDelete(redisDb *db, robj *key);
-int dbDelete(redisDb *db, robj *key);
 robj *dbUnshareStringValue(redisDb *db, robj *key, robj *o);
 
 #define EMPTYDB_NO_FLAGS 0      /* No flags. */
@@ -2993,7 +3002,9 @@ void signalModifiedKey(client *c, redisDb *db, robj *key);
 void signalFlushedDb(int dbid, int async);
 void scanGenericCommand(client *c, robj *o, unsigned long cursor);
 int parseScanCursorOrReply(client *c, robj *o, unsigned long *cursor);
-int dbAsyncDelete(redisDb *db, robj *key);
+int dbAsyncDelete(redisDb *db, robj *key, char **typename);
+int dbSyncDelete(redisDb *db, robj *key, char **typename);
+int dbDelete(redisDb *db, robj *key, char **typename);
 void emptyDbAsync(redisDb *db);
 size_t lazyfreeGetPendingObjectsCount(void);
 size_t lazyfreeGetFreedObjectsCount(void);

@@ -122,7 +122,7 @@ void addReplyPubsubPatMessage(client *c, robj *pat, robj *channel, robj *msg) {
     addReply(c,shared.pmessagebulk);
     addReplyBulk(c,pat);
     addReplyBulk(c,channel);
-    addReplyBulk(c,msg);
+    if (msg) addReplyBulk(c,msg);
 }
 
 /* Send the pubsub subscription notification to the client. */
@@ -444,7 +444,7 @@ int pubsubUnsubscribeAllPatterns(client *c, int notify) {
 /*
  * Publish a message to all the subscribers.
  */
-int pubsubPublishMessageInternal(robj *channel, robj *message, pubsubtype type) {
+int pubsubPublishMessageInternal(robj *channel, pubsubMessageCB cb, void *userdata, pubsubtype type) {
     int receivers = 0;
     dictEntry *de;
     dictIterator *di;
@@ -461,7 +461,8 @@ int pubsubPublishMessageInternal(robj *channel, robj *message, pubsubtype type) 
         listRewind(list,&li);
         while ((ln = listNext(&li)) != NULL) {
             client *c = ln->value;
-            addReplyPubsubMessage(c,channel,message);
+            addReplyPubsubMessage(c,channel,NULL);
+            cb(c, userdata);
             updateClientMemUsage(c);
             receivers++;
         }
@@ -487,7 +488,8 @@ int pubsubPublishMessageInternal(robj *channel, robj *message, pubsubtype type) 
             listRewind(clients,&li);
             while ((ln = listNext(&li)) != NULL) {
                 client *c = listNodeValue(ln);
-                addReplyPubsubPatMessage(c,pattern,channel,message);
+                addReplyPubsubPatMessage(c,pattern,channel,NULL);
+                cb(c, userdata);
                 updateClientMemUsage(c);
                 receivers++;
             }
@@ -498,14 +500,23 @@ int pubsubPublishMessageInternal(robj *channel, robj *message, pubsubtype type) 
     return receivers;
 }
 
+void pubsubPublishMessageCB(client *c, void *userdata) {
+    addReplyBulk(c, (robj *)userdata);
+}
+
 /* Publish a message to all the subscribers. */
 int pubsubPublishMessage(robj *channel, robj *message) {
-    return pubsubPublishMessageInternal(channel,message,pubSubType);
+    return pubsubPublishMessageInternal(channel,pubsubPublishMessageCB,message,pubSubType);
+}
+
+/* Publish a message to all the subscribers with callback. */
+int pubsubPublishMessageWithCallback(robj *channel, pubsubMessageCB cb, void *userdata) {
+    return pubsubPublishMessageInternal(channel,cb,userdata,pubSubType);
 }
 
 /* Publish a shard message to all the subscribers. */
 int pubsubPublishMessageShard(robj *channel, robj *message) {
-    return pubsubPublishMessageInternal(channel, message, pubSubShardType);
+    return pubsubPublishMessageInternal(channel, pubsubPublishMessageCB, message, pubSubShardType);
 }
 
 
@@ -677,7 +688,7 @@ void channelList(client *c, sds pat, dict *pubsub_channels) {
 
 /* SPUBLISH <channel> <message> */
 void spublishCommand(client *c) {
-    int receivers = pubsubPublishMessageInternal(c->argv[1], c->argv[2], pubSubShardType);
+    int receivers = pubsubPublishMessageShard(c->argv[1], c->argv[2]);
     if (server.cluster_enabled) {
         clusterPropagatePublishShard(c->argv[1], c->argv[2]);
     } else {

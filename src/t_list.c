@@ -259,7 +259,7 @@ void pushGenericCommand(client *c, int where, int xx) {
 
     char *event = (where == LIST_HEAD) ? "lpush" : "rpush";
     signalModifiedKey(c,c->db,c->argv[1]);
-    notifyKeyspaceEvent(NOTIFY_LIST,event,c->argv[1],c->db->id);
+    notifyKeyspaceEvent(NOTIFY_LIST,TYPENAME_LIST,event,c->argv[1],c->db->id);
 }
 
 /* LPUSH <key> <element> [<element> ...] */
@@ -315,7 +315,7 @@ void linsertCommand(client *c) {
 
     if (inserted) {
         signalModifiedKey(c,c->db,c->argv[1]);
-        notifyKeyspaceEvent(NOTIFY_LIST,"linsert",
+        notifyKeyspaceEvent(NOTIFY_LIST,TYPENAME_LIST,"linsert",
                             c->argv[1],c->db->id);
         server.dirty++;
     } else {
@@ -380,7 +380,7 @@ void lsetCommand(client *c) {
         } else {
             addReply(c,shared.ok);
             signalModifiedKey(c,c->db,c->argv[1]);
-            notifyKeyspaceEvent(NOTIFY_LIST,"lset",c->argv[1],c->db->id);
+            notifyKeyspaceEvent(NOTIFY_LIST,TYPENAME_LIST,"lset",c->argv[1],c->db->id);
             server.dirty++;
         }
     } else {
@@ -469,12 +469,12 @@ void addListRangeReply(client *c, robj *o, long start, long end, int reverse) {
 void listElementsRemoved(client *c, robj *key, int where, robj *o, long count, int *deleted) {
     char *event = (where == LIST_HEAD) ? "lpop" : "rpop";
 
-    notifyKeyspaceEvent(NOTIFY_LIST, event, key, c->db->id);
+    notifyKeyspaceEvent(NOTIFY_LIST,TYPENAME_LIST, event, key, c->db->id);
     if (listTypeLength(o) == 0) {
         if (deleted) *deleted = 1;
 
-        dbDelete(c->db, key);
-        notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, c->db->id);
+        dbDelete(c->db, key,NULL);
+        notifyKeyspaceEvent(NOTIFY_GENERIC, TYPENAME_LIST, "del", key, c->db->id);
     } else {
         if (deleted) *deleted = 0;
     }
@@ -635,10 +635,10 @@ void ltrimCommand(client *c) {
         serverPanic("Unknown list encoding");
     }
 
-    notifyKeyspaceEvent(NOTIFY_LIST,"ltrim",c->argv[1],c->db->id);
+    notifyKeyspaceEvent(NOTIFY_LIST,TYPENAME_LIST,"ltrim",c->argv[1],c->db->id);
     if (listTypeLength(o) == 0) {
-        dbDelete(c->db,c->argv[1]);
-        notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],c->db->id);
+        dbDelete(c->db,c->argv[1],NULL);
+        notifyKeyspaceEvent(NOTIFY_GENERIC,TYPENAME_LIST,"del",c->argv[1],c->db->id);
     }
     signalModifiedKey(c,c->db,c->argv[1]);
     server.dirty += (ltrim + rtrim);
@@ -790,12 +790,12 @@ void lremCommand(client *c) {
 
     if (removed) {
         signalModifiedKey(c,c->db,c->argv[1]);
-        notifyKeyspaceEvent(NOTIFY_LIST,"lrem",c->argv[1],c->db->id);
+        notifyKeyspaceEvent(NOTIFY_LIST,TYPENAME_LIST,"lrem",c->argv[1],c->db->id);
     }
 
     if (listTypeLength(subject) == 0) {
-        dbDelete(c->db,c->argv[1]);
-        notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],c->db->id);
+        dbDelete(c->db,c->argv[1],NULL);
+        notifyKeyspaceEvent(NOTIFY_GENERIC,TYPENAME_LIST,"del",c->argv[1],c->db->id);
     }
 
     addReplyLongLong(c,removed);
@@ -812,7 +812,7 @@ void lmoveHandlePush(client *c, robj *dstkey, robj *dstobj, robj *value,
     }
     signalModifiedKey(c,c->db,dstkey);
     listTypePush(dstobj,value,where);
-    notifyKeyspaceEvent(NOTIFY_LIST,
+    notifyKeyspaceEvent(NOTIFY_LIST,TYPENAME_LIST,
                         where == LIST_HEAD ? "lpush" : "rpush",
                         dstkey,
                         c->db->id);
@@ -863,13 +863,13 @@ void lmoveGenericCommand(client *c, int wherefrom, int whereto) {
         decrRefCount(value);
 
         /* Delete the source list when it is empty */
-        notifyKeyspaceEvent(NOTIFY_LIST,
+        notifyKeyspaceEvent(NOTIFY_LIST,TYPENAME_LIST,
                             wherefrom == LIST_HEAD ? "lpop" : "rpop",
                             touchedkey,
                             c->db->id);
         if (listTypeLength(sobj) == 0) {
-            dbDelete(c->db,touchedkey);
-            notifyKeyspaceEvent(NOTIFY_GENERIC,"del",
+            dbDelete(c->db,touchedkey,NULL);
+            notifyKeyspaceEvent(NOTIFY_GENERIC,TYPENAME_LIST,"del",
                                 touchedkey,c->db->id);
         }
         signalModifiedKey(c,c->db,touchedkey);
@@ -979,7 +979,7 @@ void serveClientBlockedOnList(client *receiver, robj *o, robj *key, robj *dstkey
 
         /* Notify event. */
         char *event = (wherefrom == LIST_HEAD) ? "lpop" : "rpop";
-        notifyKeyspaceEvent(NOTIFY_LIST,event,key,receiver->db->id);
+        notifyKeyspaceEvent(NOTIFY_LIST,TYPENAME_LIST,event,key,receiver->db->id);
     } else {
         /* BLMOVE */
         robj *dstobj =
@@ -1001,7 +1001,7 @@ void serveClientBlockedOnList(client *receiver, robj *o, robj *key, robj *dstkey
             alsoPropagate(db->id,argv,(isbrpoplpush ? 3 : 5),PROPAGATE_AOF|PROPAGATE_REPL);
 
             /* Notify event ("lpush" or "rpush" was notified by lmoveHandlePush). */
-            notifyKeyspaceEvent(NOTIFY_LIST,wherefrom == LIST_TAIL ? "rpop" : "lpop",
+            notifyKeyspaceEvent(NOTIFY_LIST,TYPENAME_LIST,wherefrom == LIST_TAIL ? "rpop" : "lpop",
                                 key,receiver->db->id);
         }
     }
@@ -1011,8 +1011,8 @@ void serveClientBlockedOnList(client *receiver, robj *o, robj *key, robj *dstkey
     if (listTypeLength(o) == 0) {
         if (deleted) *deleted = 1;
 
-        dbDelete(receiver->db, key);
-        notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, receiver->db->id);
+        dbDelete(receiver->db, key, NULL);
+        notifyKeyspaceEvent(NOTIFY_GENERIC, TYPENAME_LIST, "del", key, receiver->db->id);
     }
     /* We don't call signalModifiedKey() as it was already called
      * when an element was pushed on the list. */

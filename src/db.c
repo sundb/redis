@@ -116,7 +116,8 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
         /* TODO: Use separate hits stats for WRITE */
     } else {
         if (!(flags & (LOOKUP_NONOTIFY | LOOKUP_WRITE)))
-            notifyKeyspaceEvent(NOTIFY_KEY_MISS, "keymiss", key, db->id);
+            /* todo: how to deal key missing */
+            notifyKeyspaceEvent(NOTIFY_KEY_MISS, "", "keymiss", key, db->id);
         if (!(flags & (LOOKUP_NOSTATS | LOOKUP_WRITE)))
             server.stat_keyspace_misses++;
         /* TODO: Use separate misses stats and notify event for WRITE */
@@ -302,13 +303,14 @@ robj *dbRandomKey(redisDb *db) {
 }
 
 /* Helper for sync and async delete. */
-static int dbGenericDelete(redisDb *db, robj *key, int async) {
+static int dbGenericDelete(redisDb *db, robj *key, int async, char **typename) {
     /* Deleting an entry from the expires dict will not free the sds of
      * the key, because it is shared with the main dictionary. */
     if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
     dictEntry *de = dictUnlink(db->dict,key->ptr);
     if (de) {
         robj *val = dictGetVal(de);
+        if (typename) *typename = getObjectTypeName(val);
         /* Tells the module that the key has been unlinked from the database. */
         moduleNotifyKeyUnlink(key,val,db->id);
         if (async) {
@@ -324,20 +326,20 @@ static int dbGenericDelete(redisDb *db, robj *key, int async) {
 }
 
 /* Delete a key, value, and associated expiration entry if any, from the DB */
-int dbSyncDelete(redisDb *db, robj *key) {
-    return dbGenericDelete(db, key, 0);
+int dbSyncDelete(redisDb *db, robj *key, char **typename) {
+    return dbGenericDelete(db, key, 0, typename);
 }
 
 /* Delete a key, value, and associated expiration entry if any, from the DB. If
  * the value consists of many allocations, it may be freed asynchronously. */
-int dbAsyncDelete(redisDb *db, robj *key) {
-    return dbGenericDelete(db, key, 1);
+int dbAsyncDelete(redisDb *db, robj *key, char **typename) {
+    return dbGenericDelete(db, key, 1, typename);
 }
 
 /* This is a wrapper whose behavior depends on the Redis lazy free
  * configuration. Deletes the key synchronously or asynchronously. */
-int dbDelete(redisDb *db, robj *key) {
-    return dbGenericDelete(db, key, server.lazyfree_lazy_server_del);
+int dbDelete(redisDb *db, robj *key, char **typename) {
+    return dbGenericDelete(db, key, server.lazyfree_lazy_server_del, typename);
 }
 
 /* Prepare the string object stored at 'key' to be modified destructively
@@ -648,14 +650,15 @@ void flushallCommand(client *c) {
 /* This command implements DEL and LAZYDEL. */
 void delGenericCommand(client *c, int lazy) {
     int numdel = 0, j;
+    char *deleted_typename = NULL;
 
     for (j = 1; j < c->argc; j++) {
         expireIfNeeded(c->db,c->argv[j],0);
-        int deleted  = lazy ? dbAsyncDelete(c->db,c->argv[j]) :
-                              dbSyncDelete(c->db,c->argv[j]);
+        int deleted  = lazy ? dbAsyncDelete(c->db,c->argv[j],&deleted_typename) :
+                              dbSyncDelete(c->db,c->argv[j],&deleted_typename);
         if (deleted) {
             signalModifiedKey(c,c->db,c->argv[j]);
-            notifyKeyspaceEvent(NOTIFY_GENERIC,
+            notifyKeyspaceEvent(NOTIFY_GENERIC,deleted_typename,
                 "del",c->argv[j],c->db->id);
             server.dirty++;
             numdel++;
@@ -1010,12 +1013,12 @@ char* getObjectTypeName(robj *o) {
         type = "none";
     } else {
         switch(o->type) {
-        case OBJ_STRING: type = "string"; break;
-        case OBJ_LIST: type = "list"; break;
-        case OBJ_SET: type = "set"; break;
-        case OBJ_ZSET: type = "zset"; break;
-        case OBJ_HASH: type = "hash"; break;
-        case OBJ_STREAM: type = "stream"; break;
+        case OBJ_STRING: type = TYPENAME_STRING; break;
+        case OBJ_LIST: type = TYPENAME_LIST; break;
+        case OBJ_SET: type = TYPENAME_SET; break;
+        case OBJ_ZSET: type = TYPENAME_ZSET; break;
+        case OBJ_HASH: type = TYPENAME_HASH; break;
+        case OBJ_STREAM: type = TYPENAME_STREAM; break;
         case OBJ_MODULE: {
             moduleValue *mv = o->ptr;
             type = mv->type->name;
@@ -1097,6 +1100,7 @@ void renameGenericCommand(client *c, int nx) {
     robj *o;
     long long expire;
     int samekey = 0;
+    char *deleted_typename = NULL;
 
     /* When source and dest key is the same, no operation is performed,
      * if the key exists, however we still return an error on unexisting key. */
@@ -1120,16 +1124,16 @@ void renameGenericCommand(client *c, int nx) {
         }
         /* Overwrite: delete the old key before creating the new one
          * with the same name. */
-        dbDelete(c->db,c->argv[2]);
+        dbDelete(c->db,c->argv[2],NULL);
     }
     dbAdd(c->db,c->argv[2],o);
     if (expire != -1) setExpire(c,c->db,c->argv[2],expire);
-    dbDelete(c->db,c->argv[1]);
+    dbDelete(c->db,c->argv[1],&deleted_typename);
     signalModifiedKey(c,c->db,c->argv[1]);
     signalModifiedKey(c,c->db,c->argv[2]);
-    notifyKeyspaceEvent(NOTIFY_GENERIC,"rename_from",
+    notifyKeyspaceEvent(NOTIFY_GENERIC,deleted_typename,"rename_from",
         c->argv[1],c->db->id);
-    notifyKeyspaceEvent(NOTIFY_GENERIC,"rename_to",
+    notifyKeyspaceEvent(NOTIFY_GENERIC,deleted_typename,"rename_to",
         c->argv[2],c->db->id);
     server.dirty++;
     addReply(c,nx ? shared.cone : shared.ok);
@@ -1184,7 +1188,8 @@ void moveCommand(client *c) {
     expire = getExpire(c->db,c->argv[1]);
 
     /* Return zero if the key already exists in the target DB */
-    if (lookupKeyWrite(dst,c->argv[1]) != NULL) {
+    robj *obj = lookupKeyWrite(dst,c->argv[1]);
+    if (obj != NULL) {
         addReply(c,shared.czero);
         return;
     }
@@ -1193,12 +1198,13 @@ void moveCommand(client *c) {
     incrRefCount(o);
 
     /* OK! key moved, free the entry in the source DB */
-    dbDelete(src,c->argv[1]);
+    char *deleted_typename = NULL;
+    dbDelete(src,c->argv[1],&deleted_typename);
     signalModifiedKey(c,src,c->argv[1]);
     signalModifiedKey(c,dst,c->argv[1]);
-    notifyKeyspaceEvent(NOTIFY_GENERIC,
+    notifyKeyspaceEvent(NOTIFY_GENERIC,deleted_typename,
                 "move_from",c->argv[1],src->id);
-    notifyKeyspaceEvent(NOTIFY_GENERIC,
+    notifyKeyspaceEvent(NOTIFY_GENERIC,deleted_typename,
                 "move_to",c->argv[1],dst->id);
 
     server.dirty++;
@@ -1293,7 +1299,7 @@ void copyCommand(client *c) {
     }
 
     if (delete) {
-        dbDelete(dst,newkey);
+        dbDelete(dst,newkey,NULL);
     }
 
     dbAdd(dst,newkey,newobj);
@@ -1301,7 +1307,7 @@ void copyCommand(client *c) {
 
     /* OK! key copied */
     signalModifiedKey(c,dst,c->argv[2]);
-    notifyKeyspaceEvent(NOTIFY_GENERIC,"copy_to",c->argv[2],dst->id);
+    notifyKeyspaceEvent(NOTIFY_GENERIC,getObjectTypeName(newobj),"copy_to",c->argv[2],dst->id);
 
     server.dirty++;
     addReply(c,shared.cone);
@@ -1497,15 +1503,16 @@ long long getExpire(redisDb *db, robj *key) {
 
 /* Delete the specified expired key and propagate expire. */
 void deleteExpiredKeyAndPropagate(redisDb *db, robj *keyobj) {
+    char *deleted_typename = NULL;
     mstime_t expire_latency;
     latencyStartMonitor(expire_latency);
     if (server.lazyfree_lazy_expire)
-        dbAsyncDelete(db,keyobj);
+        dbAsyncDelete(db,keyobj,&deleted_typename);
     else
-        dbSyncDelete(db,keyobj);
+        dbSyncDelete(db,keyobj,&deleted_typename);
     latencyEndMonitor(expire_latency);
     latencyAddSampleIfNeeded("expire-del",expire_latency);
-    notifyKeyspaceEvent(NOTIFY_EXPIRED,"expired",keyobj,db->id);
+    notifyKeyspaceEvent(NOTIFY_EXPIRED,deleted_typename,"expired",keyobj,db->id);
     signalModifiedKey(NULL, db, keyobj);
     propagateDeletion(db,keyobj,server.lazyfree_lazy_expire);
     server.stat_expiredkeys++;

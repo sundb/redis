@@ -57,6 +57,8 @@ int keyspaceEventsStringToFlags(char *classes) {
         case 't': flags |= NOTIFY_STREAM; break;
         case 'm': flags |= NOTIFY_KEY_MISS; break;
         case 'd': flags |= NOTIFY_MODULE; break;
+        case 'L': flags |= NOTIFY_KEYSPACE_1; break;
+        case 'F': flags |= NOTIFY_KEYEVENT_1; break;
         default: return -1;
         }
     }
@@ -87,19 +89,46 @@ sds keyspaceEventsFlagsToString(int flags) {
     }
     if (flags & NOTIFY_KEYSPACE) res = sdscatlen(res,"K",1);
     if (flags & NOTIFY_KEYEVENT) res = sdscatlen(res,"E",1);
+    if (flags & NOTIFY_KEYSPACE_1) res = sdscatlen(res,"L",1);
+    if (flags & NOTIFY_KEYEVENT_1) res = sdscatlen(res,"F",1);
     if (flags & NOTIFY_KEY_MISS) res = sdscatlen(res,"m",1);
     return res;
 }
 
-/* The API provided to the rest of the Redis core is a simple function:
- *
- * notifyKeyspaceEvent(int type, char *event, robj *key, int dbid);
- *
- * 'type' is the notification class we define in `server.h`.
- * 'event' is a C string representing the event name.
- * 'key' is a Redis object representing the key name.
- * 'dbid' is the database ID where the key lives.  */
-void notifyKeyspaceEvent(int type, char *event, robj *key, int dbid) {
+typedef struct keyspace_message {
+    robj *key;
+    char *event;
+    char *typename;
+} keyspace_message;
+
+void addReplyKeyspace(client *c, keyspace_message *km) {
+    addReplyArrayLen(c, 3);
+    addReplyBulk(c, km->key);
+    addReplyBulkCString(c, km->typename);
+    addReplyBulkCString(c, km->event);
+}
+
+/* callback for pubsubPublishMessageWithCallback. */
+void pubsubKeyspaceMessageCB(client *c, void *userdata) {
+    keyspace_message *km = (keyspace_message*)userdata;
+    if (c->resp == 2) {
+        addReplyBulkCString(c, km->event);
+    } else {
+        addReplyKeyspace(c, km);
+    }
+}
+
+/* callback for pubsubPublishMessageWithCallback. */
+void pubsubKeyeventMessageCB(client *c, void *userdata) {
+    keyspace_message *km = (keyspace_message*)userdata;
+    if (c->resp == 2) {
+        addReplyBulk(c, km->key);
+    } else {
+        addReplyKeyspace(c, km);
+    }
+}
+
+void notifyKeyspaceEvent(int type, char *typename, char *event, robj *key, int dbid) {
     sds chan;
     robj *chanobj, *eventobj;
     int len = -1;
@@ -115,6 +144,7 @@ void notifyKeyspaceEvent(int type, char *event, robj *key, int dbid) {
     if (!(server.notify_keyspace_events & type)) return;
 
     eventobj = createStringObject(event,strlen(event));
+    keyspace_message ke = {key, event, typename};
 
     /* __keyspace@<db>__:<key> <event> notifications. */
     if (server.notify_keyspace_events & NOTIFY_KEYSPACE) {
@@ -139,5 +169,22 @@ void notifyKeyspaceEvent(int type, char *event, robj *key, int dbid) {
         pubsubPublishMessage(chanobj, key);
         decrRefCount(chanobj);
     }
+
+    /* __keyspace@<db>@<typename>__:<key> <event> notifications. */
+    if (server.notify_keyspace_events & NOTIFY_KEYSPACE_1) {
+        chan = sdscatfmt(sdsempty(), "__keyspace@%i@%s__:%S", dbid, typename, key->ptr);
+        chanobj = createObject(OBJ_STRING, chan);
+        pubsubPublishMessageWithCallback(chanobj, pubsubKeyspaceMessageCB, &ke);
+        decrRefCount(chanobj);
+    }
+
+    /* __keyspace@<db>@<typename>__:<key> <event> notifications. */
+    if (server.notify_keyspace_events & NOTIFY_KEYEVENT_1) {
+        chan = sdscatfmt(sdsempty(), "__keyevent@%i@%s__:%s", dbid, typename, event);
+        chanobj = createObject(OBJ_STRING, chan);
+        pubsubPublishMessageWithCallback(chanobj, pubsubKeyeventMessageCB, &ke);
+        decrRefCount(chanobj);
+    }
+
     decrRefCount(eventobj);
 }

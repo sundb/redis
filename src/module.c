@@ -626,7 +626,7 @@ int moduleDelKeyIfEmpty(RedisModuleKey *key) {
 
     if (isempty) {
         if (key->iter) moduleFreeKeyIterator(key);
-        dbDelete(key->db,key->key);
+        dbDelete(key->db,key->key,NULL);
         key->value = NULL;
         return 1;
     } else {
@@ -3564,7 +3564,7 @@ size_t RM_ValueLength(RedisModuleKey *key) {
 int RM_DeleteKey(RedisModuleKey *key) {
     if (!(key->mode & REDISMODULE_WRITE)) return REDISMODULE_ERR;
     if (key->value) {
-        dbDelete(key->db,key->key);
+        dbDelete(key->db,key->key,NULL);
         key->value = NULL;
     }
     return REDISMODULE_OK;
@@ -3578,7 +3578,7 @@ int RM_DeleteKey(RedisModuleKey *key) {
 int RM_UnlinkKey(RedisModuleKey *key) {
     if (!(key->mode & REDISMODULE_WRITE)) return REDISMODULE_ERR;
     if (key->value) {
-        dbAsyncDelete(key->db,key->key);
+        dbAsyncDelete(key->db,key->key,NULL);
         key->value = NULL;
     }
     return REDISMODULE_OK;
@@ -7467,10 +7467,20 @@ int RM_GetNotifyKeyspaceEvents() {
 }
 
 /* Expose notifyKeyspaceEvent to modules */
-int RM_NotifyKeyspaceEvent(RedisModuleCtx *ctx, int type, const char *event, RedisModuleString *key) {
+int RM_NotifyKeyspaceEvent(RedisModuleCtx *ctx, int type, const char *event, RedisModuleString *key)
+{
     if (!ctx || !ctx->client)
         return REDISMODULE_ERR;
-    notifyKeyspaceEvent(type, (char *)event, key, ctx->client->db->id);
+    notifyKeyspaceEvent(type, "", (char *)event, key, ctx->client->db->id);
+    return REDISMODULE_OK;
+}
+
+/* Expose notifyKeyspaceEvent to modules */
+int RM_NotifyKeyspaceEventWithTypename(RedisModuleCtx *ctx, int type, const char *typename, const char *event, RedisModuleString *key)
+{
+    if (!ctx || !ctx->client)
+        return REDISMODULE_ERR;
+    notifyKeyspaceEvent(type, (char *)typename, (char *)event, key, ctx->client->db->id);
     return REDISMODULE_OK;
 }
 
@@ -11562,6 +11572,7 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(DigestAddLongLong);
     REGISTER_API(DigestEndSequence);
     REGISTER_API(NotifyKeyspaceEvent);
+    REGISTER_API(NotifyKeyspaceEventWithTypename);
     REGISTER_API(GetNotifyKeyspaceEvents);
     REGISTER_API(SubscribeToKeyspaceEvents);
     REGISTER_API(RegisterClusterMessageReceiver);

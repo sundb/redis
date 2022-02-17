@@ -565,12 +565,12 @@ void sortCommandGeneric(client *c, int readonly) {
         }
         if (outputlen) {
             setKey(c,c->db,storekey,sobj,0);
-            notifyKeyspaceEvent(NOTIFY_LIST,"sortstore",storekey,
+            notifyKeyspaceEvent(NOTIFY_LIST,TYPENAME_LIST,"sortstore",storekey,
                                 c->db->id);
             server.dirty += outputlen;
-        } else if (dbDelete(c->db,storekey)) {
+        } else if (dbDelete(c->db,storekey,NULL)) {
             signalModifiedKey(c,c->db,storekey);
-            notifyKeyspaceEvent(NOTIFY_GENERIC,"del",storekey,c->db->id);
+            notifyKeyspaceEvent(NOTIFY_GENERIC,TYPENAME_LIST,"del",storekey,c->db->id);
             server.dirty++;
         }
         decrRefCount(sobj);

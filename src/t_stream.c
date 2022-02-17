@@ -1866,13 +1866,13 @@ void xaddCommand(client *c) {
     addReplyStreamID(c,&id);
 
     signalModifiedKey(c,c->db,c->argv[1]);
-    notifyKeyspaceEvent(NOTIFY_STREAM,"xadd",c->argv[1],c->db->id);
+    notifyKeyspaceEvent(NOTIFY_STREAM,TYPENAME_STREAM,"xadd",c->argv[1],c->db->id);
     server.dirty++;
 
     /* Trim if needed. */
     if (parsed_args.trim_strategy != TRIM_STRATEGY_NONE) {
         if (streamTrim(s, &parsed_args)) {
-            notifyKeyspaceEvent(NOTIFY_STREAM,"xtrim",c->argv[1],c->db->id);
+            notifyKeyspaceEvent(NOTIFY_STREAM,TYPENAME_STREAM,"xtrim",c->argv[1],c->db->id);
         }
         if (parsed_args.approx_trim) {
             /* In case our trimming was limited (by LIMIT or by ~) we must
@@ -2349,7 +2349,7 @@ streamConsumer *streamCreateConsumer(streamCG *cg, sds name, robj *key, int dbid
     consumer->pel = raxNew();
     consumer->seen_time = mstime();
     if (dirty) server.dirty++;
-    if (notify) notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-createconsumer",key,dbid);
+    if (notify) notifyKeyspaceEvent(NOTIFY_STREAM,TYPENAME_STREAM,"xgroup-createconsumer",key,dbid);
     return consumer;
 }
 
@@ -2491,7 +2491,7 @@ NULL
         if (cg) {
             addReply(c,shared.ok);
             server.dirty++;
-            notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-create",
+            notifyKeyspaceEvent(NOTIFY_STREAM,TYPENAME_STREAM,"xgroup-create",
                                 c->argv[2],c->db->id);
         } else {
             addReplyError(c,"-BUSYGROUP Consumer Group name already exists");
@@ -2506,14 +2506,14 @@ NULL
         cg->last_id = id;
         addReply(c,shared.ok);
         server.dirty++;
-        notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-setid",c->argv[2],c->db->id);
+        notifyKeyspaceEvent(NOTIFY_STREAM,TYPENAME_STREAM,"xgroup-setid",c->argv[2],c->db->id);
     } else if (!strcasecmp(opt,"DESTROY") && c->argc == 4) {
         if (cg) {
             raxRemove(s->cgroups,(unsigned char*)grpname,sdslen(grpname),NULL);
             streamFreeCG(cg);
             addReply(c,shared.cone);
             server.dirty++;
-            notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-destroy",
+            notifyKeyspaceEvent(NOTIFY_STREAM,TYPENAME_STREAM,"xgroup-destroy",
                                 c->argv[2],c->db->id);
             /* We want to unblock any XREADGROUP consumers with -NOGROUP. */
             signalKeyAsReady(c->db,c->argv[2],OBJ_STREAM);
@@ -2533,7 +2533,7 @@ NULL
             pending = raxSize(consumer->pel);
             streamDelConsumer(cg,consumer);
             server.dirty++;
-            notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-delconsumer",
+            notifyKeyspaceEvent(NOTIFY_STREAM,TYPENAME_STREAM,"xgroup-delconsumer",
                                 c->argv[2],c->db->id);
         }
         addReplyLongLong(c,pending);
@@ -2569,7 +2569,7 @@ void xsetidCommand(client *c) {
     s->last_id = id;
     addReply(c,shared.ok);
     server.dirty++;
-    notifyKeyspaceEvent(NOTIFY_STREAM,"xsetid",c->argv[1],c->db->id);
+    notifyKeyspaceEvent(NOTIFY_STREAM,TYPENAME_STREAM,"xsetid",c->argv[1],c->db->id);
 }
 
 /* XACK <key> <group> <id> <id> ... <id>
@@ -3296,7 +3296,7 @@ void xdelCommand(client *c) {
     /* Propagate the write if needed. */
     if (deleted) {
         signalModifiedKey(c,c->db,c->argv[1]);
-        notifyKeyspaceEvent(NOTIFY_STREAM,"xdel",c->argv[1],c->db->id);
+        notifyKeyspaceEvent(NOTIFY_STREAM,TYPENAME_STREAM,"xdel",c->argv[1],c->db->id);
         server.dirty += deleted;
     }
     addReplyLongLong(c,deleted);
@@ -3344,7 +3344,7 @@ void xtrimCommand(client *c) {
     /* Perform the trimming. */
     int64_t deleted = streamTrim(s, &parsed_args);
     if (deleted) {
-        notifyKeyspaceEvent(NOTIFY_STREAM,"xtrim",c->argv[1],c->db->id);
+        notifyKeyspaceEvent(NOTIFY_STREAM,TYPENAME_STREAM,"xtrim",c->argv[1],c->db->id);
         if (parsed_args.approx_trim) {
             /* In case our trimming was limited (by LIMIT or by ~) we must
              * re-write the relevant trim argument to make sure there will be

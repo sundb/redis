@@ -1078,6 +1078,7 @@ REDISMODULE_API int (*RedisModule_ThreadSafeContextTryLock)(RedisModuleCtx *ctx)
 REDISMODULE_API void (*RedisModule_ThreadSafeContextUnlock)(RedisModuleCtx *ctx) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_SubscribeToKeyspaceEvents)(RedisModuleCtx *ctx, int types, RedisModuleNotificationFunc cb) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_NotifyKeyspaceEvent)(RedisModuleCtx *ctx, int type, const char *event, RedisModuleString *key) REDISMODULE_ATTR;
+REDISMODULE_API int (*RedisModule_NotifyKeyspaceEventWithTypename)(RedisModuleCtx *ctx, int type, const char *typename, const char *event, RedisModuleString *key) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_GetNotifyKeyspaceEvents)() REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_BlockedClientDisconnected)(RedisModuleCtx *ctx) REDISMODULE_ATTR;
 REDISMODULE_API void (*RedisModule_RegisterClusterMessageReceiver)(RedisModuleCtx *ctx, uint8_t type, RedisModuleClusterMessageReceiver callback) REDISMODULE_ATTR;
@@ -1400,6 +1401,7 @@ static int RedisModule_Init(RedisModuleCtx *ctx, const char *name, int ver, int 
     REDISMODULE_GET_API(SetDisconnectCallback);
     REDISMODULE_GET_API(SubscribeToKeyspaceEvents);
     REDISMODULE_GET_API(NotifyKeyspaceEvent);
+    REDISMODULE_GET_API(NotifyKeyspaceEventWithTypename);
     REDISMODULE_GET_API(GetNotifyKeyspaceEvents);
     REDISMODULE_GET_API(BlockedClientDisconnected);
     REDISMODULE_GET_API(RegisterClusterMessageReceiver);

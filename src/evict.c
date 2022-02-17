@@ -667,6 +667,7 @@ int performEvictions(void) {
         if (bestkey) {
             db = server.db+bestdbid;
             robj *keyobj = createStringObject(bestkey,sdslen(bestkey));
+            char *deleted_typename = NULL;
             /* We compute the amount of memory freed by db*Delete() alone.
              * It is possible that actually the memory needed to propagate
              * the DEL in AOF and replication link is greater than the one
@@ -680,16 +681,16 @@ int performEvictions(void) {
             delta = (long long) zmalloc_used_memory();
             latencyStartMonitor(eviction_latency);
             if (server.lazyfree_lazy_eviction)
-                dbAsyncDelete(db,keyobj);
+                dbAsyncDelete(db,keyobj,&deleted_typename);
             else
-                dbSyncDelete(db,keyobj);
+                dbSyncDelete(db,keyobj,&deleted_typename);
             latencyEndMonitor(eviction_latency);
             latencyAddSampleIfNeeded("eviction-del",eviction_latency);
             delta -= (long long) zmalloc_used_memory();
             mem_freed += delta;
             server.stat_evictedkeys++;
             signalModifiedKey(NULL,db,keyobj);
-            notifyKeyspaceEvent(NOTIFY_EVICTED, "evicted",
+            notifyKeyspaceEvent(NOTIFY_EVICTED, deleted_typename, "evicted",
                 keyobj, db->id);
             propagateDeletion(db,keyobj,server.lazyfree_lazy_eviction);
             decrRefCount(keyobj);

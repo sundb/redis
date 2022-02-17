@@ -98,7 +98,7 @@ static int cmdNotify(RedisModuleCtx *ctx, RedisModuleString **argv, int argc){
         return RedisModule_WrongArity(ctx);
     }
 
-    RedisModule_NotifyKeyspaceEvent(ctx, REDISMODULE_NOTIFY_MODULE, "notify", argv[1]);
+    RedisModule_NotifyKeyspaceEventWithTypename(ctx, REDISMODULE_NOTIFY_MODULE, "string", "notify", argv[1]);
     RedisModule_ReplyWithNull(ctx);
     return REDISMODULE_OK;
 }
