@@ -1767,6 +1767,7 @@ void createSharedObjects(void) {
     shared.retrycount = createStringObject("RETRYCOUNT",10);
     shared.force = createStringObject("FORCE",5);
     shared.justid = createStringObject("JUSTID",6);
+    shared.entriesread = createStringObject("ENTRIESREAD",11);
     shared.lastid = createStringObject("LASTID",6);
     shared.default_username = createStringObject("default",7);
     shared.ping = createStringObject("ping",4);
@@ -1790,6 +1791,10 @@ void createSharedObjects(void) {
             sdscatprintf(sdsempty(),"*%d\r\n",j));
         shared.bulkhdr[j] = createObject(OBJ_STRING,
             sdscatprintf(sdsempty(),"$%d\r\n",j));
+        shared.maphdr[j] = createObject(OBJ_STRING,
+            sdscatprintf(sdsempty(),"%%%d\r\n",j));
+        shared.sethdr[j] = createObject(OBJ_STRING,
+            sdscatprintf(sdsempty(),"~%d\r\n",j));
     }
     /* The following two shared objects, minstring and maxstring, are not
      * actually used for their value but as a special object meaning
