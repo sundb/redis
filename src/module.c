@@ -596,7 +596,10 @@ static void moduleFreeKeyIterator(RedisModuleKey *key) {
     serverAssert(key->iter != NULL);
     switch (key->value->type) {
     case OBJ_LIST: listTypeReleaseIterator(key->iter); break;
-    case OBJ_STREAM: zfree(key->iter); break;
+    case OBJ_STREAM:
+        streamIteratorStop(key->iter);
+        zfree(key->iter);
+        break;
     default: serverAssert(0); /* No key->iter for other types. */
     }
     key->iter = NULL;
@@ -5103,6 +5106,7 @@ int RM_StreamIteratorStop(RedisModuleKey *key) {
         errno = EBADF;
         return REDISMODULE_ERR;
     }
+    streamIteratorStop(key->iter);
     zfree(key->iter);
     key->iter = NULL;
     return REDISMODULE_OK;
@@ -5658,7 +5662,7 @@ RedisModuleCallReply *RM_Call(RedisModuleCtx *ctx, const char *cmdname, const ch
         errno = ENOENT;
         goto cleanup;
     }
-    c->cmd = c->lastcmd = cmd;
+    c->cmd = c->lastcmd = c->realcmd = cmd;
 
     /* Basic arity checks. */
     if ((cmd->arity > 0 && cmd->arity != argc) || (argc < -cmd->arity)) {
