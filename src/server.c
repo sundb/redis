@@ -526,6 +526,30 @@ dictType stringSetDictType = {
     NULL                        /* allow to expand */
 };
 
+/* Dict for for case-insensitive search using null terminated C strings.
+ * The key and value do not have a destructor. */
+dictType externalStringType = {
+    distCStrCaseHash,           /* hash function */
+    NULL,                       /* key dup */
+    NULL,                       /* val dup */
+    distCStrKeyCaseCompare,     /* key compare */
+    NULL,                       /* key destructor */
+    NULL,                       /* val destructor */
+    NULL                        /* allow to expand */
+};
+
+/* Dict for case-insensitive search using sds objects with a zmalloc
+ * allocated object as the value. */
+dictType sdsHashDictType = {
+    dictSdsCaseHash,            /* hash function */
+    NULL,                       /* key dup */
+    NULL,                       /* val dup */
+    dictSdsKeyCaseCompare,      /* key compare */
+    dictSdsDestructor,          /* key destructor */
+    dictVanillaFree,            /* val destructor */
+    NULL                        /* allow to expand */
+};
+
 int htNeedsResize(dict *dict) {
     long long size, used;
 
@@ -719,6 +743,10 @@ int clientsCronResizeOutputBuffer(client *c, mstime_t now_ms) {
     char *oldbuf = NULL;
     const size_t buffer_target_shrink_size = c->buf_usable_size/2;
     const size_t buffer_target_expand_size = c->buf_usable_size*2;
+
+    /* in case the resizing is disabled return immediately */
+    if(!server.reply_buffer_resizing_enabled)
+        return 0;
 
     if (buffer_target_shrink_size >= PROTO_REPLY_MIN_BYTES &&
         c->buf_peak < buffer_target_shrink_size )
@@ -2405,6 +2433,7 @@ void initServer(void) {
     server.thp_enabled = 0;
     server.cluster_drop_packet_filter = -1;
     server.reply_buffer_peak_reset_time = REPLY_BUFFER_DEFAULT_PEAK_RESET_TIME;
+    server.reply_buffer_resizing_enabled = 1;
     resetReplicationBuffer();
 
     if ((server.tls_port || server.tls_replication || server.tls_cluster)

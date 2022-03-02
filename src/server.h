@@ -1914,6 +1914,7 @@ struct redisServer {
     int cluster_allow_pubsubshard_when_down; /* Is pubsubshard allowed when the cluster
                                                 is down, doesn't affect pubsub global. */
     long reply_buffer_peak_reset_time; /* The amount of time (in milliseconds) to wait between reply buffer peak resets */
+    int reply_buffer_resizing_enabled; /* Is reply buffer resizing enabled (1 by default) */
 };
 
 #define MAX_KEYS_BUFFER 256
@@ -2326,6 +2327,8 @@ extern dictType dbDictType;
 extern double R_Zero, R_PosInf, R_NegInf, R_Nan;
 extern dictType hashDictType;
 extern dictType stringSetDictType;
+extern dictType externalStringType;
+extern dictType sdsHashDictType;
 extern dictType dbExpiresDictType;
 extern dictType modulesDictType;
 extern dictType sdsReplyDictType;
