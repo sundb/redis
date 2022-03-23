@@ -571,8 +571,8 @@ jobs:
         prepare: pkg install -y bash gmake lang/tcl86 lang/tclx
         run: >
           gmake || exit 1 ;
-          grep -vq redis ; then ./runtest --verbose --timeout 2400 --no-latency --dump-logs ${{github.event.inputs.test_args}} || exit 1 ;
-          grep -vq modules ; then MAKE=gmake ./runtest-moduleapi --verbose --timeout 2400 --no-latency --dump-logs ${{github.event.inputs.test_args}} || exit 1 ;
+          grep -vq redis ; ./runtest --verbose --timeout 2400 --no-latency --dump-logs ${{github.event.inputs.test_args}} || exit 1 ;
+          grep -vq modules ; MAKE=gmake ./runtest-moduleapi --verbose --timeout 2400 --no-latency --dump-logs ${{github.event.inputs.test_args}} || exit 1 ;
 
   test-freebsd-sentinel:
     runs-on: macos-10.15
@@ -596,7 +596,7 @@ jobs:
         prepare: pkg install -y bash gmake lang/tcl86 lang/tclx
         run: >
           gmake || exit 1 ;
-          grep -vq sentinel ; then ./runtest-sentinel ${{github.event.inputs.cluster_test_args}} || exit 1 ;
+          grep -vq sentinel ; ./runtest-sentinel ${{github.event.inputs.cluster_test_args}} || exit 1 ;
 
   test-freebsd-cluster:
     runs-on: macos-10.15
@@ -620,7 +620,7 @@ jobs:
         prepare: pkg install -y bash gmake lang/tcl86 lang/tclx
         run: >
           gmake || exit 1 ;
-          grep -vq cluster ; then ./runtest-cluster ${{github.event.inputs.cluster_test_args}} || exit 1 ;
+          grep -vq cluster ; ./runtest-cluster ${{github.event.inputs.cluster_test_args}} || exit 1 ;
 
   test-alpine-jemalloc:
     runs-on: ubuntu-latest
