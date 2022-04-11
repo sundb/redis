@@ -464,9 +464,16 @@ static int moduleConvertArgFlags(int flags);
 /* Use like malloc(). Memory allocated with this function is reported in
  * Redis INFO memory, used for keys eviction according to maxmemory settings
  * and in general is taken into account as memory allocated by Redis.
- * You should avoid using malloc(). */
+ * You should avoid using malloc().
+ * This function panics if unable to allocate enough memory. */
 void *RM_Alloc(size_t bytes) {
     return zmalloc(bytes);
+}
+
+/* Similar to RM_Alloc, but returns NULL in case of allocation failure, instead
+ * of panicking. */
+void *RM_TryAlloc(size_t bytes) {
+    return ztrymalloc(bytes);
 }
 
 /* Use like calloc(). Memory allocated with this function is reported in
@@ -3623,7 +3630,7 @@ static void moduleInitKeyTypeSpecific(RedisModuleKey *key) {
  * key does not exist, NULL is returned. However it is still safe to
  * call RedisModule_CloseKey() and RedisModule_KeyType() on a NULL
  * value. */
-void *RM_OpenKey(RedisModuleCtx *ctx, robj *keyname, int mode) {
+RedisModuleKey *RM_OpenKey(RedisModuleCtx *ctx, robj *keyname, int mode) {
     RedisModuleKey *kp;
     robj *value;
     int flags = mode & REDISMODULE_OPEN_KEY_NOTOUCH? LOOKUP_NOTOUCH: 0;
@@ -3641,7 +3648,7 @@ void *RM_OpenKey(RedisModuleCtx *ctx, robj *keyname, int mode) {
     kp = zmalloc(sizeof(*kp));
     moduleInitKey(kp, ctx, keyname, value, mode);
     autoMemoryAdd(ctx,REDISMODULE_AM_KEY,kp);
-    return (void*)kp;
+    return kp;
 }
 
 /* Destroy a RedisModuleKey struct (freeing is the responsibility of the caller). */
@@ -6080,6 +6087,14 @@ void moduleTypeNameByID(char *name, uint64_t moduleid) {
 const char *moduleTypeModuleName(moduleType *mt) {
     if (!mt || !mt->module) return NULL;
     return mt->module->name;
+}
+
+/* Return the module name from a module command */
+const char *moduleNameFromCommand(struct redisCommand *cmd) {
+    serverAssert(cmd->proc == RedisModuleCommandDispatcher);
+
+    RedisModuleCommand *cp = (void*)(unsigned long)cmd->getkeys_proc;
+    return cp->module->name;
 }
 
 /* Create a copy of a module type value using the copy callback. If failed
@@ -12233,6 +12248,7 @@ void moduleRegisterCoreAPI(void) {
     server.moduleapi = dictCreate(&moduleAPIDictType);
     server.sharedapi = dictCreate(&moduleAPIDictType);
     REGISTER_API(Alloc);
+    REGISTER_API(TryAlloc);
     REGISTER_API(Calloc);
     REGISTER_API(Realloc);
     REGISTER_API(Free);
