@@ -36,7 +36,6 @@
 #include "atomicvar.h"
 #include "mt19937-64.h"
 #include "functions.h"
-#include "hdr_alloc.h"
 
 #include <time.h>
 #include <signal.h>
@@ -1016,18 +1015,8 @@ void databasesCron(void) {
     }
 }
 
-/* We take a cached value of the unix time in the global state because with
- * virtual memory and aging there is to store the current time in objects at
- * every object access, and accuracy is not needed. To access a global var is
- * a lot faster than calling time(NULL).
- *
- * This function should be fast because it is called at every command execution
- * in call(), so it is possible to decide if to update the daylight saving
- * info or not using the 'update_daylight_info' argument. Normally we update
- * such info only when calling this function from serverCron() but not when
- * calling it from call(). */
-void updateCachedTime(int update_daylight_info) {
-    server.ustime = ustime();
+static inline void updateCachedTimeWithUs(int update_daylight_info, const long long ustime) {
+    server.ustime = ustime;
     server.mstime = server.ustime / 1000;
     time_t unixtime = server.mstime / 1000;
     atomicSet(server.unixtime, unixtime);
@@ -1043,6 +1032,21 @@ void updateCachedTime(int update_daylight_info) {
         localtime_r(&ut,&tm);
         server.daylight_active = tm.tm_isdst;
     }
+}
+
+/* We take a cached value of the unix time in the global state because with
+ * virtual memory and aging there is to store the current time in objects at
+ * every object access, and accuracy is not needed. To access a global var is
+ * a lot faster than calling time(NULL).
+ *
+ * This function should be fast because it is called at every command execution
+ * in call(), so it is possible to decide if to update the daylight saving
+ * info or not using the 'update_daylight_info' argument. Normally we update
+ * such info only when calling this function from serverCron() but not when
+ * calling it from call(). */
+void updateCachedTime(int update_daylight_info) {
+    const long long us = ustime();
+    updateCachedTimeWithUs(update_daylight_info, us);
 }
 
 void checkChildrenDone(void) {
@@ -1885,15 +1889,6 @@ void initServerConfig(void) {
     appendServerSaveParams(300,100);  /* save after 5 minutes and 100 changes */
     appendServerSaveParams(60,10000); /* save after 1 minute and 10000 changes */
 
-    /* Specify the allocation function for the hdr histogram */
-    hdrAllocFuncs hdrallocfn = {
-        .mallocFn = zmalloc,
-        .callocFn = zcalloc_num,
-        .reallocFn = zrealloc,
-        .freeFn = zfree,
-    };
-    hdrSetAllocators(&hdrallocfn);
-
     /* Replication related */
     server.masterhost = NULL;
     server.masterport = 6379;
@@ -2293,6 +2288,7 @@ int listenToPort(int port, socketFds *sfd) {
             closeSocketListeners(sfd);
             return C_ERR;
         }
+        if (server.socket_mark_id > 0) anetSetSockMarkId(NULL, sfd->fd[sfd->count], server.socket_mark_id);
         anetNonBlock(NULL,sfd->fd[sfd->count]);
         anetCloexec(sfd->fd[sfd->count]);
         sfd->count++;
@@ -2985,6 +2981,11 @@ struct redisCommand *lookupCommandOrOriginal(robj **argv ,int argc) {
     return cmd;
 }
 
+/* Commands arriving from the master client or AOF client, should never be rejected. */
+int mustObeyClient(client *c) {
+    return c->id == CLIENT_ID_AOF || c->flags & CLIENT_MASTER;
+}
+
 static int shouldPropagate(int target) {
     if (!server.replication_allowed || target == PROPAGATE_NONE || server.loading)
         return 0;
@@ -3212,7 +3213,6 @@ int incrCommandStatsOnError(struct redisCommand *cmd, int flags) {
  */
 void call(client *c, int flags) {
     long long dirty;
-    monotime call_timer;
     uint64_t client_old_flags = c->flags;
     struct redisCommand *real_cmd = c->realcmd;
 
@@ -3237,21 +3237,33 @@ void call(client *c, int flags) {
     dirty = server.dirty;
     incrCommandStatsOnError(NULL, 0);
 
+    const long long call_timer = ustime();
+
     /* Update cache time, in case we have nested calls we want to
      * update only on the first call*/
     if (server.fixed_time_expire++ == 0) {
-        updateCachedTime(0);
+        updateCachedTimeWithUs(0,call_timer);
     }
-    server.in_nested_call++;
 
-    elapsedStart(&call_timer);
+    monotime monotonic_start = 0;
+    if (monotonicGetType() == MONOTONIC_CLOCK_HW)
+        monotonic_start = getMonotonicUs();
+
+    server.in_nested_call++;
     c->cmd->proc(c);
-    const long duration = elapsedUs(call_timer);
+    server.in_nested_call--;
+
+    /* In order to avoid performance implication due to querying the clock using a system call 3 times,
+     * we use a monotonic clock, when we are sure its cost is very low, and fall back to non-monotonic call otherwise. */
+    ustime_t duration;
+    if (monotonicGetType() == MONOTONIC_CLOCK_HW)
+        duration = getMonotonicUs() - monotonic_start;
+    else
+        duration = ustime() - call_timer;
+
     c->duration = duration;
     dirty = server.dirty-dirty;
     if (dirty < 0) dirty = 0;
-
-    server.in_nested_call--;
 
     /* Update failed command calls if required. */
 
@@ -3576,6 +3588,7 @@ int processCommand(client *c) {
                                    (c->cmd->proc == execCommand && (c->mstate.cmd_flags & (CMD_WRITE | CMD_MAY_REPLICATE)));
     int is_deny_async_loading_command = (c->cmd->flags & CMD_NO_ASYNC_LOADING) ||
                                         (c->cmd->proc == execCommand && (c->mstate.cmd_flags & CMD_NO_ASYNC_LOADING));
+    int obey_client = mustObeyClient(c);
 
     if (authRequired(c)) {
         /* AUTH and HELLO and no auth commands are valid even in
@@ -3627,9 +3640,7 @@ int processCommand(client *c) {
      * 1) The sender of this command is our master.
      * 2) The command has no key arguments. */
     if (server.cluster_enabled &&
-        !(c->flags & CLIENT_MASTER) &&
-        !(c->flags & CLIENT_SCRIPT &&
-          server.script_caller->flags & CLIENT_MASTER) &&
+        !mustObeyClient(c) &&
         !(!(c->cmd->flags&CMD_MOVABLE_KEYS) && c->cmd->key_specs_num == 0 &&
           c->cmd->proc != execCommand))
     {
@@ -3713,10 +3724,10 @@ int processCommand(client *c) {
     if (server.tracking_clients) trackingLimitUsedSlots();
 
     /* Don't accept write commands if there are problems persisting on disk
-     * and if this is a master instance. */
+     * unless coming from our master. */
     int deny_write_type = writeCommandsDeniedByDiskError();
     if (deny_write_type != DISK_ERROR_TYPE_NONE &&
-        server.masterhost == NULL &&
+        !obey_client &&
         (is_write_command ||c->cmd->proc == pingCommand))
     {
         sds err = writeCommandsGetDiskErrorMessage(deny_write_type);
@@ -3734,7 +3745,7 @@ int processCommand(client *c) {
     /* Don't accept write commands if this is a read only slave. But
      * accept write commands if this is our master. */
     if (server.masterhost && server.repl_slave_ro &&
-        !(c->flags & CLIENT_MASTER) &&
+        !obey_client &&
         is_write_command)
     {
         rejectCommand(c, shared.roslaveerr);
@@ -5140,6 +5151,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "redis_mode:%s\r\n"
             "os:%s %s %s\r\n"
             "arch_bits:%i\r\n"
+            "monotonic_clock:%s\r\n"
             "multiplexing_api:%s\r\n"
             "atomicvar_api:%s\r\n"
             "gcc_version:%i.%i.%i\r\n"
@@ -5163,6 +5175,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             mode,
             name.sysname, name.release, name.machine,
             server.arch_bits,
+            monotonicInfoString(),
             aeGetApiName(),
             REDIS_ATOMIC_API,
 #ifdef __GNUC__
