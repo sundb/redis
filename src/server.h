@@ -1062,7 +1062,7 @@ typedef struct replBacklog {
     listNode *ref_repl_buf_node; /* Referenced node of replication buffer blocks,
                                   * see the definition of replBufBlock. */
     size_t unindexed_count;      /* The count from last creating index block. */
-    rax *blocks_index;           /* The index of reocrded blocks of replication
+    rax *blocks_index;           /* The index of recorded blocks of replication
                                   * buffer for quickly searching replication
                                   * offset on partial resynchronization. */
     long long histlen;           /* Backlog actual data length */
@@ -2864,6 +2864,8 @@ struct redisCommand *lookupCommandBySds(sds s);
 struct redisCommand *lookupCommandByCStringLogic(dict *commands, const char *s);
 struct redisCommand *lookupCommandByCString(const char *s);
 struct redisCommand *lookupCommandOrOriginal(robj **argv, int argc);
+int commandCheckExistence(client *c, sds *err);
+int commandCheckArity(client *c, sds *err);
 void startCommandExecution();
 int incrCommandStatsOnError(struct redisCommand *cmd, int flags);
 void call(client *c, int flags);
