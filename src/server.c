@@ -1213,10 +1213,16 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     cronUpdateMemoryStats();
 
-    /* We received a SIGTERM, shutting down here in a safe way, as it is
+    /* We received a SIGTERM or SIGINT, shutting down here in a safe way, as it is
      * not ok doing so inside the signal handler. */
     if (server.shutdown_asap && !isShutdownInitiated()) {
-        if (prepareForShutdown(SHUTDOWN_NOFLAGS) == C_OK) exit(0);
+        int shutdownFlags = SHUTDOWN_NOFLAGS;
+        if (server.last_sig_received == SIGINT && server.shutdown_on_sigint)
+            shutdownFlags = server.shutdown_on_sigint;
+        else if (server.last_sig_received == SIGTERM && server.shutdown_on_sigterm)
+            shutdownFlags = server.shutdown_on_sigterm;
+
+        if (prepareForShutdown(shutdownFlags) == C_OK) exit(0);
     } else if (isShutdownInitiated()) {
         if (server.mstime >= server.shutdown_mstime || isReadyToShutdown()) {
             if (finishShutdown() == C_OK) exit(0);
@@ -1329,8 +1335,11 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * however to try every second is enough in case of 'hz' is set to
      * a higher frequency. */
     run_with_period(1000) {
-        if (server.aof_state == AOF_ON && server.aof_last_write_status == C_ERR)
-            flushAppendOnlyFile(0);
+        if ((server.aof_state == AOF_ON || server.aof_state == AOF_WAIT_REWRITE) &&
+            server.aof_last_write_status == C_ERR) 
+            {
+                flushAppendOnlyFile(0);
+            }
     }
 
     /* Clear the paused clients state if needed. */
@@ -1469,6 +1478,7 @@ void whileBlockedCron() {
         if (prepareForShutdown(SHUTDOWN_NOSAVE) == C_OK) exit(0);
         serverLog(LL_WARNING,"SIGTERM received but errors trying to shut down the server, check the logs for more information");
         server.shutdown_asap = 0;
+        server.last_sig_received = 0;
     }
 }
 
@@ -2341,6 +2351,7 @@ void resetServerStats(void) {
     }
     server.stat_aof_rewrites = 0;
     server.stat_rdb_saves = 0;
+    server.stat_aofrw_consecutive_failures = 0;
     atomicSet(server.stat_net_input_bytes, 0);
     atomicSet(server.stat_net_output_bytes, 0);
     server.stat_unexpected_error_replies = 0;
@@ -2542,6 +2553,7 @@ void initServer(void) {
     server.aof_last_write_status = C_OK;
     server.aof_last_write_errno = 0;
     server.repl_good_slaves_count = 0;
+    server.last_sig_received = 0;
 
     /* Create the timer callback, this is our way to process many background
      * operations incrementally, like clients timeout, eviction of unaccessed
@@ -3676,17 +3688,16 @@ int processCommand(client *c) {
         !(!(c->cmd->flags&CMD_MOVABLE_KEYS) && c->cmd->key_specs_num == 0 &&
           c->cmd->proc != execCommand))
     {
-        int hashslot;
         int error_code;
         clusterNode *n = getNodeByQuery(c,c->cmd,c->argv,c->argc,
-                                        &hashslot,&error_code);
+                                        &c->slot,&error_code);
         if (n == NULL || n != server.cluster->myself) {
             if (c->cmd->proc == execCommand) {
                 discardTransaction(c);
             } else {
                 flagTransaction(c);
             }
-            clusterRedirectClient(c,n,hashslot,error_code);
+            clusterRedirectClient(c,n,c->slot,error_code);
             c->cmd->rejected_calls++;
             return C_OK;
         }
@@ -3756,15 +3767,29 @@ int processCommand(client *c) {
     if (server.tracking_clients) trackingLimitUsedSlots();
 
     /* Don't accept write commands if there are problems persisting on disk
-     * unless coming from our master. */
+     * unless coming from our master, in which case check the replica ignore
+     * disk write error config to either log or crash. */
     int deny_write_type = writeCommandsDeniedByDiskError();
     if (deny_write_type != DISK_ERROR_TYPE_NONE &&
-        !obey_client &&
-        (is_write_command ||c->cmd->proc == pingCommand))
+        (is_write_command || c->cmd->proc == pingCommand))
     {
-        sds err = writeCommandsGetDiskErrorMessage(deny_write_type);
-        rejectCommandSds(c, err);
-        return C_OK;
+        if (obey_client) {
+            if (!server.repl_ignore_disk_write_error && c->cmd->proc != pingCommand) {
+                serverPanic("Replica was unable to write command to disk.");
+            } else {
+                static mstime_t last_log_time_ms = 0;
+                const mstime_t log_interval_ms = 10000;
+                if (server.mstime > last_log_time_ms + log_interval_ms) {
+                    last_log_time_ms = server.mstime;
+                    serverLog(LL_WARNING, "Replica is applying a command even though "
+                                          "it is unable to write to disk.");
+                }
+            }
+        } else {
+            sds err = writeCommandsGetDiskErrorMessage(deny_write_type);
+            rejectCommandSds(c, err);
+            return C_OK;
+        }
     }
 
     /* Don't accept write commands if there are not enough good slaves and
@@ -3999,6 +4024,7 @@ static void cancelShutdown(void) {
     server.shutdown_asap = 0;
     server.shutdown_flags = 0;
     server.shutdown_mstime = 0;
+    server.last_sig_received = 0;
     replyToClientsBlockedOnShutdown();
     unpauseClients(PAUSE_DURING_SHUTDOWN);
 }
@@ -4885,7 +4911,7 @@ void commandInfoCommand(client *c) {
     }
 }
 
-/* COMMAND DOCS [<command-name> ...] */
+/* COMMAND DOCS [command-name [command-name ...]] */
 void commandDocsCommand(client *c) {
     int i;
     if (c->argc == 2) {
@@ -5445,6 +5471,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "aof_current_rewrite_time_sec:%jd\r\n"
             "aof_last_bgrewrite_status:%s\r\n"
             "aof_rewrites:%lld\r\n"
+            "aof_rewrites_consecutive_failures:%lld\r\n"
             "aof_last_write_status:%s\r\n"
             "aof_last_cow_size:%zu\r\n"
             "module_fork_in_progress:%d\r\n"
@@ -5476,6 +5503,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
                 -1 : time(NULL)-server.aof_rewrite_time_start),
             (server.aof_lastbgrewrite_status == C_OK) ? "ok" : "err",
             server.stat_aof_rewrites,
+            server.stat_aofrw_consecutive_failures,
             (server.aof_last_write_status == C_OK &&
                 aof_bio_fsync_status == C_OK) ? "ok" : "err",
             server.stat_aof_cow_bytes,
@@ -6289,6 +6317,7 @@ static void sigShutdownHandler(int sig) {
 
     serverLogFromHandler(LL_WARNING, msg);
     server.shutdown_asap = 1;
+    server.last_sig_received = sig;
 }
 
 void setupSignalHandlers(void) {
