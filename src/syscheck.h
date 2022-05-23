@@ -38,6 +38,7 @@ int syscheck(void);
 int checkXenClocksource(sds *error_msg);
 int checkTHPEnabled(sds *error_msg);
 int checkOvercommit(sds *error_msg);
+int checkLinuxMadvDontNeedZeroesPages(sds *error_msg);
 #ifdef __arm64__
 int checkLinuxMadvFreeForkBug(sds *error_msg);
 #endif

@@ -6901,8 +6901,23 @@ int main(int argc, char **argv) {
             serverLog(LL_WARNING, "WARNING %s", err_msg);
             sdsfree(err_msg);
         }
-    #if defined (__arm64__)
+
         int ret;
+        if ((ret = checkLinuxMadvDontNeedZeroesPages(&err_msg)) <= 0) {
+            if (ret < 0) {
+                serverLog(LL_WARNING, "WARNING %s", err_msg);
+                sdsfree(err_msg);
+            } else
+                serverLog(LL_WARNING, "Failed to test the kernel for a bug that could lead to data corruption during background save. "
+                                      "Your system could be affected, please report this error.");
+            if (!checkIgnoreWarning("MADVISE-DONTNEED-ZEROES-PAGES")) {
+                serverLog(LL_WARNING,"Redis will now exit to prevent data corruption. "
+                                     "Note that it is possible to suppress this warning by setting the following config: ignore-warnings ARM64-COW-BUG");
+                exit(1);
+            }
+        }
+
+    #if defined (__arm64__)
         if ((ret = checkLinuxMadvFreeForkBug(&err_msg)) <= 0) {
             if (ret < 0) {
                 serverLog(LL_WARNING, "WARNING %s", err_msg);

@@ -187,6 +187,31 @@ int checkTHPEnabled(sds *error_msg) {
     }
 }
 
+int checkLinuxMadvDontNeedZeroesPages(sds *error_msg) {
+    int res = -1;
+    long size = sysconf(_SC_PAGESIZE);
+
+    void *addr = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if (addr == MAP_FAILED) return 0;
+
+    memset(addr, 'A', size);
+    if (madvise(addr, size, MADV_DONTNEED) == 0) {
+        res = memchr(addr, 'A', size) == NULL;
+    } else {
+        /* If madvise() does not support MADV_DONTNEED, then we can
+         * call it anyway, and use it's return code. */
+        res = 1;
+    }
+
+    munmap(addr, size);
+
+    if (res == -1)
+        *error_msg = sdsnew("MADV_DONTNEED does not work in your kernel, this will result in memory usage issues with Redis. "
+                            "(This is the expected behaviour if you are running under QEMU)");
+
+    return res;
+}
+
 #ifdef __arm64__
 /* Get size in kilobytes of the Shared_Dirty pages of the calling process for the
  * memory map corresponding to the provided address, or -1 on error. */
@@ -340,6 +365,7 @@ check checks[] = {
     {.name = "xen-clocksource", .check_fn = checkXenClocksource},
     {.name = "overcommit", .check_fn = checkOvercommit},
     {.name = "THP", .check_fn = checkTHPEnabled},
+    {.name = "madvise-dontneed-zeroes-pages", .check_fn = checkLinuxMadvDontNeedZeroesPages},
 #ifdef __arm64__
     {.name = "madvise-free-fork-bug", .check_fn = checkLinuxMadvFreeForkBug},
 #endif
