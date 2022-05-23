@@ -6912,7 +6912,8 @@ int main(int argc, char **argv) {
                                       "Your system could be affected, please report this error.");
             if (!checkIgnoreWarning("MADVISE-DONTNEED-ZEROES-PAGES")) {
                 serverLog(LL_WARNING,"Redis will now exit to prevent data corruption. "
-                                     "Note that it is possible to suppress this warning by setting the following config: ignore-warnings ARM64-COW-BUG");
+                                     "Note that it is possible to suppress this warning by setting the "
+                                     " following config: ignore-warnings MADVISE-DONTNEED-ZEROES-PAGES");
                 exit(1);
             }
         }
