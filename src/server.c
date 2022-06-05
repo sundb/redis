@@ -639,6 +639,11 @@ int isMutuallyExclusiveChildType(int type) {
     return type == CHILD_TYPE_RDB || type == CHILD_TYPE_AOF || type == CHILD_TYPE_MODULE;
 }
 
+/* Returns true when we're inside a long command that yielded to the event loop. */
+int isInsideYieldingLongCommand() {
+    return scriptIsTimedout() || server.busy_module_yield_flags;
+}
+
 /* Return true if this instance has persistence completely turned off:
  * both RDB and AOF are disabled. */
 int allPersistenceDisabled(void) {
@@ -1188,14 +1193,19 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     run_with_period(100) {
         long long stat_net_input_bytes, stat_net_output_bytes;
+        long long stat_net_repl_input_bytes, stat_net_repl_output_bytes;
         atomicGet(server.stat_net_input_bytes, stat_net_input_bytes);
         atomicGet(server.stat_net_output_bytes, stat_net_output_bytes);
+        atomicGet(server.stat_net_repl_input_bytes, stat_net_repl_input_bytes);
+        atomicGet(server.stat_net_repl_output_bytes, stat_net_repl_output_bytes);
 
         trackInstantaneousMetric(STATS_METRIC_COMMAND,server.stat_numcommands);
         trackInstantaneousMetric(STATS_METRIC_NET_INPUT,
-                stat_net_input_bytes);
+                stat_net_input_bytes + stat_net_repl_input_bytes);
         trackInstantaneousMetric(STATS_METRIC_NET_OUTPUT,
-                stat_net_output_bytes);
+                stat_net_output_bytes + stat_net_repl_output_bytes);
+        trackInstantaneousMetric(STATS_METRIC_NET_TOTAL_REPLICATION,
+                                 stat_net_repl_input_bytes + stat_net_repl_output_bytes);
     }
 
     /* We have just LRU_BITS bits per object for LRU information.
@@ -1755,6 +1765,7 @@ void createSharedObjects(void) {
     shared.unsubscribebulk = createStringObject("$11\r\nunsubscribe\r\n",18);
     shared.ssubscribebulk = createStringObject("$10\r\nssubscribe\r\n", 17);
     shared.sunsubscribebulk = createStringObject("$12\r\nsunsubscribe\r\n", 19);
+    shared.smessagebulk = createStringObject("$8\r\nsmessage\r\n", 14);
     shared.psubscribebulk = createStringObject("$10\r\npsubscribe\r\n",17);
     shared.punsubscribebulk = createStringObject("$12\r\npunsubscribe\r\n",19);
 
@@ -2355,6 +2366,8 @@ void resetServerStats(void) {
     server.stat_aofrw_consecutive_failures = 0;
     atomicSet(server.stat_net_input_bytes, 0);
     atomicSet(server.stat_net_output_bytes, 0);
+    atomicSet(server.stat_net_repl_input_bytes, 0);
+    atomicSet(server.stat_net_repl_output_bytes, 0);
     server.stat_unexpected_error_replies = 0;
     server.stat_total_error_replies = 0;
     server.stat_dump_payload_sanitizations = 0;
@@ -2716,7 +2729,8 @@ void commandAddSubcommand(struct redisCommand *parent, struct redisCommand *subc
 void setImplicitACLCategories(struct redisCommand *c) {
     if (c->flags & CMD_WRITE)
         c->acl_categories |= ACL_CATEGORY_WRITE;
-    if (c->flags & CMD_READONLY)
+    /* Exclude scripting commands from the RO category. */
+    if (c->flags & CMD_READONLY && !(c->acl_categories & ACL_CATEGORY_SCRIPTING))
         c->acl_categories |= ACL_CATEGORY_READ;
     if (c->flags & CMD_ADMIN)
         c->acl_categories |= ACL_CATEGORY_ADMIN|ACL_CATEGORY_DANGEROUS;
@@ -3392,8 +3406,12 @@ void call(client *c, int flags) {
         (CLIENT_FORCE_AOF|CLIENT_FORCE_REPL|CLIENT_PREVENT_PROP);
 
     /* If the client has keys tracking enabled for client side caching,
-     * make sure to remember the keys it fetched via this command. */
-    if (c->cmd->flags & CMD_READONLY) {
+     * make sure to remember the keys it fetched via this command. Scripting
+     * works a bit differently, where if the scripts executes any read command, it
+     * remembers all of the declared keys from the script. */
+    if ((c->cmd->flags & CMD_READONLY) && (c->cmd->proc != evalRoCommand)
+        && (c->cmd->proc != evalShaRoCommand) && (c->cmd->proc != fcallroCommand))
+    {
         client *caller = (c->flags & CLIENT_SCRIPT && server.script_caller) ?
                             server.script_caller : c;
         if (caller->flags & CLIENT_TRACKING &&
@@ -3615,19 +3633,33 @@ int processCommand(client *c) {
         }
     }
 
-    int is_read_command = (c->cmd->flags & CMD_READONLY) ||
+    /* If we're executing a script, try to extract a set of command flags from
+     * it, in case it declared them. Note this is just an attempt, we don't yet
+     * know the script command is well formed.*/
+    uint64_t cmd_flags = c->cmd->flags;
+    if (c->cmd->proc == evalCommand || c->cmd->proc == evalShaCommand ||
+        c->cmd->proc == evalRoCommand || c->cmd->proc == evalShaRoCommand ||
+        c->cmd->proc == fcallCommand || c->cmd->proc == fcallroCommand)
+    {
+        if (c->cmd->proc == fcallCommand || c->cmd->proc == fcallroCommand)
+            cmd_flags = fcallGetCommandFlags(c, cmd_flags);
+        else
+            cmd_flags = evalGetCommandFlags(c, cmd_flags);
+    }
+
+    int is_read_command = (cmd_flags & CMD_READONLY) ||
                            (c->cmd->proc == execCommand && (c->mstate.cmd_flags & CMD_READONLY));
-    int is_write_command = (c->cmd->flags & CMD_WRITE) ||
+    int is_write_command = (cmd_flags & CMD_WRITE) ||
                            (c->cmd->proc == execCommand && (c->mstate.cmd_flags & CMD_WRITE));
-    int is_denyoom_command = (c->cmd->flags & CMD_DENYOOM) ||
+    int is_denyoom_command = (cmd_flags & CMD_DENYOOM) ||
                              (c->cmd->proc == execCommand && (c->mstate.cmd_flags & CMD_DENYOOM));
-    int is_denystale_command = !(c->cmd->flags & CMD_STALE) ||
+    int is_denystale_command = !(cmd_flags & CMD_STALE) ||
                                (c->cmd->proc == execCommand && (c->mstate.cmd_inv_flags & CMD_STALE));
-    int is_denyloading_command = !(c->cmd->flags & CMD_LOADING) ||
+    int is_denyloading_command = !(cmd_flags & CMD_LOADING) ||
                                  (c->cmd->proc == execCommand && (c->mstate.cmd_inv_flags & CMD_LOADING));
-    int is_may_replicate_command = (c->cmd->flags & (CMD_WRITE | CMD_MAY_REPLICATE)) ||
+    int is_may_replicate_command = (cmd_flags & (CMD_WRITE | CMD_MAY_REPLICATE)) ||
                                    (c->cmd->proc == execCommand && (c->mstate.cmd_flags & (CMD_WRITE | CMD_MAY_REPLICATE)));
-    int is_deny_async_loading_command = (c->cmd->flags & CMD_NO_ASYNC_LOADING) ||
+    int is_deny_async_loading_command = (cmd_flags & CMD_NO_ASYNC_LOADING) ||
                                         (c->cmd->proc == execCommand && (c->mstate.cmd_flags & CMD_NO_ASYNC_LOADING));
     int obey_client = mustObeyClient(c);
 
@@ -3715,7 +3747,7 @@ int processCommand(client *c) {
      * the event loop since there is a busy Lua script running in timeout
      * condition, to avoid mixing the propagation of scripts with the
      * propagation of DELs due to eviction. */
-    if (server.maxmemory && !scriptIsTimedout()) {
+    if (server.maxmemory && !isInsideYieldingLongCommand()) {
         int out_of_memory = (performEvictions() == EVICT_FAIL);
 
         /* performEvictions may evict keys, so we need flush pending tracking
@@ -3747,18 +3779,12 @@ int processCommand(client *c) {
             return C_OK;
         }
 
-        /* Save out_of_memory result at script start, otherwise if we check OOM
-         * until first write within script, memory used by lua stack and
-         * arguments might interfere. */
-        if (c->cmd->proc == evalCommand ||
-            c->cmd->proc == evalRoCommand ||
-            c->cmd->proc == evalShaCommand ||
-            c->cmd->proc == evalShaRoCommand ||
-            c->cmd->proc == fcallCommand ||
-            c->cmd->proc == fcallroCommand)
-        {
-            server.script_oom = out_of_memory;
-        }
+        /* Save out_of_memory result at command start, otherwise if we check OOM
+         * in the first write within script, memory used by lua stack and
+         * arguments might interfere. We need to save it for EXEC and module
+         * calls too, since these can call EVAL, but avoid saving it during an
+         * interrupted / yielding busy script / module. */
+        server.pre_command_oom_state = out_of_memory;
     }
 
     /* Make sure to use a reasonable amount of memory for client side
@@ -3786,6 +3812,8 @@ int processCommand(client *c) {
             }
         } else {
             sds err = writeCommandsGetDiskErrorMessage(deny_write_type);
+            /* remove the newline since rejectCommandSds adds it. */
+            sdssubstr(err, 0, sdslen(err)-2);
             rejectCommandSds(c, err);
             return C_OK;
         }
@@ -3858,7 +3886,7 @@ int processCommand(client *c) {
      * the MULTI plus a few initial commands refused, then the timeout
      * condition resolves, and the bottom-half of the transaction gets
      * executed, see Github PR #7022. */
-    if ((scriptIsTimedout() || server.busy_module_yield_flags) && !(c->cmd->flags & CMD_ALLOW_BUSY)) {
+    if (isInsideYieldingLongCommand() && !(c->cmd->flags & CMD_ALLOW_BUSY)) {
         if (server.busy_module_yield_flags && server.busy_module_yield_reply) {
             rejectCommandFormat(c, "-BUSY %s", server.busy_module_yield_reply);
         } else if (server.busy_module_yield_flags) {
@@ -3899,7 +3927,7 @@ int processCommand(client *c) {
         c->cmd->proc != quitCommand &&
         c->cmd->proc != resetCommand)
     {
-        queueMultiCommand(c);
+        queueMultiCommand(c, cmd_flags);
         addReply(c,shared.queued);
     } else {
         call(c,CMD_CALL_FULL);
@@ -4225,7 +4253,7 @@ sds writeCommandsGetDiskErrorMessage(int error_code) {
         ret = sdsdup(shared.bgsaveerr->ptr);
     } else {
         ret = sdscatfmt(sdsempty(),
-                "-MISCONF Errors writing to the AOF file: %s",
+                "-MISCONF Errors writing to the AOF file: %s\r\n",
                 strerror(server.aof_last_write_errno));
     }
     return ret;
@@ -4311,7 +4339,7 @@ void addReplyFlagsForCommand(client *c, struct redisCommand *cmd) {
         {CMD_ASKING,            "asking"},
         {CMD_FAST,              "fast"},
         {CMD_NO_AUTH,           "no_auth"},
-        {CMD_MAY_REPLICATE,     "may_replicate"},
+        /* {CMD_MAY_REPLICATE,     "may_replicate"},, Hidden on purpose */
         /* {CMD_SENTINEL,          "sentinel"}, Hidden on purpose */
         /* {CMD_ONLY_SENTINEL,     "only_sentinel"}, Hidden on purpose */
         {CMD_NO_MANDATORY_KEYS, "no_mandatory_keys"},
@@ -5570,6 +5598,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
     if (all_sections  || (dictFind(section_dict,"stats") != NULL)) {
         long long stat_total_reads_processed, stat_total_writes_processed;
         long long stat_net_input_bytes, stat_net_output_bytes;
+        long long stat_net_repl_input_bytes, stat_net_repl_output_bytes;
         long long current_eviction_exceeded_time = server.stat_last_eviction_exceeded_time ?
             (long long) elapsedUs(server.stat_last_eviction_exceeded_time): 0;
         long long current_active_defrag_time = server.stat_last_active_defrag_time ?
@@ -5578,6 +5607,8 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
         atomicGet(server.stat_total_writes_processed, stat_total_writes_processed);
         atomicGet(server.stat_net_input_bytes, stat_net_input_bytes);
         atomicGet(server.stat_net_output_bytes, stat_net_output_bytes);
+        atomicGet(server.stat_net_repl_input_bytes, stat_net_repl_input_bytes);
+        atomicGet(server.stat_net_repl_output_bytes, stat_net_repl_output_bytes);
 
         if (sections++) info = sdscat(info,"\r\n");
         info = sdscatprintf(info,
@@ -5587,8 +5618,11 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "instantaneous_ops_per_sec:%lld\r\n"
             "total_net_input_bytes:%lld\r\n"
             "total_net_output_bytes:%lld\r\n"
+            "total_net_repl_input_bytes:%lld\r\n"
+            "total_net_repl_output_bytes:%lld\r\n"
             "instantaneous_input_kbps:%.2f\r\n"
             "instantaneous_output_kbps:%.2f\r\n"
+            "instantaneous_repl_total_kbps:%.2f\r\n"
             "rejected_connections:%lld\r\n"
             "sync_full:%lld\r\n"
             "sync_partial_ok:%lld\r\n"
@@ -5630,10 +5664,13 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             server.stat_numconnections,
             server.stat_numcommands,
             getInstantaneousMetric(STATS_METRIC_COMMAND),
-            stat_net_input_bytes,
-            stat_net_output_bytes,
+            stat_net_input_bytes + stat_net_repl_input_bytes,
+            stat_net_output_bytes + stat_net_repl_output_bytes,
+            stat_net_repl_input_bytes,
+            stat_net_repl_output_bytes,
             (float)getInstantaneousMetric(STATS_METRIC_NET_INPUT)/1024,
             (float)getInstantaneousMetric(STATS_METRIC_NET_OUTPUT)/1024,
+            (float)getInstantaneousMetric(STATS_METRIC_NET_TOTAL_REPLICATION)/1024,
             server.stat_rejected_conn,
             server.stat_sync_full,
             server.stat_sync_partial_ok,
@@ -6438,6 +6475,8 @@ void loadDataFromDisk(void) {
         int ret = loadAppendOnlyFiles(server.aof_manifest);
         if (ret == AOF_FAILED || ret == AOF_OPEN_ERR)
             exit(1);
+        if (ret != AOF_NOT_EXIST)
+            serverLog(LL_NOTICE, "DB loaded from append only file: %.3f seconds", (float)(ustime()-start)/1000000);
     } else {
         rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
         errno = 0; /* Prevent a stale value from affecting error checking */
