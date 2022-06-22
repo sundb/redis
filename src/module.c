@@ -2297,7 +2297,7 @@ RedisModuleString *RM_CreateStringPrintf(RedisModuleCtx *ctx, const char *fmt, .
 }
 
 
-/* Like RedisModule_CreatString(), but creates a string starting from a `long long`
+/* Like RedisModule_CreateString(), but creates a string starting from a `long long`
  * integer instead of taking a buffer and its length.
  *
  * The returned string must be released with RedisModule_FreeString() or by
@@ -2311,7 +2311,7 @@ RedisModuleString *RM_CreateStringFromLongLong(RedisModuleCtx *ctx, long long ll
     return RM_CreateString(ctx,buf,len);
 }
 
-/* Like RedisModule_CreatString(), but creates a string starting from a double
+/* Like RedisModule_CreateString(), but creates a string starting from a double
  * instead of taking a buffer and its length.
  *
  * The returned string must be released with RedisModule_FreeString() or by
@@ -2322,7 +2322,7 @@ RedisModuleString *RM_CreateStringFromDouble(RedisModuleCtx *ctx, double d) {
     return RM_CreateString(ctx,buf,len);
 }
 
-/* Like RedisModule_CreatString(), but creates a string starting from a long
+/* Like RedisModule_CreateString(), but creates a string starting from a long
  * double.
  *
  * The returned string must be released with RedisModule_FreeString() or by
@@ -2337,7 +2337,7 @@ RedisModuleString *RM_CreateStringFromLongDouble(RedisModuleCtx *ctx, long doubl
     return RM_CreateString(ctx,buf,len);
 }
 
-/* Like RedisModule_CreatString(), but creates a string starting from another
+/* Like RedisModule_CreateString(), but creates a string starting from another
  * RedisModuleString.
  *
  * The returned string must be released with RedisModule_FreeString() or by
@@ -5783,7 +5783,16 @@ RedisModuleCallReply *RM_Call(RedisModuleCtx *ctx, const char *cmdname, const ch
 
     if (flags & REDISMODULE_ARGV_RESPECT_DENY_OOM) {
         if (cmd->flags & CMD_DENYOOM) {
-            if (server.pre_command_oom_state) {
+            int oom_state;
+            if (ctx->flags & REDISMODULE_CTX_THREAD_SAFE) {
+                /* On background thread we can not count on server.pre_command_oom_state.
+                 * Because it is only set on the main thread, in such case we will check
+                 * the actual memory usage. */
+                oom_state = (getMaxmemoryState(NULL,NULL,NULL,NULL) == C_ERR);
+            } else {
+                oom_state = server.pre_command_oom_state;
+            }
+            if (oom_state) {
                 errno = ENOSPC;
                 if (error_as_call_replies) {
                     sds msg = sdsdup(shared.oomerr->ptr);
@@ -5823,7 +5832,7 @@ RedisModuleCallReply *RM_Call(RedisModuleCtx *ctx, const char *cmdname, const ch
             }
 
             int deny_write_type = writeCommandsDeniedByDiskError();
-            int obey_client = mustObeyClient(server.current_client);
+            int obey_client = (server.current_client && mustObeyClient(server.current_client));
 
             if (deny_write_type != DISK_ERROR_TYPE_NONE && !obey_client) {
                 errno = ESPIPE;

@@ -308,8 +308,10 @@ int clusterLoadConfig(char *filename) {
         if (atoi(argv[4])) n->ping_sent = mstime();
         if (atoi(argv[5])) n->pong_received = mstime();
 
-        /* Set configEpoch for this node. */
-        n->configEpoch = strtoull(argv[6],NULL,10);
+        /* Set configEpoch for this node.
+         * If the node is a replica, set its config epoch to 0.
+         * If it's a primary, load the config epoch from the configuration file. */
+        n->configEpoch = (nodeIsSlave(n) && n->slaveof) ? 0 : strtoull(argv[6],NULL,10);
 
         /* Populate hash slots served by this instance. */
         for (j = 8; j < argc; j++) {
@@ -964,6 +966,7 @@ clusterNode *createClusterNode(char *nodename, int flags) {
     node->numslaves = 0;
     node->slaves = NULL;
     node->slaveof = NULL;
+    node->last_in_ping_gossip = 0;
     node->ping_sent = node->pong_received = 0;
     node->data_received = 0;
     node->fail_time = 0;
@@ -2847,18 +2850,6 @@ void clusterBuildMessageHdr(clusterMsg *hdr, int type) {
      * totlen field is up to the caller. */
 }
 
-/* Return non zero if the node is already present in the gossip section of the
- * message pointed by 'hdr' and having 'count' gossip entries. Otherwise
- * zero is returned. Helper for clusterSendPing(). */
-int clusterNodeIsInGossipSection(clusterMsg *hdr, int count, clusterNode *n) {
-    int j;
-    for (j = 0; j < count; j++) {
-        if (memcmp(hdr->data.ping.gossip[j].nodename,n->name,
-                CLUSTER_NAMELEN) == 0) break;
-    }
-    return j != count;
-}
-
 /* Set the i-th entry of the gossip section in the message pointed by 'hdr'
  * to the info of the specified node 'n'. */
 void clusterSetGossipEntry(clusterMsg *hdr, int i, clusterNode *n) {
@@ -2878,6 +2869,8 @@ void clusterSetGossipEntry(clusterMsg *hdr, int i, clusterNode *n) {
 /* Send a PING or PONG packet to the specified node, making sure to add enough
  * gossip information. */
 void clusterSendPing(clusterLink *link, int type) {
+    static unsigned long long cluster_pings_sent = 0;
+    cluster_pings_sent++;
     unsigned char *buf;
     clusterMsg *hdr;
     int gossipcount = 0; /* Number of gossip sections added so far. */
@@ -2967,10 +2960,11 @@ void clusterSendPing(clusterLink *link, int type) {
         }
 
         /* Do not add a node we already have. */
-        if (clusterNodeIsInGossipSection(hdr,gossipcount,this)) continue;
+        if (this->last_in_ping_gossip == cluster_pings_sent) continue;
 
         /* Add it */
         clusterSetGossipEntry(hdr,gossipcount,this);
+        this->last_in_ping_gossip = cluster_pings_sent;
         freshnodes--;
         gossipcount++;
     }
@@ -2987,7 +2981,6 @@ void clusterSendPing(clusterLink *link, int type) {
             if (node->flags & CLUSTER_NODE_NOADDR) continue;
             if (!(node->flags & CLUSTER_NODE_PFAIL)) continue;
             clusterSetGossipEntry(hdr,gossipcount,node);
-            freshnodes--;
             gossipcount++;
             /* We take the count of the slots we allocated, since the
              * PFAIL stats may not match perfectly with the current number
