@@ -550,7 +550,7 @@ jobs:
       run: ./runtest-cluster ${{github.event.inputs.cluster_test_args}}
 
   test-freebsd:
-    runs-on: macos-10.15
+    runs-on: macos-12
     timeout-minutes: 14400
     steps:
     - name: prep
@@ -563,7 +563,7 @@ jobs:
         repository: ${{ env.GITHUB_REPOSITORY }}
         ref: ${{ env.GITHUB_HEAD_REF }}
     - name: test
-      uses: vmactions/freebsd-vm@v0.1.6
+      uses: vmactions/freebsd-vm@v0.2.0
       with:
         usesh: true
         sync: rsync
@@ -575,7 +575,7 @@ jobs:
           grep -vq modules ; MAKE=gmake ./runtest-moduleapi --verbose --timeout 2400 --no-latency --dump-logs ${{github.event.inputs.test_args}} || exit 1 ;
 
   test-freebsd-sentinel:
-    runs-on: macos-10.15
+    runs-on: macos-12
     timeout-minutes: 14400
     steps:
     - name: prep
@@ -588,7 +588,7 @@ jobs:
         repository: ${{ env.GITHUB_REPOSITORY }}
         ref: ${{ env.GITHUB_HEAD_REF }}
     - name: test
-      uses: vmactions/freebsd-vm@v0.1.6
+      uses: vmactions/freebsd-vm@v0.2.0
       with:
         usesh: true
         sync: rsync
@@ -599,7 +599,7 @@ jobs:
           grep -vq sentinel ; ./runtest-sentinel ${{github.event.inputs.cluster_test_args}} || exit 1 ;
 
   test-freebsd-cluster:
-    runs-on: macos-10.15
+    runs-on: macos-12
     timeout-minutes: 14400
     steps:
     - name: prep
@@ -612,7 +612,7 @@ jobs:
         repository: ${{ env.GITHUB_REPOSITORY }}
         ref: ${{ env.GITHUB_HEAD_REF }}
     - name: test
-      uses: vmactions/freebsd-vm@v0.1.6
+      uses: vmactions/freebsd-vm@v0.2.0
       with:
         usesh: true
         sync: rsync
