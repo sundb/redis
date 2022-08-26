@@ -125,10 +125,9 @@ typedef struct quicklistEntry {
     const quicklist *quicklist;
     quicklistNode *node;
     unsigned char *zi;
-    unsigned char *value;
-    long long longval;
-    size_t sz;
-    int offset;
+    // unsigned char *value;
+    // long long longval;
+    // size_t sz;
 } quicklistEntry;
 
 #define QUICKLIST_HEAD 0
@@ -163,22 +162,19 @@ void quicklistPush(quicklist *quicklist, void *value, const size_t sz,
                    int where);
 void quicklistAppendListpack(quicklist *quicklist, unsigned char *zl);
 void quicklistAppendPlainNode(quicklist *quicklist, unsigned char *data, size_t sz);
-void quicklistInsertAfter(quicklistIter *iter, quicklistEntry *entry,
-                          void *value, const size_t sz);
-void quicklistInsertBefore(quicklistIter *iter, quicklistEntry *entry,
-                           void *value, const size_t sz);
-void quicklistDelEntry(quicklistIter *iter, quicklistEntry *entry);
-void quicklistReplaceEntry(quicklistIter *iter, quicklistEntry *entry,
-                           void *data, size_t sz);
+void quicklistInsertAfter(quicklistIter *iter, void *value, const size_t sz);
+void quicklistInsertBefore(quicklistIter *iter, void *value, const size_t sz);
+void quicklistDelEntry(quicklistIter *iter);
+void quicklistReplaceEntry(quicklistIter *iter, void *data, size_t sz);
 int quicklistReplaceAtIndex(quicklist *quicklist, long index, void *data,
                             const size_t sz);
 int quicklistDelRange(quicklist *quicklist, const long start, const long stop);
 quicklistIter *quicklistGetIterator(quicklist *quicklist, int direction);
 quicklistIter *quicklistGetIteratorAtIdx(quicklist *quicklist,
                                          int direction, const long long idx);
-quicklistIter *quicklistGetIteratorEntryAtIdx(quicklist *quicklist, const long long index,
-                                              quicklistEntry *entry);
-int quicklistNext(quicklistIter *iter, quicklistEntry *entry);
+quicklistIter *quicklistGetIteratorEntryAtIdx(quicklist *quicklist, const long long index);
+unsigned char *quicklistGetEntryValue(quicklistIter *iter, unsigned int *vlen, long long *vll);
+int quicklistNext(quicklistIter *iter);
 void quicklistSetDirection(quicklistIter *iter, int direction);
 void quicklistReleaseIterator(quicklistIter *iter);
 quicklist *quicklistDup(quicklist *orig);
@@ -189,7 +185,7 @@ int quicklistPopCustom(quicklist *quicklist, int where, unsigned char **data,
 int quicklistPop(quicklist *quicklist, int where, unsigned char **data,
                  size_t *sz, long long *slong);
 unsigned long quicklistCount(const quicklist *ql);
-int quicklistCompare(quicklistEntry *entry, unsigned char *p2, const size_t p2_len);
+int quicklistCompare(quicklistIter *li, unsigned char *p2, const size_t p2_len);
 size_t quicklistGetLzf(const quicklistNode *node, void **data);
 void quicklistRepr(unsigned char *ql, int full);
 

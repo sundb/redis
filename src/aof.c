@@ -1778,9 +1778,11 @@ int rewriteListObject(rio *r, robj *key, robj *o) {
     if (o->encoding == OBJ_ENCODING_QUICKLIST) {
         quicklist *list = o->ptr;
         quicklistIter *li = quicklistGetIterator(list, AL_START_HEAD);
-        quicklistEntry entry;
+        unsigned char *vstr;
+        unsigned int vlen;
+        long long vll;
 
-        while (quicklistNext(li,&entry)) {
+        while (quicklistNext(li)) {
             if (count == 0) {
                 int cmd_items = (items > AOF_REWRITE_ITEMS_PER_CMD) ?
                     AOF_REWRITE_ITEMS_PER_CMD : items;
@@ -1793,13 +1795,14 @@ int rewriteListObject(rio *r, robj *key, robj *o) {
                 }
             }
 
-            if (entry.value) {
-                if (!rioWriteBulkString(r,(char*)entry.value,entry.sz)) {
+            vstr = quicklistGetEntryValue(li,&vlen,&vll);
+            if (vstr) {
+                if (!rioWriteBulkString(r,(char*)vstr,vlen)) {
                     quicklistReleaseIterator(li);
                     return 0;
                 }
             } else {
-                if (!rioWriteBulkLongLong(r,entry.longval)) {
+                if (!rioWriteBulkLongLong(r,vll)) {
                     quicklistReleaseIterator(li);
                     return 0;
                 }

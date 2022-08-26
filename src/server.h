@@ -2310,10 +2310,10 @@ typedef struct {
 } listTypeIterator;
 
 /* Structure for an entry while iterating over a list. */
-typedef struct {
-    listTypeIterator *li;
-    quicklistEntry entry; /* Entry in quicklist */
-} listTypeEntry;
+// typedef struct {
+//     listTypeIterator *li;
+//     quicklistEntry entry; /* Entry in quicklist */
+// } listTypeEntry;
 
 /* Structure to hold set iteration abstraction. */
 typedef struct {
@@ -2590,12 +2590,12 @@ unsigned long listTypeLength(const robj *subject);
 listTypeIterator *listTypeInitIterator(robj *subject, long index, unsigned char direction);
 void listTypeReleaseIterator(listTypeIterator *li);
 void listTypeSetIteratorDirection(listTypeIterator *li, unsigned char direction);
-int listTypeNext(listTypeIterator *li, listTypeEntry *entry);
-robj *listTypeGet(listTypeEntry *entry);
-void listTypeInsert(listTypeEntry *entry, robj *value, int where);
-void listTypeReplace(listTypeEntry *entry, robj *value);
-int listTypeEqual(listTypeEntry *entry, robj *o);
-void listTypeDelete(listTypeIterator *iter, listTypeEntry *entry);
+int listTypeNext(listTypeIterator *li);
+robj *listTypeGet(listTypeIterator *li);
+void listTypeInsert(listTypeIterator *li, robj *value, int where);
+void listTypeReplace(listTypeIterator *li, robj *value);
+int listTypeEqual(listTypeIterator *li, robj *o);
+void listTypeDelete(listTypeIterator *iter);
 robj *listTypeDup(robj *o);
 int listTypeDelRange(robj *o, long start, long stop);
 void unblockClientWaitingData(client *c);

@@ -189,7 +189,6 @@ struct RedisModuleKey {
     union {
         struct {
             /* List, use only if value->type == OBJ_LIST */
-            listTypeEntry entry;   /* Current entry in iteration. */
             long index;            /* Current 0-based index in iteration. */
         } list;
         struct {
@@ -4084,7 +4083,7 @@ int moduleListIteratorSeek(RedisModuleKey *key, long index, int mode) {
         /* No existing iterator. Create one. */
         key->iter = listTypeInitIterator(key->value, index, LIST_TAIL);
         serverAssert(key->iter != NULL);
-        serverAssert(listTypeNext(key->iter, &key->u.list.entry));
+        serverAssert(listTypeNext(key->iter));
         key->u.list.index = index;
         return 1;
     }
@@ -4100,7 +4099,7 @@ int moduleListIteratorSeek(RedisModuleKey *key, long index, int mode) {
     unsigned char dir = key->u.list.index < index ? LIST_TAIL : LIST_HEAD;
     listTypeSetIteratorDirection(key->iter, dir);
     while (key->u.list.index != index) {
-        serverAssert(listTypeNext(key->iter, &key->u.list.entry));
+        serverAssert(listTypeNext(key->iter));
         key->u.list.index += dir == LIST_HEAD ? -1 : 1;
     }
     return 1;
@@ -4196,7 +4195,7 @@ RedisModuleString *RM_ListPop(RedisModuleKey *key, int where) {
  */
 RedisModuleString *RM_ListGet(RedisModuleKey *key, long index) {
     if (moduleListIteratorSeek(key, index, REDISMODULE_READ)) {
-        robj *elem = listTypeGet(&key->u.list.entry);
+        robj *elem = listTypeGet(key->iter);
         robj *decoded = getDecodedObject(elem);
         decrRefCount(elem);
         autoMemoryAdd(key->ctx, REDISMODULE_AM_STRING, decoded);
@@ -4227,7 +4226,7 @@ int RM_ListSet(RedisModuleKey *key, long index, RedisModuleString *value) {
         return REDISMODULE_ERR;
     }
     if (moduleListIteratorSeek(key, index, REDISMODULE_WRITE)) {
-        listTypeReplace(&key->u.list.entry, value);
+        listTypeReplace(key->iter, value);
         /* A note in quicklist.c forbids use of iterator after insert, so
          * probably also after replace. */
         listTypeReleaseIterator(key->iter);
@@ -4274,7 +4273,7 @@ int RM_ListInsert(RedisModuleKey *key, long index, RedisModuleString *value) {
     }
     if (moduleListIteratorSeek(key, index, REDISMODULE_WRITE)) {
         int where = index < 0 ? LIST_TAIL : LIST_HEAD;
-        listTypeInsert(&key->u.list.entry, value, where);
+        listTypeInsert(key->iter, value, where);
         /* A note in quicklist.c forbids use of iterator after insert. */
         listTypeReleaseIterator(key->iter);
         key->iter = NULL;
@@ -4297,7 +4296,7 @@ int RM_ListInsert(RedisModuleKey *key, long index, RedisModuleString *value) {
  */
 int RM_ListDelete(RedisModuleKey *key, long index) {
     if (moduleListIteratorSeek(key, index, REDISMODULE_WRITE)) {
-        listTypeDelete(key->iter, &key->u.list.entry);
+        listTypeDelete(key->iter);
         moduleDelKeyIfEmpty(key);
         return REDISMODULE_OK;
     } else {
