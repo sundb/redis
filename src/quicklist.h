@@ -121,15 +121,6 @@ typedef struct quicklistIter {
     int direction;
 } quicklistIter;
 
-typedef struct quicklistEntry {
-    const quicklist *quicklist;
-    quicklistNode *node;
-    unsigned char *zi;
-    // unsigned char *value;
-    // long long longval;
-    // size_t sz;
-} quicklistEntry;
-
 #define QUICKLIST_HEAD 0
 #define QUICKLIST_TAIL -1
 

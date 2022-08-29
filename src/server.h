@@ -2309,12 +2309,6 @@ typedef struct {
     quicklistIter *iter;
 } listTypeIterator;
 
-/* Structure for an entry while iterating over a list. */
-// typedef struct {
-//     listTypeIterator *li;
-//     quicklistEntry entry; /* Entry in quicklist */
-// } listTypeEntry;
-
 /* Structure to hold set iteration abstraction. */
 typedef struct {
     robj *subject;
