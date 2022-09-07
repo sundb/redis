@@ -439,23 +439,23 @@ jobs:
       run: |
         yum -y install centos-release-scl epel-release
         yum -y install devtoolset-7 openssl-devel openssl
-        scl enable devtoolset-7 "make BUILD_TLS=yes REDIS_CFLAGS='-Werror'"
+        scl enable devtoolset-7 "make BUILD_TLS=module REDIS_CFLAGS='-Werror'"
     - name: testprep
       run: |
         yum -y install tcl tcltls tclx
         ./utils/gen-test-certs.sh
     - name: test
       run: |
-        ./runtest --accurate --verbose --dump-logs --tls --dump-logs ${{github.event.inputs.test_args}}
+        ./runtest --accurate --verbose --dump-logs --tls-module --dump-logs ${{github.event.inputs.test_args}}
     - name: module api test
       run: |
-        ./runtest-moduleapi --verbose --dump-logs --tls --dump-logs ${{github.event.inputs.test_args}}
+        ./runtest-moduleapi --verbose --dump-logs --tls-module --dump-logs ${{github.event.inputs.test_args}}
     - name: sentinel tests
       run: |
-        ./runtest-sentinel --tls ${{github.event.inputs.cluster_test_args}}
+        ./runtest-sentinel ${{github.event.inputs.cluster_test_args}}
     - name: cluster tests
       run: |
-        ./runtest-cluster --tls ${{github.event.inputs.cluster_test_args}}
+        ./runtest-cluster --tls-module ${{github.event.inputs.cluster_test_args}}
 
   test-centos7-tls-no-tls:
     runs-on: ubuntu-latest
@@ -475,7 +475,7 @@ jobs:
       run: |
         yum -y install centos-release-scl epel-release
         yum -y install devtoolset-7 openssl-devel openssl
-        scl enable devtoolset-7 "make BUILD_TLS=yes REDIS_CFLAGS='-Werror'"
+        scl enable devtoolset-7 "make BUILD_TLS=module REDIS_CFLAGS='-Werror'"
     - name: testprep
       run: |
         yum -y install tcl tcltls tclx
@@ -563,7 +563,7 @@ jobs:
         repository: ${{ env.GITHUB_REPOSITORY }}
         ref: ${{ env.GITHUB_HEAD_REF }}
     - name: test
-      uses: vmactions/freebsd-vm@v0.2.3
+      uses: vmactions/freebsd-vm@v0.2.4
       with:
         usesh: true
         sync: rsync
@@ -588,7 +588,7 @@ jobs:
         repository: ${{ env.GITHUB_REPOSITORY }}
         ref: ${{ env.GITHUB_HEAD_REF }}
     - name: test
-      uses: vmactions/freebsd-vm@v0.2.3
+      uses: vmactions/freebsd-vm@v0.2.4
       with:
         usesh: true
         sync: rsync
@@ -612,7 +612,7 @@ jobs:
         repository: ${{ env.GITHUB_REPOSITORY }}
         ref: ${{ env.GITHUB_HEAD_REF }}
     - name: test
-      uses: vmactions/freebsd-vm@v0.2.3
+      uses: vmactions/freebsd-vm@v0.2.4
       with:
         usesh: true
         sync: rsync
