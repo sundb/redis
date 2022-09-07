@@ -355,7 +355,7 @@ if {[lindex [r config get proto-max-bulk-len] 1] == 10000000000} {
 start_server {
     tags {"list"}
     overrides {
-        "list-max-ziplist-size" 5
+        "list-max-ziplist-size" -1
     }
 } {
     source "tests/unit/type/list-common.tcl"
@@ -433,7 +433,7 @@ start_server {
         assert {[r LPOS mylist b COUNT 10 RANK 5] eq {}}
     }
 
-    test {LPUSH, RPUSH, LLENGTH, LINDEX, LPOP - ziplist} {
+    test {LPUSH, RPUSH, LLENGTH, LINDEX, LPOP - listpack} {
         # first lpush then rpush
         assert_equal 1 [r lpush myziplist1 aa]
         assert_equal 2 [r rpush myziplist1 bb]
@@ -445,7 +445,7 @@ start_server {
         assert_equal {} [r lindex myziplist2 3]
         assert_equal cc [r rpop myziplist1]
         assert_equal aa [r lpop myziplist1]
-        assert_encoding quicklist myziplist1
+        assert_encoding listpack myziplist1
 
         # first rpush then lpush
         assert_equal 1 [r rpush myziplist2 a]
@@ -458,34 +458,34 @@ start_server {
         assert_equal {} [r lindex myziplist2 3]
         assert_equal a [r rpop myziplist2]
         assert_equal c [r lpop myziplist2]
-        assert_encoding quicklist myziplist2
+        assert_encoding listpack myziplist2
     }
 
-    test {LPUSH, RPUSH, LLENGTH, LINDEX, LPOP - regular list} {
+    test {LPUSH, RPUSH, LLENGTH, LINDEX, LPOP - quicklist} {
         # first lpush then rpush
-        assert_equal 1 [r lpush mylist1 $largevalue(linkedlist)]
+        assert_equal 1 [r lpush mylist1 $largevalue(quicklist)]
         assert_encoding quicklist mylist1
         assert_equal 2 [r rpush mylist1 b]
         assert_equal 3 [r rpush mylist1 c]
         assert_equal 3 [r llen mylist1]
-        assert_equal $largevalue(linkedlist) [r lindex mylist1 0]
+        assert_equal $largevalue(quicklist) [r lindex mylist1 0]
         assert_equal b [r lindex mylist1 1]
         assert_equal c [r lindex mylist1 2]
         assert_equal {} [r lindex mylist1 3]
         assert_equal c [r rpop mylist1]
-        assert_equal $largevalue(linkedlist) [r lpop mylist1]
+        assert_equal $largevalue(quicklist) [r lpop mylist1]
 
         # first rpush then lpush
-        assert_equal 1 [r rpush mylist2 $largevalue(linkedlist)]
+        assert_equal 1 [r rpush mylist2 $largevalue(quicklist)]
         assert_encoding quicklist mylist2
         assert_equal 2 [r lpush mylist2 b]
         assert_equal 3 [r lpush mylist2 c]
         assert_equal 3 [r llen mylist2]
         assert_equal c [r lindex mylist2 0]
         assert_equal b [r lindex mylist2 1]
-        assert_equal $largevalue(linkedlist) [r lindex mylist2 2]
+        assert_equal $largevalue(quicklist) [r lindex mylist2 2]
         assert_equal {} [r lindex mylist2 3]
-        assert_equal $largevalue(linkedlist) [r rpop mylist2]
+        assert_equal $largevalue(quicklist) [r rpop mylist2]
         assert_equal c [r lpop mylist2]
     }
 
@@ -564,6 +564,18 @@ start_server {
     proc create_list {key entries} {
         r del $key
         foreach entry $entries { r rpush $key $entry }
+        assert_encoding listpack $key
+    }
+
+    proc create_listpack {key entries} {
+        r del $key
+        foreach entry $entries { r rpush $key $entry }
+        assert_encoding listpack $key
+    }
+
+    proc create_quicklist {key entries} {
+        r del $key
+        foreach entry $entries { r rpush $key $entry }
         assert_encoding quicklist $key
     }
 
@@ -571,7 +583,7 @@ start_server {
     foreach {pop} {BLPOP BLMPOP_LEFT} {
         test "$pop: single existing list - $type" {
             set rd [redis_deferring_client]
-            create_list blist "a b $large c d"
+            create_$type blist "a b $large c d"
 
             bpop_command $rd $pop blist 1
             assert_equal {blist a} [$rd read]
@@ -597,8 +609,8 @@ start_server {
 
         test "$pop: multiple existing lists - $type" {
             set rd [redis_deferring_client]
-            create_list blist1{t} "a $large c"
-            create_list blist2{t} "d $large f"
+            create_$type blist1{t} "a $large c"
+            create_$type blist2{t} "d $large f"
 
             bpop_command_two_key $rd $pop blist1{t} blist2{t} 1
             assert_equal {blist1{t} a} [$rd read]
@@ -627,7 +639,7 @@ start_server {
         test "$pop: second list has an entry - $type" {
             set rd [redis_deferring_client]
             r del blist1{t}
-            create_list blist2{t} "d $large f"
+            create_$type blist2{t} "d $large f"
 
             bpop_command_two_key $rd $pop blist1{t} blist2{t} 1
             assert_equal {blist2{t} d} [$rd read]
@@ -648,7 +660,7 @@ start_server {
             r rpush target{t} bar
 
             set rd [redis_deferring_client]
-            create_list blist{t} "a b $large c d"
+            create_$type blist{t} "a b $large c d"
 
             $rd brpoplpush blist{t} target{t} 1
             assert_equal d [$rd read]
@@ -665,7 +677,7 @@ start_server {
                     r rpush target{t} bar
 
                     set rd [redis_deferring_client]
-                    create_list blist{t} "a b $large c d"
+                    create_$type blist{t} "a b $large c d"
 
                     $rd blmove blist{t} target{t} $wherefrom $whereto 1
                     set poppedelement [$rd read]
@@ -1316,7 +1328,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
 
     foreach {type large} [array get largevalue] {
         test "LPUSHX, RPUSHX - $type" {
-            create_list xlist "$large c"
+            create_$type xlist "$large c"
             assert_equal 3 [r rpushx xlist d]
             assert_equal 4 [r lpushx xlist a]
             assert_equal 6 [r rpushx xlist 42 x]
@@ -1325,7 +1337,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         }
 
         test "LINSERT - $type" {
-            create_list xlist "a $large c d"
+            create_$type xlist "a $large c d"
             assert_equal 5 [r linsert xlist before c zz] "before c"
             assert_equal "a $large zz c d" [r lrange xlist 0 10] "lrangeA"
             assert_equal 6 [r linsert xlist after c yy] "after c"
@@ -1348,7 +1360,13 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         set e
     } {*ERR*syntax*error*}
 
-    foreach {type num} {quicklist 250 quicklist 500} {
+    foreach {type num} {listpack 125 quicklist 250 quicklist 500} {
+        if {$type == "quicklist"} {
+            r config set list-max-listpack-size 5
+        } else {
+            r config set list-max-listpack-size -1
+        }
+
         proc check_numbered_list_consistency {key} {
             set len [r llen $key]
             for {set i 0} {$i < $len} {incr i} {
@@ -1386,6 +1404,8 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
             check_numbered_list_consistency mylist
             check_random_access_consistency mylist
         } {} {needs:debug}
+
+        r config set list-max-listpack-size -1
     }
 
     test {LLEN against non-list value error} {
@@ -1417,12 +1437,12 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
     foreach {type large} [array get largevalue] {
         test "RPOPLPUSH base case - $type" {
             r del mylist1{t} mylist2{t}
-            create_list mylist1{t} "a $large c d"
+            create_$type mylist1{t} "a $large c d"
             assert_equal d [r rpoplpush mylist1{t} mylist2{t}]
             assert_equal c [r rpoplpush mylist1{t} mylist2{t}]
             assert_equal "a $large" [r lrange mylist1{t} 0 -1]
             assert_equal "c d" [r lrange mylist2{t} 0 -1]
-            assert_encoding quicklist mylist2{t}
+            assert_encoding listpack mylist2{t}
         }
 
         foreach wherefrom {left right} {
@@ -1431,9 +1451,9 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
                     r del mylist1{t} mylist2{t}
 
                     if {$wherefrom eq "right"} {
-                        create_list mylist1{t} "c d $large a"
+                        create_$type mylist1{t} "c d $large a"
                     } else {
-                        create_list mylist1{t} "a $large c d"
+                        create_$type mylist1{t} "a $large c d"
                     }
                     assert_equal a [r lmove mylist1{t} mylist2{t} $wherefrom $whereto]
                     assert_equal $large [r lmove mylist1{t} mylist2{t} $wherefrom $whereto]
@@ -1443,13 +1463,13 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
                     } else {
                         assert_equal "$large a" [r lrange mylist2{t} 0 -1]
                     }
-                    assert_encoding quicklist mylist2{t}
+                    assert_encoding $type mylist2{t}
                 }
             }
         }
 
         test "RPOPLPUSH with the same list as src and dst - $type" {
-            create_list mylist{t} "a $large c"
+            create_$type mylist{t} "a $large c"
             assert_equal "a $large c" [r lrange mylist{t} 0 -1]
             assert_equal c [r rpoplpush mylist{t} mylist{t}]
             assert_equal "c a $large" [r lrange mylist{t} 0 -1]
@@ -1459,10 +1479,10 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
             foreach whereto {left right} {
                 test "LMOVE $wherefrom $whereto with the same list as src and dst - $type" {
                     if {$wherefrom eq "right"} {
-                        create_list mylist{t} "a $large c"
+                        create_$type mylist{t} "a $large c"
                         assert_equal "a $large c" [r lrange mylist{t} 0 -1]
                     } else {
-                        create_list mylist{t} "c a $large"
+                        create_$type mylist{t} "c a $large"
                         assert_equal "c a $large" [r lrange mylist{t} 0 -1]
                     }
                     assert_equal c [r lmove mylist{t} mylist{t} $wherefrom $whereto]
@@ -1477,8 +1497,9 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
 
         foreach {othertype otherlarge} [array get largevalue] {
             test "RPOPLPUSH with $type source and existing target $othertype" {
-                create_list srclist{t} "a b c $large"
-                create_list dstlist{t} "$otherlarge"
+                r config set list-max-listpack-size -1
+                create_$type srclist{t} "a b c $large"
+                create_$othertype dstlist{t} "$otherlarge"
                 assert_equal $large [r rpoplpush srclist{t} dstlist{t}]
                 assert_equal c [r rpoplpush srclist{t} dstlist{t}]
                 assert_equal "a b" [r lrange srclist{t} 0 -1]
@@ -1486,20 +1507,21 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
 
                 # When we rpoplpush'ed a large value, dstlist should be
                 # converted to the same encoding as srclist.
-                if {$type eq "linkedlist"} {
+                if {$type eq "quicklist"} {
                     assert_encoding quicklist dstlist{t}
                 }
             }
 
             foreach wherefrom {left right} {
                 foreach whereto {left right} {
+                    r config set list-max-listpack-size -1
                     test "LMOVE $wherefrom $whereto with $type source and existing target $othertype" {
-                        create_list dstlist{t} "$otherlarge"
+                        create_$othertype dstlist{t} "$otherlarge"
 
                         if {$wherefrom eq "right"} {
-                            create_list srclist{t} "a b c $large"
+                            create_$type srclist{t} "a b c $large"
                         } else {
-                            create_list srclist{t} "$large c a b"
+                            create_$type srclist{t} "$large c a b"
                         }
                         assert_equal $large [r lmove srclist{t} dstlist{t} $wherefrom $whereto]
                         assert_equal c [r lmove srclist{t} dstlist{t} $wherefrom $whereto]
@@ -1513,7 +1535,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
 
                         # When we lmoved a large value, dstlist should be
                         # converted to the same encoding as srclist.
-                        if {$type eq "linkedlist"} {
+                        if {$type eq "quicklist"} {
                             assert_encoding quicklist dstlist{t}
                         }
                     }
@@ -1538,7 +1560,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
     }
 
     test {RPOPLPUSH against non list dst key} {
-        create_list srclist{t} {a b c d}
+        create_listpack srclist{t} {a b c d}
         r set dstlist{t} x
         assert_error WRONGTYPE* {r rpoplpush srclist{t} dstlist{t}}
         assert_type string dstlist{t}
@@ -1552,13 +1574,13 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
 
     foreach {type large} [array get largevalue] {
         test "Basic LPOP/RPOP/LMPOP - $type" {
-            create_list mylist "$large 1 2"
+            create_$type mylist "$large 1 2"
             assert_equal $large [r lpop mylist]
             assert_equal 2 [r rpop mylist]
             assert_equal 1 [r lpop mylist]
             assert_equal 0 [r llen mylist]
 
-            create_list mylist "$large 1 2"
+            create_$type mylist "$large 1 2"
             assert_equal "mylist $large" [r lmpop 1 mylist left count 1]
             assert_equal {mylist {2 1}} [r lmpop 2 mylist mylist right count 2]
         }
@@ -1595,6 +1617,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
 
     foreach {type num} {quicklist 250 quicklist 500} {
         test "Mass RPOP/LPOP - $type" {
+            r config set list-max-listpack-size 5
             r del mylist
             set sum1 0
             for {set i 0} {$i < $num} {incr i} {
@@ -1634,6 +1657,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
     }
 
     test {LMPOP single existing list} {
+        r config set list-max-listpack-size -1
         # Same key multiple times.
         create_list mylist{t} "a b c d e f"
         assert_equal {mylist{t} {a b}} [r lmpop 2 mylist{t} mylist{t} left count 2]
@@ -1729,25 +1753,26 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
     } {} {needs:repl}
 
     foreach {type large} [array get largevalue] {
+        r config set list-max-listpack-size -1
         test "LRANGE basics - $type" {
-            create_list mylist "$large 1 2 3 4 5 6 7 8 9"
+            create_$type mylist "$large 1 2 3 4 5 6 7 8 9"
             assert_equal {1 2 3 4 5 6 7 8} [r lrange mylist 1 -2]
             assert_equal {7 8 9} [r lrange mylist -3 -1]
             assert_equal {4} [r lrange mylist 4 4]
         }
 
         test "LRANGE inverted indexes - $type" {
-            create_list mylist "$large 1 2 3 4 5 6 7 8 9"
+            create_$type mylist "$large 1 2 3 4 5 6 7 8 9"
             assert_equal {} [r lrange mylist 6 2]
         }
 
         test "LRANGE out of range indexes including the full list - $type" {
-            create_list mylist "$large 1 2 3"
+            create_$type mylist "$large 1 2 3"
             assert_equal "$large 1 2 3" [r lrange mylist -1000 1000]
         }
 
         test "LRANGE out of range negative end index - $type" {
-            create_list mylist "$large 1 2 3"
+            create_$type mylist "$large 1 2 3"
             assert_equal $large [r lrange mylist 0 -4]
             assert_equal {} [r lrange mylist 0 -5]
         }
@@ -1767,7 +1792,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         proc trim_list {type min max} {
             upvar 1 large large
             r del mylist
-            create_list mylist "1 2 3 4 $large"
+            create_$type mylist "1 2 3 4 $large"
             r ltrim mylist $min $max
             r lrange mylist 0 -1
         }
@@ -1796,7 +1821,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
 
     foreach {type large} [array get largevalue] {
         test "LSET - $type" {
-            create_list mylist "99 98 $large 96 95"
+            create_$type mylist "99 98 $large 96 95"
             r lset mylist 1 foo
             r lset mylist -1 bar
             assert_equal "99 foo $large 96 bar" [r lrange mylist 0 -1]
@@ -1817,8 +1842,9 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
     }
 
     foreach {type e} [array get largevalue] {
+        r config set list-max-listpack-size -1
         test "LREM remove all the occurrences - $type" {
-            create_list mylist "$e foo bar foobar foobared zap bar test foo"
+            create_$type mylist "$e foo bar foobar foobared zap bar test foo"
             assert_equal 2 [r lrem mylist 0 bar]
             assert_equal "$e foo foobar foobared zap test foo" [r lrange mylist 0 -1]
         }
@@ -1834,7 +1860,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         }
 
         test "LREM starting from tail with negative count - $type" {
-            create_list mylist "$e foo bar foobar foobared zap bar test foo foo"
+            create_$type mylist "$e foo bar foobar foobared zap bar test foo foo"
             assert_equal 1 [r lrem mylist -1 bar]
             assert_equal "$e foo bar foobar foobared zap test foo foo" [r lrange mylist 0 -1]
         }
@@ -1845,7 +1871,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         }
 
         test "LREM deleting objects that may be int encoded - $type" {
-            create_list myotherlist "$e 1 2 3"
+            create_$type myotherlist "$e 1 2 3"
             assert_equal 1 [r lrem myotherlist 1 2]
             assert_equal 3 [r llen myotherlist]
         }

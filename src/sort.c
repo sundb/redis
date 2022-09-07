@@ -546,7 +546,7 @@ void sortCommandGeneric(client *c, int readonly) {
             }
         }
     } else {
-        robj *sobj = createQuicklistObject();
+        robj *sobj = createListListpackObject();
 
         /* STORE option specified, set the sorting result as a List object */
         for (j = start; j <= end; j++) {

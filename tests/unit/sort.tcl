@@ -42,6 +42,7 @@ start_server {
         1000 sadd hashtable "Hash table"
         10000 sadd hashtable "Big Hash table"
     } {
+        r config set list-max-listpack-size 5
         set result [create_random_dataset $num $cmd]
         assert_encoding $enc tosort
 
@@ -84,14 +85,14 @@ start_server {
         r sort tosort BY weight_* store sort-res
         assert_equal $result [r lrange sort-res 0 -1]
         assert_equal 16 [r llen sort-res]
-        assert_encoding quicklist sort-res
+        assert_encoding listpack sort-res
     } {} {cluster:skip}
 
     test "SORT BY hash field STORE" {
         r sort tosort BY wobj_*->weight store sort-res
         assert_equal $result [r lrange sort-res 0 -1]
         assert_equal 16 [r llen sort-res]
-        assert_encoding quicklist sort-res
+        assert_encoding listpack sort-res
     } {} {cluster:skip}
 
     test "SORT extracts STORE correctly" {

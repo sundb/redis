@@ -2285,12 +2285,17 @@ typedef struct {
     robj *subject;
     unsigned char encoding;
     unsigned char direction; /* Iteration direction */
+
+    unsigned char *p; /* Used when encoded in listpack */
+
+    /* Used when encoded in quicklist */
     quicklistIter *iter;
 } listTypeIterator;
 
 /* Structure for an entry while iterating over a list. */
 typedef struct {
     listTypeIterator *li;
+    unsigned char *p; /* Used when encoded in listpack */
     quicklistEntry entry; /* Entry in quicklist */
 } listTypeEntry;
 
@@ -2569,6 +2574,7 @@ void listTypeReleaseIterator(listTypeIterator *li);
 void listTypeSetIteratorDirection(listTypeIterator *li, unsigned char direction);
 int listTypeNext(listTypeIterator *li, listTypeEntry *entry);
 robj *listTypeGet(listTypeEntry *entry);
+void listTypeGetValue(listTypeEntry *entry, unsigned char **vstr, unsigned int *vlen, long long *lval);
 void listTypeInsert(listTypeEntry *entry, robj *value, int where);
 void listTypeReplace(listTypeEntry *entry, robj *value);
 int listTypeEqual(listTypeEntry *entry, robj *o);
@@ -2619,6 +2625,7 @@ robj *createStringObjectFromLongLong(long long value);
 robj *createStringObjectFromLongLongForValue(long long value);
 robj *createStringObjectFromLongDouble(long double value, int humanfriendly);
 robj *createQuicklistObject(void);
+robj *createListListpackObject(void);
 robj *createSetObject(void);
 robj *createIntsetObject(void);
 robj *createHashObject(void);
