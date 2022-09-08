@@ -2287,9 +2287,7 @@ typedef struct {
     unsigned char direction; /* Iteration direction */
 
     unsigned char *p; /* Used when encoded in listpack */
-
-    /* Used when encoded in quicklist */
-    quicklistIter *iter;
+    quicklistIter *iter; /* Used when encoded in quicklist */
 } listTypeIterator;
 
 /* Structure for an entry while iterating over a list. */

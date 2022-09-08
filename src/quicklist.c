@@ -1595,10 +1595,6 @@ void quicklistPush(quicklist *quicklist, void *value, const size_t sz,
     }
 }
 
-int quicklistIsLargeElement(size_t sz) {
-    return isLargeElement(sz);
-}
-
 /* Print info of quicklist which is used in debugCommand. */
 void quicklistRepr(unsigned char *ql, int full) {
     int i = 0;

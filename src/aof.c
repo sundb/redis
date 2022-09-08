@@ -1778,9 +1778,6 @@ int rewriteListObject(rio *r, robj *key, robj *o) {
     if (o->encoding == OBJ_ENCODING_QUICKLIST || o->encoding == OBJ_ENCODING_LISTPACK) {
         listTypeIterator *li = listTypeInitIterator(o,0,LIST_TAIL);
         listTypeEntry entry;
-        unsigned char *vstr;
-        unsigned int vlen;
-        long long lval;
 
         while (listTypeNext(li,&entry)) {
             if (count == 0) {
@@ -1795,6 +1792,9 @@ int rewriteListObject(rio *r, robj *key, robj *o) {
                 }
             }
 
+            unsigned char *vstr;
+            unsigned int vlen;
+            long long lval;
             listTypeGetValue(&entry,&vstr,&vlen,&lval);
             if (vstr) {
                 if (!rioWriteBulkString(r,(char*)vstr,vlen)) {
