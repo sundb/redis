@@ -39,7 +39,6 @@ void listTypeConvertListpack(robj *o, int enc) {
     if (enc == OBJ_ENCODING_LISTPACK) {
         /* Nothing to do... */
     } else if (enc == OBJ_ENCODING_QUICKLIST) {
-        printf("listTypeConvertListpack\n");
         quicklist *ql = quicklistCreate();
         quicklistSetOptions(ql, server.list_max_listpack_size,
                             server.list_compress_depth);
@@ -49,16 +48,6 @@ void listTypeConvertListpack(robj *o, int enc) {
             lpFree(o->ptr);
         o->ptr = ql;
         o->encoding = OBJ_ENCODING_QUICKLIST;
-    } else {
-        serverPanic("Unknown hash encoding");
-    }
-}
-
-void listTypeConvert(robj *o, int enc) {
-    if (o->encoding == OBJ_ENCODING_LISTPACK) {
-        listTypeConvertListpack(o, enc);
-    } else if (o->encoding == OBJ_ENCODING_QUICKLIST) {
-        serverPanic("Not implemented");
     } else {
         serverPanic("Unknown hash encoding");
     }
@@ -75,15 +64,13 @@ void listTypeTryConversion(robj *o, robj **argv, int start, int end) {
         sum += len;
     }
 
-    if (!quicklistSizeMeetsSafetyLimit(lpBytes(o->ptr) + sum, lpLength(o->ptr) + end - start + 1,
-                                       server.list_max_listpack_size))
+    size_t sz = lpBytes(o->ptr) + sum;
+    unsigned long len = lpLength(o->ptr) + end - start + 1;
+    if (!quicklistSizeMeetsSafetyLimit(sz, len, server.list_max_listpack_size) ||
+        !lpSafeToAdd(o->ptr, sum))
     {
         listTypeConvertListpack(o, OBJ_ENCODING_QUICKLIST);
-        return;
     }
-
-    if (!lpSafeToAdd(o->ptr, sum))
-        listTypeConvertListpack(o, OBJ_ENCODING_QUICKLIST);
 }
 
 /* The function pushes an element to the specified list object 'subject',
