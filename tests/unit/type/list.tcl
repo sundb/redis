@@ -1546,7 +1546,6 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
 
         foreach {othertype otherlarge} [array get largevalue] {
             test "RPOPLPUSH with $type source and existing target $othertype" {
-                r config set list-max-listpack-size -1
                 create_$type srclist{t} "a b c $large"
                 create_$othertype dstlist{t} "$otherlarge"
                 assert_equal $large [r rpoplpush srclist{t} dstlist{t}]
@@ -1563,7 +1562,6 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
 
             foreach wherefrom {left right} {
                 foreach whereto {left right} {
-                    r config set list-max-listpack-size -1
                     test "LMOVE $wherefrom $whereto with $type source and existing target $othertype" {
                         create_$othertype dstlist{t} "$otherlarge"
 
@@ -1664,12 +1662,15 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         assert_error "WRONGTYPE*" {r blmpop 0 2 notalist{t} notalist2{t} left count 1}
     }
 
-    foreach {type num} {quicklist 250 quicklist 500} {
+foreach {type large} [array get largevalue] {
+    foreach {num} {250 500} {
         test "Mass RPOP/LPOP - $type" {
-            r config set list-max-listpack-size 5
             r del mylist
             set sum1 0
             for {set i 0} {$i < $num} {incr i} {
+                if {$i == [expr $num/2]} {
+                    r lpush mylist $large
+                }
                 r lpush mylist $i
                 incr sum1 $i
             }
@@ -1706,56 +1707,56 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
     }
 
     test {LMPOP single existing list} {
-        r config set list-max-listpack-size -1
         # Same key multiple times.
-        create_list mylist{t} "a b c d e f"
+        create_$type mylist{t} "a b $large d e f"
         assert_equal {mylist{t} {a b}} [r lmpop 2 mylist{t} mylist{t} left count 2]
         assert_equal {mylist{t} {f e}} [r lmpop 2 mylist{t} mylist{t} right count 2]
         assert_equal 2 [r llen mylist{t}]
 
         # First one exists, second one does not exist.
-        create_list mylist{t} "a b c d e"
+        create_$type mylist{t} "a b $large d e"
         r del mylist2{t}
         assert_equal {mylist{t} a} [r lmpop 2 mylist{t} mylist2{t} left count 1]
         assert_equal 4 [r llen mylist{t}]
-        assert_equal {mylist{t} {e d c b}} [r lmpop 2 mylist{t} mylist2{t} right count 10]
+        assert_equal "mylist{t} {e d $large b}" [r lmpop 2 mylist{t} mylist2{t} right count 10]
         assert_equal {} [r lmpop 2 mylist{t} mylist2{t} right count 1]
 
         # First one does not exist, second one exists.
         r del mylist{t}
-        create_list mylist2{t} "1 2 3 4 5"
+        create_$type mylist2{t} "1 2 $large 4 5"
         assert_equal {mylist2{t} 5} [r lmpop 2 mylist{t} mylist2{t} right count 1]
         assert_equal 4 [r llen mylist2{t}]
-        assert_equal {mylist2{t} {1 2 3 4}} [r lmpop 2 mylist{t} mylist2{t} left count 10]
+        assert_equal "mylist2{t} {1 2 $large 4}" [r lmpop 2 mylist{t} mylist2{t} left count 10]
 
         assert_equal 0 [r exists mylist{t} mylist2{t}]
     }
 
     test {LMPOP multiple existing lists} {
-        create_list mylist{t} "a b c d e"
-        create_list mylist2{t} "1 2 3 4 5"
+        create_$type mylist{t} "a b $large d e"
+        create_$type mylist2{t} "1 2 $large 4 5"
 
         # Pop up from the first key.
         assert_equal {mylist{t} {a b}} [r lmpop 2 mylist{t} mylist2{t} left count 2]
         assert_equal 3 [r llen mylist{t}]
-        assert_equal {mylist{t} {e d c}} [r lmpop 2 mylist{t} mylist2{t} right count 3]
+        assert_equal "mylist{t} {e d $large}" [r lmpop 2 mylist{t} mylist2{t} right count 3]
         assert_equal 0 [r exists mylist{t}]
 
         # Pop up from the second key.
-        assert_equal {mylist2{t} {1 2 3}} [r lmpop 2 mylist{t} mylist2{t} left count 3]
+        assert_equal "mylist2{t} {1 2 $large}" [r lmpop 2 mylist{t} mylist2{t} left count 3]
         assert_equal 2 [r llen mylist2{t}]
         assert_equal {mylist2{t} {5 4}} [r lmpop 2 mylist{t} mylist2{t} right count 2]
         assert_equal 0 [r exists mylist{t}]
 
         # Pop up all elements.
-        create_list mylist{t} "a b c"
-        create_list mylist2{t} "1 2 3"
-        assert_equal {mylist{t} {a b c}} [r lmpop 2 mylist{t} mylist2{t} left count 10]
+        create_$type mylist{t} "a $large c"
+        create_$type mylist2{t} "1 $large 3"
+        assert_equal "mylist{t} {a $large c}" [r lmpop 2 mylist{t} mylist2{t} left count 10]
         assert_equal 0 [r llen mylist{t}]
-        assert_equal {mylist2{t} {3 2 1}} [r lmpop 2 mylist{t} mylist2{t} right count 10]
+        assert_equal "mylist2{t} {3 $large 1}" [r lmpop 2 mylist{t} mylist2{t} right count 10]
         assert_equal 0 [r llen mylist2{t}]
         assert_equal 0 [r exists mylist{t} mylist2{t}]
     }
+}
 
     test {LMPOP propagate as pop with count command to replica} {
         set repl [attach_to_replication_stream]
@@ -1802,7 +1803,6 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
     } {} {needs:repl}
 
     foreach {type large} [array get largevalue] {
-        r config set list-max-listpack-size -1
         test "LRANGE basics - $type" {
             create_$type mylist "$large 1 2 3 4 5 6 7 8 9"
             assert_equal {1 2 3 4 5 6 7 8} [r lrange mylist 1 -2]
@@ -1825,16 +1825,17 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
             assert_equal $large [r lrange mylist 0 -4]
             assert_equal {} [r lrange mylist 0 -5]
         }
-    }
 
     test {LRANGE against non existing key} {
         assert_equal {} [r lrange nosuchkey 0 1]
     }
 
     test {LRANGE with start > end yields an empty array for backward compatibility} {
-        create_list mylist "1 2 3"
+        create_$type mylist "1 $large 3"
         assert_equal {} [r lrange mylist 1 0]
         assert_equal {} [r lrange mylist -1 -2]
+    }
+
     }
 
     foreach {type large} [array get largevalue] {
@@ -1891,7 +1892,6 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
     }
 
     foreach {type e} [array get largevalue] {
-        r config set list-max-listpack-size -1
         test "LREM remove all the occurrences - $type" {
             create_$type mylist "$e foo bar foobar foobared zap bar test foo"
             assert_equal 2 [r lrem mylist 0 bar]
