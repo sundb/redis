@@ -2584,8 +2584,7 @@ int listTypeDelRange(robj *o, long start, long stop);
 void unblockClientWaitingData(client *c);
 void popGenericCommand(client *c, int where);
 void listElementsRemoved(client *c, robj *key, int where, robj *o, long count, int *deleted);
-void listTypeTryConvertQuicklist(robj *o);
-void listTypeTryConvertListpack(robj *o, robj **argv, int start, int end);
+void listTypeConvertListpack(robj *o, int enc);
 
 /* MULTI/EXEC/WATCH... */
 void unwatchAllKeys(client *c);

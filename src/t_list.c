@@ -33,17 +33,6 @@
  * List API
  *----------------------------------------------------------------------------*/
 
-void listTypeTryConvertQuicklist(robj *o) {
-    quicklist *ql = o->ptr;
-    if (o->encoding != OBJ_ENCODING_QUICKLIST || ql->count != 1) return;
-
-    o->ptr = ql->head;
-    ql->head = ql->tail = NULL;
-    ql->len = 0;
-    quicklistRelease(ql);
-    o->encoding = OBJ_ENCODING_LISTPACK;
-}
-
 void listTypeConvertListpack(robj *o, int enc) {
     serverAssert(o->encoding == OBJ_ENCODING_LISTPACK);
 
@@ -83,6 +72,17 @@ void listTypeTryConvertListpack(robj *o, robj **argv, int start, int end) {
         listTypeConvertListpack(o, OBJ_ENCODING_QUICKLIST);
         return;
     }
+}
+
+void listTypeTryConvertQuicklist(robj *o) {
+    quicklist *ql = o->ptr;
+    if (o->encoding != OBJ_ENCODING_QUICKLIST || ql->count != 1) return;
+
+    o->ptr = ql->head;
+    ql->head = ql->tail = NULL;
+    ql->len = 0;
+    quicklistRelease(ql);
+    o->encoding = OBJ_ENCODING_LISTPACK;
 }
 
 /* The function pushes an element to the specified list object 'subject',
