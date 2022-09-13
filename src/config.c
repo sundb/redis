@@ -380,6 +380,7 @@ void queueLoadModule(sds path, sds *argv, int argc) {
     listAddNodeTail(server.loadmodule_queue,loadmod);
 }
 
+/* todo: comment */
 void updateListListpackMaxFill() {
     quicklistGetSizeAndCountLimit(server.list_max_listpack_fill,
         &server.list_max_listpack_size, &server.list_max_listpack_entries);

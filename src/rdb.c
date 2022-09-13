@@ -2337,7 +2337,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
                 }
 
                 if (lpBytes(o->ptr) >= server.list_max_listpack_size ||
-                    lpLength(o->ptr) > server.list_max_listpack_entries)
+                    lpLength(o->ptr) >= server.list_max_listpack_entries)
                 {
                     listTypeConvertListpack(o, OBJ_ENCODING_QUICKLIST);
                 }
