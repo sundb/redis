@@ -1775,11 +1775,6 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
 
         /* Try to convert quicklist to listpack if possible. */
         // todo
-        if (lpBytes(o->ptr) >= server.list_max_listpack_size ||
-            lpLength(o->ptr) > server.list_max_listpack_entries)
-        {
-            listTypeConvertListpack(o, OBJ_ENCODING_QUICKLIST);
-        }
     } else if (rdbtype == RDB_TYPE_SET) {
         /* Read Set value */
         if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return NULL;
