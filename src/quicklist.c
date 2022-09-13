@@ -510,7 +510,16 @@ REDIS_STATIC int _quicklistNodeAllowInsert(const quicklistNode *node,
      * Note: No need to check for overflow below since both `node->sz` and
      * `sz` are to be less than 1GB after the plain/large element check above. */
     size_t new_sz = node->sz + sz + SIZE_ESTIMATE_OVERHEAD;
-    return quicklistSizeMeetsSafetyLimit(new_sz, node->count + 1, fill);
+    if (likely(_quicklistNodeSizeMeetsOptimizationRequirement(new_sz, fill)))
+        return 1;
+    /* when we return 1 above we know that the limit is a size limit (which is
+     * safe, see comments next to optimization_level and SIZE_SAFETY_LIMIT) */
+    else if (!sizeMeetsSafetyLimit(new_sz))
+        return 0;
+    else if ((int)node->count < fill)
+        return 1;
+    else
+        return 0;
 }
 
 REDIS_STATIC int _quicklistNodeAllowMerge(const quicklistNode *a,
@@ -518,14 +527,21 @@ REDIS_STATIC int _quicklistNodeAllowMerge(const quicklistNode *a,
                                           const int fill) {
     if (!a || !b)
         return 0;
-
     if (unlikely(QL_NODE_IS_PLAIN(a) || QL_NODE_IS_PLAIN(b)))
         return 0;
-
     /* approximate merged listpack size (- 11 to remove one listpack
      * header/trailer) */
     unsigned int merge_sz = a->sz + b->sz - 11;
-    return quicklistSizeMeetsSafetyLimit(merge_sz, (int)(a->count + b->count), fill);
+    if (likely(_quicklistNodeSizeMeetsOptimizationRequirement(merge_sz, fill)))
+        return 1;
+    /* when we return 1 above we know that the limit is a size limit (which is
+     * safe, see comments next to optimization_level and SIZE_SAFETY_LIMIT) */
+    else if (!sizeMeetsSafetyLimit(merge_sz))
+        return 0;
+    else if ((int)(a->count + b->count) <= fill)
+        return 1;
+    else
+        return 0;
 }
 
 #define quicklistNodeUpdateSz(node)                                            \
