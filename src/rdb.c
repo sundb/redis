@@ -1757,7 +1757,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
         if (len == 0) goto emptykey;
 
         o = createQuicklistObject();
-        quicklistSetOptions(o->ptr, server.list_max_listpack_size,
+        quicklistSetOptions(o->ptr, server.list_max_listpack_fill,
                             server.list_compress_depth);
 
         /* Load every single element of the list */
@@ -1773,7 +1773,8 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
             decrRefCount(ele);
         }
 
-        // todo: convert to listpack if possible
+        /* Try to convert quicklist to listpack if possible. */
+        // listTypeTryConvertQuicklist(o);
     } else if (rdbtype == RDB_TYPE_SET) {
         /* Read Set value */
         if ((len = rdbLoadLen(rdb,NULL)) == RDB_LENERR) return NULL;
@@ -2036,7 +2037,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
         if (len == 0) goto emptykey;
 
         o = createQuicklistObject();
-        quicklistSetOptions(o->ptr, server.list_max_listpack_size,
+        quicklistSetOptions(o->ptr, server.list_max_listpack_fill,
                             server.list_compress_depth);
         uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
         while (len--) {
@@ -2185,7 +2186,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
                 break;
             case RDB_TYPE_LIST_ZIPLIST: 
                 {
-                    quicklist *ql = quicklistNew(server.list_max_listpack_size,
+                    quicklist *ql = quicklistNew(server.list_max_listpack_fill,
                                                  server.list_compress_depth);
 
                     if (!ziplistValidateIntegrity(encoded, encoded_len, 1,
@@ -2336,6 +2337,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
                 }
 
                 // todo: convert to quicklist
+                // listTypeTryConvertListpack(o, )
                 break;
             default:
                 /* totally unreachable */

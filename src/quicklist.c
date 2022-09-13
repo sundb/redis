@@ -30,6 +30,7 @@
 
 #include <stdio.h>
 #include <string.h> /* for memcpy */
+#include <limits.h>
 #include "quicklist.h"
 #include "zmalloc.h"
 #include "config.h"
@@ -466,6 +467,16 @@ _quicklistNodeSizeMeetsOptimizationRequirement(const size_t sz,
 }
 
 #define sizeMeetsSafetyLimit(sz) ((sz) <= SIZE_SAFETY_LIMIT)
+
+void quicklistGetSizeAndCountLimit(int fill, size_t *size, unsigned long *count) {
+    *size = SIZE_MAX;
+    *count = ULONG_MAX;
+    if (fill >= 0) {
+        *count = fill;
+    } else {
+        *size = optimization_level[-fill - 1];
+    }
+}
 
 int quicklistSizeMeetsSafetyLimit(size_t new_sz, unsigned int count, const int fill) {
     /* Estimate how many bytes will be added to the listpack by this one entry.

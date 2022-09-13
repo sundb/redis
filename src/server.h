@@ -1827,8 +1827,10 @@ struct redisServer {
     size_t stream_node_max_bytes;
     long long stream_node_max_entries;
     /* List parameters */
-    int list_max_listpack_size;
+    int list_max_listpack_fill;
     int list_compress_depth;
+    unsigned long list_max_listpack_entries;
+    size_t list_max_listpack_size;
     /* time cache */
     redisAtomic time_t unixtime; /* Unix time sampled every cron cycle. */
     time_t timezone;            /* Cached timezone. As set by tzset(). */
@@ -2582,6 +2584,8 @@ int listTypeDelRange(robj *o, long start, long stop);
 void unblockClientWaitingData(client *c);
 void popGenericCommand(client *c, int where);
 void listElementsRemoved(client *c, robj *key, int where, robj *o, long count, int *deleted);
+void listTypeTryConvertQuicklist(robj *o);
+void listTypeTryConvertListpack(robj *o, robj **argv, int start, int end);
 
 /* MULTI/EXEC/WATCH... */
 void unwatchAllKeys(client *c);
@@ -3050,6 +3054,7 @@ void initConfigValues();
 void removeConfig(sds name);
 sds getConfigDebugInfo();
 int allowProtectedAction(int config, client *c);
+void updateListListpackMaxFill();
 
 /* Module Configuration */
 typedef struct ModuleConfig ModuleConfig;

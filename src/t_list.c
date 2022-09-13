@@ -33,6 +33,17 @@
  * List API
  *----------------------------------------------------------------------------*/
 
+void listTypeTryConvertQuicklist(robj *o) {
+    quicklist *ql = o->ptr;
+    if (o->encoding != OBJ_ENCODING_QUICKLIST || ql->count != 1) return;
+
+    o->ptr = ql->head;
+    ql->head = ql->tail = NULL;
+    ql->len = 0;
+    quicklistRelease(ql);
+    o->encoding = OBJ_ENCODING_LISTPACK;
+}
+
 void listTypeConvertListpack(robj *o, int enc) {
     serverAssert(o->encoding == OBJ_ENCODING_LISTPACK);
 
@@ -40,7 +51,7 @@ void listTypeConvertListpack(robj *o, int enc) {
         /* Nothing to do... */
     } else if (enc == OBJ_ENCODING_QUICKLIST) {
         quicklist *ql = quicklistCreate();
-        quicklistSetOptions(ql, server.list_max_listpack_size,
+        quicklistSetOptions(ql, server.list_max_listpack_fill,
                             server.list_compress_depth);
         if (lpLength(o->ptr))
             quicklistAppendListpack(ql, o->ptr);
@@ -53,7 +64,7 @@ void listTypeConvertListpack(robj *o, int enc) {
     }
 }
 
-void listTypeTryConversion(robj *o, robj **argv, int start, int end) {
+void listTypeTryConvertListpack(robj *o, robj **argv, int start, int end) {
     if (o->encoding != OBJ_ENCODING_LISTPACK) return;
 
     size_t sum = 0;
@@ -66,10 +77,11 @@ void listTypeTryConversion(robj *o, robj **argv, int start, int end) {
 
     size_t sz = lpBytes(o->ptr) + sum;
     unsigned long len = lpLength(o->ptr) + end - start + 1;
-    if (!quicklistSizeMeetsSafetyLimit(sz, len, server.list_max_listpack_size) ||
+    if (sz >= server.list_max_listpack_size || len >= server.list_max_listpack_entries ||
         !lpSafeToAdd(o->ptr, sum))
     {
         listTypeConvertListpack(o, OBJ_ENCODING_QUICKLIST);
+        return;
     }
 }
 
@@ -421,7 +433,7 @@ void pushGenericCommand(client *c, int where, int xx) {
     }
 
     /* Check if we need to convert the quicklist */
-    listTypeTryConversion(lobj,c->argv,2,c->argc-1);
+    listTypeTryConvertListpack(lobj,c->argv,2,c->argc-1);
 
     for (j = 2; j < c->argc; j++) {
         listTypePush(lobj,c->argv[j],where);
@@ -480,7 +492,7 @@ void linsertCommand(client *c) {
      * the list twice (once to see if the value can be inserted and once
      * to do the actual insert), so we assume this value can be inserted
      * and convert the ziplist to a regular list if necessary. */
-    listTypeTryConversion(subject,c->argv,4,1);
+    listTypeTryConvertListpack(subject,c->argv,4,1);
 
     /* Seek pivot from head to tail */
     iter = listTypeInitIterator(subject,0,LIST_TAIL);
@@ -553,7 +565,7 @@ void lsetCommand(client *c) {
     if ((getLongFromObjectOrReply(c, c->argv[2], &index, NULL) != C_OK))
         return;
 
-    listTypeTryConversion(o,c->argv,3,3);
+    listTypeTryConvertListpack(o,c->argv,3,3);
     if (listTypeReplaceIndex(o,index,value->ptr,sdslen(value->ptr))) {
         addReply(c,shared.ok);
         signalModifiedKey(c,c->db,c->argv[1]);
@@ -993,7 +1005,7 @@ void lmoveHandlePush(client *c, robj *dstkey, robj *dstobj, robj *value,
         dbAdd(c->db,dstkey,dstobj);
     }
     signalModifiedKey(c,c->db,dstkey);
-    listTypeTryConversion(dstobj,&value,0,0);
+    listTypeTryConvertListpack(dstobj,&value,0,0);
     listTypePush(dstobj,value,where);
     notifyKeyspaceEvent(NOTIFY_LIST,
                         where == LIST_HEAD ? "lpush" : "rpush",
