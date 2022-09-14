@@ -306,7 +306,7 @@ void listTypeReplace(listTypeEntry *entry, robj *value) {
     decrRefCount(value);
 }
 
-int listTypeReplaceIndex(robj *o, int index, unsigned char *vstr, unsigned int vlen) {
+int listTypeReplaceIndex(robj *o, int index, unsigned char *vstr, size_t vlen) {
     if (o->encoding == OBJ_ENCODING_LISTPACK) {
         unsigned char *p = lpSeek(o->ptr,index);
         if (!p) return 0;
