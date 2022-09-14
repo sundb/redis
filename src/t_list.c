@@ -81,6 +81,7 @@ void listTypeTryConvertQuicklist(robj *o) {
     quicklist *ql = o->ptr;
     if (o->encoding != OBJ_ENCODING_QUICKLIST || ql->count != 1) return;
 
+    /* todo: comment */
     o->ptr = ql->head;
     ql->head = ql->tail = NULL;
     ql->len = 0;
