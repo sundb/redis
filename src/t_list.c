@@ -487,7 +487,7 @@ void linsertCommand(client *c) {
      * convert the list inside the iterator. We don't want to loop over
      * the list twice (once to see if the value can be inserted and once
      * to do the actual insert), so we assume this value can be inserted
-     * and convert the ziplist to a regular list if necessary. */
+     * and convert the listpack to a regular list if necessary. */
     listTypeTryConvertListpack(subject,c->argv,4,1);
 
     /* Seek pivot from head to tail */
