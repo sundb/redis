@@ -431,9 +431,28 @@ start_server {
         }
     }
 
-    test {LPOS basic usage} {
+    proc create_list {key entries} {
+        r del $key
+        foreach entry $entries { r rpush $key $entry }
+        assert_encoding listpack $key
+    }
+
+    proc create_listpack {key entries} {
+        r del $key
+        foreach entry $entries { r rpush $key $entry }
+        assert_encoding listpack $key
+    }
+
+    proc create_quicklist {key entries} {
+        r del $key
+        foreach entry $entries { r rpush $key $entry }
+        assert_encoding quicklist $key
+    }
+
+foreach {type large} [array get largevalue] {
+    test {LPOS basic usage - $type} {
         r DEL mylist
-        r RPUSH mylist a b c 1 2 3 c c
+        r RPUSH mylist a b c $large 2 3 c c
         assert {[r LPOS mylist a] == 0}
         assert {[r LPOS mylist c] == 2}
     }
@@ -482,59 +501,33 @@ start_server {
         assert {[r LPOS mylist b COUNT 10 RANK 5] eq {}}
     }
 
-    test {LPUSH, RPUSH, LLENGTH, LINDEX, LPOP - listpack} {
+    test {LPUSH, RPUSH, LLENGTH, LINDEX, LPOP - $type} {
         # first lpush then rpush
-        assert_equal 1 [r lpush myziplist1 aa]
-        assert_equal 2 [r rpush myziplist1 bb]
-        assert_equal 3 [r rpush myziplist1 cc]
-        assert_equal 3 [r llen myziplist1]
-        assert_equal aa [r lindex myziplist1 0]
-        assert_equal bb [r lindex myziplist1 1]
-        assert_equal cc [r lindex myziplist1 2]
-        assert_equal {} [r lindex myziplist2 3]
-        assert_equal cc [r rpop myziplist1]
-        assert_equal aa [r lpop myziplist1]
-        assert_encoding listpack myziplist1
-
-        # first rpush then lpush
-        assert_equal 1 [r rpush myziplist2 a]
-        assert_equal 2 [r lpush myziplist2 b]
-        assert_equal 3 [r lpush myziplist2 c]
-        assert_equal 3 [r llen myziplist2]
-        assert_equal c [r lindex myziplist2 0]
-        assert_equal b [r lindex myziplist2 1]
-        assert_equal a [r lindex myziplist2 2]
-        assert_equal {} [r lindex myziplist2 3]
-        assert_equal a [r rpop myziplist2]
-        assert_equal c [r lpop myziplist2]
-        assert_encoding listpack myziplist2
-    }
-
-    test {LPUSH, RPUSH, LLENGTH, LINDEX, LPOP - quicklist} {
-        # first lpush then rpush
-        assert_equal 1 [r lpush mylist1 $largevalue(quicklist)]
-        assert_encoding quicklist mylist1
+        r del mylist1
+        assert_equal 1 [r lpush mylist1 $large]
+        assert_encoding $type mylist1
         assert_equal 2 [r rpush mylist1 b]
         assert_equal 3 [r rpush mylist1 c]
         assert_equal 3 [r llen mylist1]
-        assert_equal $largevalue(quicklist) [r lindex mylist1 0]
+        assert_equal $large [r lindex mylist1 0]
         assert_equal b [r lindex mylist1 1]
         assert_equal c [r lindex mylist1 2]
         assert_equal {} [r lindex mylist1 3]
         assert_equal c [r rpop mylist1]
-        assert_equal $largevalue(quicklist) [r lpop mylist1]
+        assert_equal $large [r lpop mylist1]
 
         # first rpush then lpush
-        assert_equal 1 [r rpush mylist2 $largevalue(quicklist)]
-        assert_encoding quicklist mylist2
+        r del mylist2
+        assert_equal 1 [r rpush mylist2 $large]
+        assert_encoding $type mylist2
         assert_equal 2 [r lpush mylist2 b]
         assert_equal 3 [r lpush mylist2 c]
         assert_equal 3 [r llen mylist2]
         assert_equal c [r lindex mylist2 0]
         assert_equal b [r lindex mylist2 1]
-        assert_equal $largevalue(quicklist) [r lindex mylist2 2]
+        assert_equal $large [r lindex mylist2 2]
         assert_equal {} [r lindex mylist2 3]
-        assert_equal $largevalue(quicklist) [r rpop mylist2]
+        assert_equal $large [r rpop mylist2]
         assert_equal c [r lpop mylist2]
     }
 
@@ -543,15 +536,16 @@ start_server {
         assert_error {*wrong number of arguments for 'rpop' command} {r rpop key 2 2}
     }
 
-    test {RPOP/LPOP with the optional count argument} {
-        assert_equal 7 [r lpush listcount aa bb cc dd ee ff gg]
+    test {RPOP/LPOP with the optional count argument - $type} {
+        assert_equal 7 [r lpush listcount aa $large cc dd ee ff gg]
         assert_equal {gg} [r lpop listcount 1]
         assert_equal {ff ee} [r lpop listcount 2]
-        assert_equal {aa bb} [r rpop listcount 2]
+        assert_equal "aa $large" [r rpop listcount 2]
         assert_equal {cc} [r rpop listcount 1]
         assert_equal {dd} [r rpop listcount 123]
         assert_error "*ERR*range*" {r lpop forbarqaz -123}
     }
+}
 
     proc verify_resp_response {resp response resp2_response resp3_response} {
         if {$resp == 2} {
@@ -608,24 +602,6 @@ start_server {
         assert_equal 1 [r del mylist2]
         assert_equal 0 [r exists mylist2]
         assert_equal 0 [r llen mylist2]
-    }
-
-    proc create_list {key entries} {
-        r del $key
-        foreach entry $entries { r rpush $key $entry }
-        assert_encoding listpack $key
-    }
-
-    proc create_listpack {key entries} {
-        r del $key
-        foreach entry $entries { r rpush $key $entry }
-        assert_encoding listpack $key
-    }
-
-    proc create_quicklist {key entries} {
-        r del $key
-        foreach entry $entries { r rpush $key $entry }
-        assert_encoding quicklist $key
     }
 
     foreach {type large} [array get largevalue] {
@@ -1589,7 +1565,6 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
                 }
             }
         }
-    }
 
     test {RPOPLPUSH against non existing key} {
         r del srclist{t} dstlist{t}
@@ -1606,12 +1581,12 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         assert_equal 0 [r exists newlist{t}]
     }
 
-    test {RPOPLPUSH against non list dst key} {
-        create_listpack srclist{t} {a b c d}
+    test {RPOPLPUSH against non list dst key - $type} {
+        create_$type srclist{t} "a $large c d"
         r set dstlist{t} x
         assert_error WRONGTYPE* {r rpoplpush srclist{t} dstlist{t}}
         assert_type string dstlist{t}
-        assert_equal {a b c d} [r lrange srclist{t} 0 -1]
+        assert_equal "a $large c d" [r lrange srclist{t} 0 -1]
     }
 
     test {RPOPLPUSH against non existing src key} {
@@ -1619,7 +1594,6 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         assert_equal {} [r rpoplpush srclist{t} dstlist{t}]
     } {}
 
-    foreach {type large} [array get largevalue] {
         test "Basic LPOP/RPOP/LMPOP - $type" {
             create_$type mylist "$large 1 2"
             assert_equal $large [r lpop mylist]
@@ -1631,7 +1605,6 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
             assert_equal "mylist $large" [r lmpop 1 mylist left count 1]
             assert_equal {mylist {2 1}} [r lmpop 2 mylist mylist right count 2]
         }
-    }
 
     test {LPOP/RPOP/LMPOP against empty list} {
         r del non-existing-list{t} non-existing-list2{t}
@@ -1662,7 +1635,6 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         assert_error "WRONGTYPE*" {r blmpop 0 2 notalist{t} notalist2{t} left count 1}
     }
 
-foreach {type large} [array get largevalue] {
     foreach {num} {250 500} {
         test "Mass RPOP/LPOP - $type" {
             r del mylist
@@ -1706,7 +1678,7 @@ foreach {type large} [array get largevalue] {
         assert_error "ERR count*" {r lmpop 2 mylist{t} mylist2{t} RIGHT COUNT -1}
     }
 
-    test {LMPOP single existing list} {
+    test {LMPOP single existing list - $type} {
         # Same key multiple times.
         create_$type mylist{t} "a b $large d e f"
         assert_equal {mylist{t} {a b}} [r lmpop 2 mylist{t} mylist{t} left count 2]
@@ -1731,7 +1703,7 @@ foreach {type large} [array get largevalue] {
         assert_equal 0 [r exists mylist{t} mylist2{t}]
     }
 
-    test {LMPOP multiple existing lists} {
+    test {LMPOP multiple existing lists - $type} {
         create_$type mylist{t} "a b $large d e"
         create_$type mylist2{t} "1 2 $large 4 5"
 
@@ -1756,7 +1728,6 @@ foreach {type large} [array get largevalue] {
         assert_equal 0 [r llen mylist2{t}]
         assert_equal 0 [r exists mylist{t} mylist2{t}]
     }
-}
 
     test {LMPOP propagate as pop with count command to replica} {
         set repl [attach_to_replication_stream]
@@ -1802,7 +1773,6 @@ foreach {type large} [array get largevalue] {
         close_replication_stream $repl
     } {} {needs:repl}
 
-    foreach {type large} [array get largevalue] {
         test "LRANGE basics - $type" {
             create_$type mylist "$large 1 2 3 4 5 6 7 8 9"
             assert_equal {1 2 3 4 5 6 7 8} [r lrange mylist 1 -2]
@@ -1836,9 +1806,6 @@ foreach {type large} [array get largevalue] {
         assert_equal {} [r lrange mylist -1 -2]
     }
 
-    }
-
-    foreach {type large} [array get largevalue] {
         proc trim_list {type min max} {
             upvar 1 large large
             r del mylist
@@ -1867,9 +1834,6 @@ foreach {type large} [array get largevalue] {
             assert_equal {} [trim_list $type 0 -6]
         }
 
-    }
-
-    foreach {type large} [array get largevalue] {
         test "LSET - $type" {
             create_$type mylist "99 98 $large 96 95"
             r lset mylist 1 foo
