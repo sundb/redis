@@ -174,9 +174,7 @@ listTypeIterator *listTypeInitIterator(robj *subject, long index,
     if (li->encoding == OBJ_ENCODING_LISTPACK) {
         li->p = lpSeek(subject->ptr, index);
     } else if (li->encoding == OBJ_ENCODING_QUICKLIST) {
-        int iter_direction =
-            direction == LIST_HEAD ? AL_START_TAIL : AL_START_HEAD;
-
+        int iter_direction = direction == LIST_HEAD ? AL_START_TAIL : AL_START_HEAD;
         li->iter = quicklistGetIteratorAtIdx(li->subject->ptr,
                                              iter_direction, index);
     } else {
@@ -223,10 +221,8 @@ int listTypeNext(listTypeIterator *li, listTypeEntry *entry) {
     if (li->encoding == OBJ_ENCODING_LISTPACK) {
         entry->p = li->p;
         if (entry->p != NULL) {
-            if (li->direction == LIST_TAIL)
-                li->p = lpNext(li->subject->ptr,li->p);
-            else
-                li->p = lpPrev(li->subject->ptr,li->p);
+            li->p = (li->direction == LIST_TAIL) ?
+                lpNext(li->subject->ptr,li->p) : lpPrev(li->subject->ptr,li->p);
             return 1;
         }
     } else if (li->encoding == OBJ_ENCODING_QUICKLIST) {
@@ -273,11 +269,9 @@ void listTypeInsert(listTypeEntry *entry, robj *value, int where) {
     size_t len = sdslen(str);
 
     if (entry->li->encoding == OBJ_ENCODING_LISTPACK) {
-        if (where == LIST_TAIL) {
-            subject->ptr = lpInsertString(subject->ptr, (unsigned char *)str, len, entry->p, LP_AFTER, &entry->p);
-        } else if (where == LIST_HEAD) {
-            subject->ptr = lpInsertString(subject->ptr, (unsigned char *)str, len, entry->p, LP_BEFORE, &entry->p);
-        }
+        subject->ptr = (where == LIST_TAIL) ?
+            lpInsertString(subject->ptr, (unsigned char *)str, len, entry->p, LP_AFTER, &entry->p) :
+            lpInsertString(subject->ptr, (unsigned char *)str, len, entry->p, LP_BEFORE, &entry->p);
     } else if (entry->li->encoding == OBJ_ENCODING_QUICKLIST) {
         if (where == LIST_TAIL) {
             quicklistInsertAfter(entry->li->iter, &entry->entry, str, len);
