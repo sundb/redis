@@ -1793,7 +1793,7 @@ int rewriteListObject(rio *r, robj *key, robj *o) {
             }
 
             unsigned char *vstr;
-            unsigned int vlen;
+            size_t vlen;
             long long lval;
             listTypeGetValue(&entry,&vstr,&vlen,&lval);
             if (vstr) {

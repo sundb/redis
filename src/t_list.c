@@ -233,9 +233,11 @@ int listTypeNext(listTypeIterator *li, listTypeEntry *entry) {
     return 0;
 }
 
-void listTypeGetValue(listTypeEntry *entry, unsigned char **vstr, unsigned int *vlen, long long *lval) {
+void listTypeGetValue(listTypeEntry *entry, unsigned char **vstr, size_t *vlen, long long *lval) {
     if (entry->li->encoding == OBJ_ENCODING_LISTPACK) {
-        *vstr = lpGetValue(entry->p, vlen, lval);
+        unsigned int slen;
+        *vstr = lpGetValue(entry->p, &slen, lval);
+        *vlen = slen;
     } else if (entry->li->encoding == OBJ_ENCODING_QUICKLIST) {
         *vstr = NULL;
         if (entry->entry.value) {
@@ -252,7 +254,7 @@ void listTypeGetValue(listTypeEntry *entry, unsigned char **vstr, unsigned int *
 /* Return entry or NULL at the current position of the iterator. */
 robj *listTypeGet(listTypeEntry *entry) {
     unsigned char *vstr;
-    unsigned int vlen;
+    size_t vlen;
     long long lval;
 
     listTypeGetValue(entry, &vstr, &vlen, &lval);
@@ -390,9 +392,11 @@ int listTypeDelRange(robj *subject, long start, long count) {
     }
 }
 
-void listTypeCurrentObject(listTypeEntry *entry, unsigned char **vstr, unsigned int *vlen, long long *lval) {
+void listTypeCurrentObject(listTypeEntry *entry, unsigned char **vstr, size_t *vlen, long long *lval) {
     if (entry->li->encoding == OBJ_ENCODING_LISTPACK) {
-        *vstr = lpGetValue(entry->p, vlen, lval);
+        unsigned int slen;
+        *vstr = lpGetValue(entry->p, &slen, lval);
+        *vlen = slen;
     } else if (entry->li->encoding == OBJ_ENCODING_QUICKLIST) {
         quicklistEntry *qe = &entry->entry;
         *vstr = NULL;
@@ -534,7 +538,7 @@ void lindexCommand(client *c) {
     listTypeIterator *iter = listTypeInitIterator(o,index,LIST_TAIL);
     listTypeEntry entry;
     unsigned char *vstr;
-    unsigned int vlen;
+    size_t vlen;
     long long lval;
 
     if (listTypeNext(iter,&entry)) {
@@ -633,7 +637,7 @@ void addListRangeReply(client *c, robj *o, long start, long end, int reverse) {
         while(rangelen--) {
             listTypeEntry entry;
             unsigned char *vstr;
-            unsigned int vlen;
+            size_t vlen;
             long long lval;
 
             serverAssert(listTypeNext(iter, &entry)); /* fail on corrupt data */
