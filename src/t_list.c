@@ -97,15 +97,13 @@ void listTypeTryConvertQuicklist(robj *o) {
 void listTypePush(robj *subject, robj *value, int where) {
     if (subject->encoding == OBJ_ENCODING_LISTPACK) {
         if (value->encoding == OBJ_ENCODING_INT) {
-            if (where == LIST_HEAD)
-                subject->ptr = lpPrependInteger(subject->ptr, (long)value->ptr);
-            else
-                subject->ptr = lpAppendInteger(subject->ptr, (long)value->ptr);
+            subject->ptr = (where == LIST_HEAD) ?
+                lpPrependInteger(subject->ptr, (long)value->ptr) :
+                lpAppendInteger(subject->ptr, (long)value->ptr);
         } else {
-            if (where == LIST_HEAD)
-                subject->ptr = lpPrepend(subject->ptr, value->ptr, sdslen(value->ptr));
-            else
-                subject->ptr = lpAppend(subject->ptr, value->ptr, sdslen(value->ptr));
+            subject->ptr = (where == LIST_HEAD) ?
+                lpPrepend(subject->ptr, value->ptr, sdslen(value->ptr)) :
+                lpAppend(subject->ptr, value->ptr, sdslen(value->ptr));
         }
     } else if (subject->encoding == OBJ_ENCODING_QUICKLIST) {
         int pos = (where == LIST_HEAD) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
