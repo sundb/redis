@@ -40,7 +40,7 @@ void listTypeConvertListpack(robj *o, int enc) {
         /* Nothing to do... */
     } else if (enc == OBJ_ENCODING_QUICKLIST) {
         quicklist *ql = quicklistCreate();
-        quicklistSetOptions(ql, server.list_max_listpack_fill,
+        quicklistSetOptions(ql, server.list_max_listpack_size,
                             server.list_compress_depth);
         if (lpLength(o->ptr))
             quicklistAppendListpack(ql, o->ptr);
@@ -56,17 +56,18 @@ void listTypeConvertListpack(robj *o, int enc) {
 void listTypeTryConvertListpack(robj *o, robj **argv, int start, int end) {
     if (o->encoding != OBJ_ENCODING_LISTPACK) return;
 
+    size_t sz_limit;
+    unsigned long count_limit;
     size_t sum = 0;
+
     for (int i = start; i <= end; i++) {
         if (!sdsEncodedObject(argv[i]))
             continue;
-        size_t len = sdslen(argv[i]->ptr);
-        sum += len;
+        sum = sdslen(argv[i]->ptr);
     }
 
-    size_t sz = lpBytes(o->ptr) + sum;
-    unsigned long len = lpLength(o->ptr) + end - start + 1;
-    if (sz >= server.list_max_listpack_size || len >= server.list_max_listpack_entries ||
+    quicklistGetSizeAndCountLimit(server.list_max_listpack_size,&sz_limit,&count_limit);
+    if (lpBytes(o->ptr)+sum >= sz_limit || lpLength(o->ptr)+end-start+1 >= count_limit ||
         !lpSafeToAdd(o->ptr, sum))
     {
         listTypeConvertListpack(o, OBJ_ENCODING_QUICKLIST);

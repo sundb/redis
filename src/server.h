@@ -1827,10 +1827,8 @@ struct redisServer {
     size_t stream_node_max_bytes;
     long long stream_node_max_entries;
     /* List parameters */
-    int list_max_listpack_fill;
+    int list_max_listpack_size;
     int list_compress_depth;
-    unsigned long list_max_listpack_entries;
-    size_t list_max_listpack_size;
     /* time cache */
     redisAtomic time_t unixtime; /* Unix time sampled every cron cycle. */
     time_t timezone;            /* Cached timezone. As set by tzset(). */
@@ -3055,7 +3053,6 @@ void initConfigValues();
 void removeConfig(sds name);
 sds getConfigDebugInfo();
 int allowProtectedAction(int config, client *c);
-void updateListListpackMaxFill();
 
 /* Module Configuration */
 typedef struct ModuleConfig ModuleConfig;

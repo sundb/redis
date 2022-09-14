@@ -1757,7 +1757,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
         if (len == 0) goto emptykey;
 
         o = createQuicklistObject();
-        quicklistSetOptions(o->ptr, server.list_max_listpack_fill,
+        quicklistSetOptions(o->ptr, server.list_max_listpack_size,
                             server.list_compress_depth);
 
         /* Load every single element of the list */
@@ -2037,7 +2037,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
         if (len == 0) goto emptykey;
 
         o = createQuicklistObject();
-        quicklistSetOptions(o->ptr, server.list_max_listpack_fill,
+        quicklistSetOptions(o->ptr, server.list_max_listpack_size,
                             server.list_compress_depth);
         uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
         while (len--) {
@@ -2186,7 +2186,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
                 break;
             case RDB_TYPE_LIST_ZIPLIST: 
                 {
-                    quicklist *ql = quicklistNew(server.list_max_listpack_fill,
+                    quicklist *ql = quicklistNew(server.list_max_listpack_size,
                                                  server.list_compress_depth);
 
                     if (!ziplistValidateIntegrity(encoded, encoded_len, 1,
@@ -2336,11 +2336,11 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
                     goto emptykey;
                 }
 
-                if (lpBytes(o->ptr) >= server.list_max_listpack_size ||
-                    lpLength(o->ptr) >= server.list_max_listpack_entries)
-                {
+                size_t sz;
+                unsigned long count;
+                quicklistGetSizeAndCountLimit(server.list_max_listpack_size,&sz,&count);
+                if (lpBytes(o->ptr) >= sz || lpLength(o->ptr) >= count)
                     listTypeConvertListpack(o, OBJ_ENCODING_QUICKLIST);
-                }
                 break;
             default:
                 /* totally unreachable */
