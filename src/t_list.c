@@ -42,6 +42,8 @@ void listTypeConvertListpack(robj *o, int enc) {
         quicklist *ql = quicklistCreate();
         quicklistSetOptions(ql, server.list_max_listpack_size,
                             server.list_compress_depth);
+
+        /* Append listpack to quicklist if it's not empty, otherwise release it. */
         if (lpLength(o->ptr))
             quicklistAppendListpack(ql, o->ptr);
         else
