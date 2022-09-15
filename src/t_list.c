@@ -79,10 +79,14 @@ void listTypeTryConvertListpack(robj *o, robj **argv, int start, int end) {
 
 void listTypeTryConvertQuicklist(robj *o) {
     quicklist *ql = o->ptr;
-    if (o->encoding != OBJ_ENCODING_QUICKLIST || ql->count != 1) return;
+    if (o->encoding != OBJ_ENCODING_QUICKLIST || ql->count != 1 ||
+        ql->head->encoding != QUICKLIST_NODE_CONTAINER_PACKED)
+    {
+        return;
+    }
 
     /* todo: comment */
-    o->ptr = ql->head;
+    o->ptr = ql->head->entry;
     ql->head = ql->tail = NULL;
     ql->len = 0;
     quicklistRelease(ql);
