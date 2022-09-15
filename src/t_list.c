@@ -184,7 +184,7 @@ listTypeIterator *listTypeInitIterator(robj *subject, long index,
 }
 
 /* Sets the direction of an iterator. */
-void listTypeSetIteratorDirection(listTypeIterator *li, unsigned char direction) {
+void listTypeSetIteratorDirection(listTypeIterator *li, listTypeEntry *entry, unsigned char direction) {
     if (li->direction == direction) return;
 
     li->direction = direction;
@@ -192,12 +192,8 @@ void listTypeSetIteratorDirection(listTypeIterator *li, unsigned char direction)
         int dir = direction == LIST_HEAD ? AL_START_TAIL : AL_START_HEAD;
         quicklistSetDirection(li->iter, dir);
     } else if (li->encoding == OBJ_ENCODING_LISTPACK) {
-        if (li->p == NULL) {
-            li->p = (direction == LIST_TAIL) ? lpFirst(li->subject->ptr) : lpLast(li->subject->ptr);
-        } else {
-            li->p = (direction == LIST_TAIL) ? lpNext(li->subject->ptr, li->p) : lpPrev(li->subject->ptr, li->p);
-        }
-        if (li->p) li->p = (direction == LIST_TAIL) ? lpNext(li->subject->ptr, li->p) : lpPrev(li->subject->ptr, li->p);
+        unsigned char *lp = li->subject->ptr;
+        li->p = (direction == LIST_TAIL) ? lpNext(lp, entry->p) : lpPrev(lp, entry->p);
     } else {
         serverPanic("Unknown list encoding");
     }

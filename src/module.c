@@ -4106,7 +4106,7 @@ int moduleListIteratorSeek(RedisModuleKey *key, long index, int mode) {
 
     /* Seek the iterator to the requested index. */
     unsigned char dir = key->u.list.index < index ? LIST_TAIL : LIST_HEAD;
-    listTypeSetIteratorDirection(key->iter, dir);
+    listTypeSetIteratorDirection(key->iter, &key->u.list.entry, dir);
     while (key->u.list.index != index) {
         serverAssert(listTypeNext(key->iter, &key->u.list.entry));
         key->u.list.index += dir == LIST_HEAD ? -1 : 1;

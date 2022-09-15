@@ -2569,7 +2569,7 @@ robj *listTypePop(robj *subject, int where);
 unsigned long listTypeLength(const robj *subject);
 listTypeIterator *listTypeInitIterator(robj *subject, long index, unsigned char direction);
 void listTypeReleaseIterator(listTypeIterator *li);
-void listTypeSetIteratorDirection(listTypeIterator *li, unsigned char direction);
+void listTypeSetIteratorDirection(listTypeIterator *li, listTypeEntry *entry, unsigned char direction);
 int listTypeNext(listTypeIterator *li, listTypeEntry *entry);
 robj *listTypeGet(listTypeEntry *entry);
 void listTypeGetValue(listTypeEntry *entry, unsigned char **vstr, size_t *vlen, long long *lval);
