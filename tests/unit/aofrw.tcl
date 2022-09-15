@@ -78,7 +78,7 @@ start_server {tags {"aofrw external:skip"} overrides {aof-use-rdb-preamble no}} 
     }
 
     foreach d {string int} {
-        foreach e {quicklist} {
+        foreach e {listpack quicklist} {
             test "AOF rewrite of list with $e encoding, $d data" {
                 r flushall
                 if {$e eq {listpack}} {
