@@ -40,8 +40,7 @@ void listTypeConvertListpack(robj *o, int enc) {
         /* Nothing to do... */
     } else if (enc == OBJ_ENCODING_QUICKLIST) {
         quicklist *ql = quicklistCreate();
-        quicklistSetOptions(ql, server.list_max_listpack_size,
-                            server.list_compress_depth);
+        quicklistSetOptions(ql, server.list_max_listpack_size, server.list_compress_depth);
 
         /* Append listpack to quicklist if it's not empty, otherwise release it. */
         if (lpLength(o->ptr))

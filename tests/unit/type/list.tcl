@@ -431,12 +431,6 @@ start_server {
         }
     }
 
-    proc create_list {key entries} {
-        r del $key
-        foreach entry $entries { r rpush $key $entry }
-        assert_encoding listpack $key
-    }
-
     proc create_listpack {key entries} {
         r del $key
         foreach entry $entries { r rpush $key $entry }
