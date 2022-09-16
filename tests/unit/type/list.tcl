@@ -1942,8 +1942,13 @@ foreach {pop} {BLPOP BLMPOP_RIGHT} {
     }
 }
 
-foreach {type large} [array get largevalue] {
+foreach type {listpack quicklist} {
     test "List $type of various encodings" {
+        if {$type eq "listpack"} {
+            r config set list-max-listpack-size 10
+        } else {
+            r config set list-max-listpack-size -1
+        }
         r del k
         r lpush k 127 ;# ZIP_INT_8B
         r lpush k 32767 ;# ZIP_INT_16B
@@ -1951,22 +1956,21 @@ foreach {type large} [array get largevalue] {
         r lpush k 9223372036854775808 ;# ZIP_INT_64B
         r lpush k 0 ;# ZIP_INT_IMM_MIN
         r lpush k 12 ;# ZIP_INT_IMM_MAX
-        r lpush k $large
         r lpush k [string repeat x 31] ;# ZIP_STR_06B
         r lpush k [string repeat x 8191] ;# ZIP_STR_14B
         r lpush k [string repeat x 65535] ;# ZIP_STR_32B
-        # assert_encoding k $type
+        assert_encoding $type k
         set k [r lrange k 0 -1]
         set dump [r dump k]
 
         config_set sanitize-dump-payload no mayfail
         r restore kk 0 $dump replace
-        # assert_encoding kk $type
+        # assert_encoding $type kk
         set kk [r lrange kk 0 -1]
 
         # try some forward and backward searches to make sure all encodings
         # can be traversed
-        assert_equal [r lindex kk 6] {9223372036854775808}
+        assert_equal [r lindex kk 5] {9223372036854775808}
         assert_equal [r lindex kk -5] {0}
         assert_equal [r lpos kk foo rank 1] {}
         assert_equal [r lpos kk foo rank -1] {}
@@ -1977,12 +1981,12 @@ foreach {type large} [array get largevalue] {
         assert_equal [lpop k] [string repeat x 8191]
         assert_equal [lpop k] [string repeat x 31]
         set _ $k
-    } "$large 12 0 9223372036854775808 2147483647 32767 127"
+    } {12 0 9223372036854775808 2147483647 32767 127}
 
     test "List $type of various encodings - sanitize dump" {
         config_set sanitize-dump-payload yes mayfail
         r restore kk 0 $dump replace
-        # assert_encoding kk $type
+        assert_encoding $type kk
         set k [r lrange k 0 -1]
         set kk [r lrange kk 0 -1]
 
@@ -1992,7 +1996,7 @@ foreach {type large} [array get largevalue] {
         assert_equal [lpop k] [string repeat x 8191]
         assert_equal [lpop k] [string repeat x 31]
         set _ $k
-    } "$large 12 0 9223372036854775808 2147483647 32767 127"
+    } {12 0 9223372036854775808 2147483647 32767 127}
 }
 
 }
