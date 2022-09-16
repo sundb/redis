@@ -1965,7 +1965,7 @@ foreach type {listpack quicklist} {
 
         config_set sanitize-dump-payload no mayfail
         r restore kk 0 $dump replace
-        # assert_encoding $type kk
+        assert_encoding $type kk ;# make sure to keep the same encoding after restore
         set kk [r lrange kk 0 -1]
 
         # try some forward and backward searches to make sure all encodings
@@ -1985,7 +1985,7 @@ foreach type {listpack quicklist} {
 
     test "List $type of various encodings - sanitize dump" {
         config_set sanitize-dump-payload yes mayfail
-        r restore kk 0 $dump replace
+        r restore kk 0 $dump replace ;# make sure to keep the same encoding after restore
         assert_encoding $type kk
         set k [r lrange k 0 -1]
         set kk [r lrange kk 0 -1]
