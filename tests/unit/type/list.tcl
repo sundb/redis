@@ -1943,12 +1943,14 @@ foreach {pop} {BLPOP BLMPOP_RIGHT} {
 }
 
 foreach type {listpack quicklist} {
+    if {$type eq "listpack"} {
+        r config set list-max-listpack-size 10
+    } else {
+        r config set list-max-listpack-size -1
+    }
+
     test "List $type of various encodings" {
-        if {$type eq "listpack"} {
-            r config set list-max-listpack-size 10
-        } else {
-            r config set list-max-listpack-size -1
-        }
+        
         r del k
         r lpush k 127 ;# ZIP_INT_8B
         r lpush k 32767 ;# ZIP_INT_16B
@@ -1997,6 +1999,7 @@ foreach type {listpack quicklist} {
         assert_equal [lpop k] [string repeat x 31]
         set _ $k
     } {12 0 9223372036854775808 2147483647 32767 127}
+    r config set list-max-listpack-size -1
 }
 
 }
