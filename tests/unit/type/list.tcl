@@ -444,7 +444,7 @@ start_server {
     }
 
 foreach {type large} [array get largevalue] {
-    test {LPOS basic usage - $type} {
+    test "LPOS basic usage - $type" {
         r DEL mylist
         r RPUSH mylist a b c $large 2 3 c c
         assert {[r LPOS mylist a] == 0}
@@ -495,7 +495,7 @@ foreach {type large} [array get largevalue] {
         assert {[r LPOS mylist b COUNT 10 RANK 5] eq {}}
     }
 
-    test {LPUSH, RPUSH, LLENGTH, LINDEX, LPOP - $type} {
+    test "LPUSH, RPUSH, LLENGTH, LINDEX, LPOP - $type" {
         # first lpush then rpush
         r del mylist1
         assert_equal 1 [r lpush mylist1 $large]
@@ -530,7 +530,7 @@ foreach {type large} [array get largevalue] {
         assert_error {*wrong number of arguments for 'rpop' command} {r rpop key 2 2}
     }
 
-    test {RPOP/LPOP with the optional count argument - $type} {
+    test "RPOP/LPOP with the optional count argument - $type" {
         assert_equal 7 [r lpush listcount aa $large cc dd ee ff gg]
         assert_equal {gg} [r lpop listcount 1]
         assert_equal {ff ee} [r lpop listcount 2]
@@ -1575,7 +1575,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         assert_equal 0 [r exists newlist{t}]
     }
 
-    test {RPOPLPUSH against non list dst key - $type} {
+    test "RPOPLPUSH against non list dst key - $type" {
         create_$type srclist{t} "a $large c d"
         r set dstlist{t} x
         assert_error WRONGTYPE* {r rpoplpush srclist{t} dstlist{t}}
@@ -1672,7 +1672,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         assert_error "ERR count*" {r lmpop 2 mylist{t} mylist2{t} RIGHT COUNT -1}
     }
 
-    test {LMPOP single existing list - $type} {
+    test "LMPOP single existing list - $type" {
         # Same key multiple times.
         create_$type mylist{t} "a b $large d e f"
         assert_equal {mylist{t} {a b}} [r lmpop 2 mylist{t} mylist{t} left count 2]
@@ -1697,7 +1697,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         assert_equal 0 [r exists mylist{t} mylist2{t}]
     }
 
-    test {LMPOP multiple existing lists - $type} {
+    test "LMPOP multiple existing lists - $type" {
         create_$type mylist{t} "a b $large d e"
         create_$type mylist2{t} "1 2 $large 4 5"
 
@@ -1942,7 +1942,8 @@ foreach {pop} {BLPOP BLMPOP_RIGHT} {
     }
 }
 
-    test {List ziplist of various encodings} {
+foreach {type large} [array get largevalue] {
+    test "List $type of various encodings" {
         r del k
         r lpush k 127 ;# ZIP_INT_8B
         r lpush k 32767 ;# ZIP_INT_16B
@@ -1950,19 +1951,22 @@ foreach {pop} {BLPOP BLMPOP_RIGHT} {
         r lpush k 9223372036854775808 ;# ZIP_INT_64B
         r lpush k 0 ;# ZIP_INT_IMM_MIN
         r lpush k 12 ;# ZIP_INT_IMM_MAX
+        r lpush k $large
         r lpush k [string repeat x 31] ;# ZIP_STR_06B
         r lpush k [string repeat x 8191] ;# ZIP_STR_14B
         r lpush k [string repeat x 65535] ;# ZIP_STR_32B
+        # assert_encoding k $type
         set k [r lrange k 0 -1]
         set dump [r dump k]
 
         config_set sanitize-dump-payload no mayfail
-        r restore kk 0 $dump
+        r restore kk 0 $dump replace
+        # assert_encoding kk $type
         set kk [r lrange kk 0 -1]
 
         # try some forward and backward searches to make sure all encodings
         # can be traversed
-        assert_equal [r lindex kk 5] {9223372036854775808}
+        assert_equal [r lindex kk 6] {9223372036854775808}
         assert_equal [r lindex kk -5] {0}
         assert_equal [r lpos kk foo rank 1] {}
         assert_equal [r lpos kk foo rank -1] {}
@@ -1973,11 +1977,12 @@ foreach {pop} {BLPOP BLMPOP_RIGHT} {
         assert_equal [lpop k] [string repeat x 8191]
         assert_equal [lpop k] [string repeat x 31]
         set _ $k
-    } {12 0 9223372036854775808 2147483647 32767 127}
+    } "$large 12 0 9223372036854775808 2147483647 32767 127"
 
-    test {List ziplist of various encodings - sanitize dump} {
+    test "List $type of various encodings - sanitize dump" {
         config_set sanitize-dump-payload yes mayfail
         r restore kk 0 $dump replace
+        # assert_encoding kk $type
         set k [r lrange k 0 -1]
         set kk [r lrange kk 0 -1]
 
@@ -1987,5 +1992,7 @@ foreach {pop} {BLPOP BLMPOP_RIGHT} {
         assert_equal [lpop k] [string repeat x 8191]
         assert_equal [lpop k] [string repeat x 31]
         set _ $k
-    } {12 0 9223372036854775808 2147483647 32767 127}
+    } "$large 12 0 9223372036854775808 2147483647 32767 127"
+}
+
 }
