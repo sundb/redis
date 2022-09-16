@@ -1559,6 +1559,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
                 }
             }
         }
+    }
 
     test {RPOPLPUSH against non existing key} {
         r del srclist{t} dstlist{t}
@@ -1588,17 +1589,18 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         assert_equal {} [r rpoplpush srclist{t} dstlist{t}]
     } {}
 
-    
-    test "Basic LPOP/RPOP/LMPOP - $type" {
-        create_$type mylist "$large 1 2"
-        assert_equal $large [r lpop mylist]
-        assert_equal 2 [r rpop mylist]
-        assert_equal 1 [r lpop mylist]
-        assert_equal 0 [r llen mylist]
+    foreach {type large} [array get largevalue] { 
+        test "Basic LPOP/RPOP/LMPOP - $type" {
+            create_$type mylist "$large 1 2"
+            assert_equal $large [r lpop mylist]
+            assert_equal 2 [r rpop mylist]
+            assert_equal 1 [r lpop mylist]
+            assert_equal 0 [r llen mylist]
 
-        create_$type mylist "$large 1 2"
-        assert_equal "mylist $large" [r lmpop 1 mylist left count 1]
-        assert_equal {mylist {2 1}} [r lmpop 2 mylist mylist right count 2]
+            create_$type mylist "$large 1 2"
+            assert_equal "mylist $large" [r lmpop 1 mylist left count 1]
+            assert_equal {mylist {2 1}} [r lmpop 2 mylist mylist right count 2]
+        }
     }
 
     test {LPOP/RPOP/LMPOP against empty list} {
@@ -1768,6 +1770,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         close_replication_stream $repl
     } {} {needs:repl}
 
+    foreach {type large} [array get largevalue] {
         test "LRANGE basics - $type" {
             create_$type mylist "$large 1 2 3 4 5 6 7 8 9"
             assert_equal {1 2 3 4 5 6 7 8} [r lrange mylist 1 -2]
