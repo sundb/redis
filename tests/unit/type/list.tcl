@@ -1588,17 +1588,18 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         assert_equal {} [r rpoplpush srclist{t} dstlist{t}]
     } {}
 
-        test "Basic LPOP/RPOP/LMPOP - $type" {
-            create_$type mylist "$large 1 2"
-            assert_equal $large [r lpop mylist]
-            assert_equal 2 [r rpop mylist]
-            assert_equal 1 [r lpop mylist]
-            assert_equal 0 [r llen mylist]
+    
+    test "Basic LPOP/RPOP/LMPOP - $type" {
+        create_$type mylist "$large 1 2"
+        assert_equal $large [r lpop mylist]
+        assert_equal 2 [r rpop mylist]
+        assert_equal 1 [r lpop mylist]
+        assert_equal 0 [r llen mylist]
 
-            create_$type mylist "$large 1 2"
-            assert_equal "mylist $large" [r lmpop 1 mylist left count 1]
-            assert_equal {mylist {2 1}} [r lmpop 2 mylist mylist right count 2]
-        }
+        create_$type mylist "$large 1 2"
+        assert_equal "mylist $large" [r lmpop 1 mylist left count 1]
+        assert_equal {mylist {2 1}} [r lmpop 2 mylist mylist right count 2]
+    }
 
     test {LPOP/RPOP/LMPOP against empty list} {
         r del non-existing-list{t} non-existing-list2{t}
@@ -1789,6 +1790,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
             assert_equal $large [r lrange mylist 0 -4]
             assert_equal {} [r lrange mylist 0 -5]
         }
+    }
 
     test {LRANGE against non existing key} {
         assert_equal {} [r lrange nosuchkey 0 1]
@@ -1800,6 +1802,7 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         assert_equal {} [r lrange mylist -1 -2]
     }
 
+    foreach {type large} [array get largevalue] {
         proc trim_list {type min max} {
             upvar 1 large large
             r del mylist
