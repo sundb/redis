@@ -84,9 +84,10 @@ void listTypeTryConvertQuicklist(robj *o) {
         return;
     }
 
-    /* todo: comment */
+    /* Extract the listpack from the unique quicklist node,
+     * then reset it and release the quicklist. */
     o->ptr = ql->head->entry;
-    ql->head = ql->tail = NULL;
+    ql->head = ql->tail = NULL; 
     ql->len = 0;
     quicklistRelease(ql);
     o->encoding = OBJ_ENCODING_LISTPACK;
