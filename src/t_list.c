@@ -233,6 +233,7 @@ int listTypeNext(listTypeIterator *li, listTypeEntry *entry) {
     return 0;
 }
 
+/* Return entry value at the current position of the iterator. */
 void listTypeGetValue(listTypeEntry *entry, unsigned char **vstr, size_t *vlen, long long *lval) {
     if (entry->li->encoding == OBJ_ENCODING_LISTPACK) {
         unsigned int slen;
