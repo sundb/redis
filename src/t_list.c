@@ -197,6 +197,8 @@ void listTypeSetIteratorDirection(listTypeIterator *li, listTypeEntry *entry, un
         quicklistSetDirection(li->iter, dir);
     } else if (li->encoding == OBJ_ENCODING_LISTPACK) {
         unsigned char *lp = li->subject->ptr;
+        /* Note that the iterator for listpack always points to the next of the current entry,
+         * so we need to update position of the iterator depending on the direction. */
         li->p = (direction == LIST_TAIL) ? lpNext(lp, entry->p) : lpPrev(lp, entry->p);
     } else {
         serverPanic("Unknown list encoding");
