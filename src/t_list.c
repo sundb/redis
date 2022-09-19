@@ -64,7 +64,7 @@ void listTypeTryConvertListpack(robj *o, robj **argv, int start, int end) {
     for (int i = start; i <= end; i++) {
         if (!sdsEncodedObject(argv[i]))
             continue;
-        sum = sdslen(argv[i]->ptr);
+        sum += sdslen(argv[i]->ptr);
     }
 
     quicklistGetSizeAndCountLimit(server.list_max_listpack_size,&sz_limit,&count_limit);
