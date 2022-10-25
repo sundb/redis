@@ -729,6 +729,7 @@ typedef struct RedisModuleType {
     moduleTypeFreeEffortFunc2 free_effort2;
     moduleTypeUnlinkFunc2 unlink2;
     moduleTypeCopyFunc2 copy2;
+    moduleTypeAuxSaveFunc aux_save2;
     int aux_save_triggers;
     char name[10]; /* 9 bytes name + null term. Charset: A-Z a-z 0-9 _- */
 } moduleType;
@@ -786,6 +787,8 @@ struct RedisModuleIO {
     struct RedisModuleCtx *ctx; /* Optional context, see RM_GetContextFromIO()*/
     struct redisObject *key;    /* Optional name of key processed */
     int dbid;            /* The dbid of the key being processed, -1 when unknown. */
+    sds pre_flush_buffer; /* A buffer that should be flushed before next write operation
+                           * See rdbSaveSingleModuleAux for more details */
 };
 
 /* Macro to initialize an IO context. Note that the 'ver' field is populated
@@ -798,6 +801,7 @@ struct RedisModuleIO {
     iovar.key = keyptr; \
     iovar.dbid = db; \
     iovar.ctx = NULL; \
+    iovar.pre_flush_buffer = NULL; \
 } while(0)
 
 /* This is a structure used to export DEBUG DIGEST capabilities to Redis
@@ -913,6 +917,9 @@ typedef struct redisDb {
     dict *dict;                 /* The keyspace for this DB */
     dict *expires;              /* Timeout of keys with a timeout set */
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP)*/
+    dict *blocking_keys_unblock_on_nokey;   /* Keys with clients waiting for
+                                             * data, and should be unblocked if key is deleted (XREADEDGROUP).
+                                             * This is a subset of blocking_keys*/
     dict *ready_keys;           /* Blocked keys that received a PUSH */
     dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
     int id;                     /* Database ID */
@@ -2805,7 +2812,7 @@ void addReplyCommandCategories(client *c, struct redisCommand *cmd);
 user *ACLCreateUnlinkedUser();
 void ACLFreeUserAndKillClients(user *u);
 void addACLLogEntry(client *c, int reason, int context, int argpos, sds username, sds object);
-const char* getAclErrorMessage(int acl_res);
+sds getAclErrorMessage(int acl_res, user *user, struct redisCommand *cmd, sds errored_val, int verbose);
 void ACLUpdateDefaultUserPassword(sds password);
 sds genRedisInfoStringACLStats(sds info);
 
@@ -3230,9 +3237,10 @@ int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int 
 void disconnectAllBlockedClients(void);
 void handleClientsBlockedOnKeys(void);
 void signalKeyAsReady(redisDb *db, robj *key, int type);
-void blockForKeys(client *c, int btype, robj **keys, int numkeys, long count, mstime_t timeout, robj *target, struct blockPos *blockpos, streamID *ids);
+void signalDeletedKeyAsReady(redisDb *db, robj *key, int type);
+void blockForKeys(client *c, int btype, robj **keys, int numkeys, long count, mstime_t timeout, robj *target, struct blockPos *blockpos, streamID *ids, int unblock_on_nokey);
 void updateStatsOnUnblock(client *c, long blocked_us, long reply_us, int had_errors);
-void scanDatabaseForDeletedStreams(redisDb *emptied, redisDb *replaced_with);
+void scanDatabaseForDeletedKeys(redisDb *emptied, redisDb *replaced_with);
 
 /* timeout.c -- Blocked clients timeout and connections timeout. */
 void addClientToTimeoutTable(client *c);
