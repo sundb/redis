@@ -741,9 +741,12 @@ void quicklistReplaceEntry(quicklistIter *iter, quicklistEntry *entry,
                            void *data, size_t sz)
 {
     quicklist* quicklist = iter->quicklist;
+    unsigned char *newentry;
 
-    if (likely(!QL_NODE_IS_PLAIN(entry->node) && !isLargeElement(sz))) {
-        entry->node->entry = lpReplace(entry->node->entry, &entry->zi, data, sz);
+    if (likely(!QL_NODE_IS_PLAIN(entry->node) && !isLargeElement(sz) &&
+        (newentry = lpReplace(entry->node->entry, &entry->zi, data, sz)) != NULL))
+    {
+        entry->node->entry = newentry;
         quicklistNodeUpdateSz(entry->node);
         /* quicklistNext() and quicklistGetIteratorEntryAtIdx() provide an uncompressed node */
         quicklistCompress(quicklist, entry->node);
