@@ -14,10 +14,11 @@ proc reboot_instance {type id} {
     set dirname "${type}_${id}"
     set cfgfile [file join $dirname $type.conf]
     set port [get_instance_attrib $type $id port]
+    set exec_path [get_instance_attrib $type $id exec_path]
 
     # Execute the instance with its old setup and append the new pid
     # file for cleanup.
-    set pid [exec_instance $type $dirname $cfgfile]
+    set pid [exec_instance $type $dirname $cfgfile $exec_path]
     set_instance_attrib $type $id pid $pid
     lappend ::pids $pid
 

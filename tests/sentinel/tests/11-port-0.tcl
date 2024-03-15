@@ -17,7 +17,7 @@ test "Start/Stop sentinel on same port with a different runID should not change 
         set original_count [lindex $a 33]
 
         # Restart sentinel with the modified config file
-        set pid [exec_instance "sentinel" $dirname $orgfilename]
+        set pid [exec_instance "sentinel" $dirname $orgfilename "../../../src"]
         lappend ::pids $pid
 
         after 1000

@@ -1,4 +1,5 @@
 #!/bin/sh
+
 TCL_VERSIONS="8.5 8.6 8.7"
 TCLSH=""
 
@@ -11,4 +12,19 @@ then
     echo "You need tcl 8.5 or newer in order to run the Redis Cluster test"
     exit 1
 fi
+
+# tmp_dir="tests/tmp"
+# save_path="$tmp_dir/redis-stable.tar.gz"
+# curl -o "$save_path" "https://download.redis.io/redis-stable.tar.gz"
+# if [ -f "$save_path" ]; then
+#     # 解压缩文件到临时目录
+#     tar -zxvf "$save_path" -C "$tmp_dir"
+#     rm -f "$save_path"
+#     # cd "$tmp_dir/redis-stable"
+#     make "$tmp_dir/redis-stable"
+#     echo "文件成功下载并解压到$tmp_dir目录中。"
+# else
+#     echo "下载文件失败。"
+# fi
+
 $TCLSH tests/cluster/run.tcl $*

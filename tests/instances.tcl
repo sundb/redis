@@ -46,7 +46,7 @@ if {[catch {cd tmp}]} {
 
 # Execute the specified instance of the server specified by 'type', using
 # the provided configuration file. Returns the PID of the process.
-proc exec_instance {type dirname cfgfile} {
+proc exec_instance {type dirname cfgfile execpath} {
     if {$type eq "redis"} {
         set prgname redis-server
     } elseif {$type eq "sentinel"} {
@@ -57,9 +57,9 @@ proc exec_instance {type dirname cfgfile} {
 
     set errfile [file join $dirname err.txt]
     if {$::valgrind} {
-        set pid [exec valgrind --track-origins=yes --suppressions=../../../src/valgrind.sup --show-reachable=no --show-possibly-lost=no --leak-check=full ../../../src/${prgname} $cfgfile 2>> $errfile &]
+        set pid [exec valgrind --track-origins=yes --suppressions=../../../src/valgrind.sup --show-reachable=no --show-possibly-lost=no --leak-check=full $execpath/redis-server $cfgfile 2>> $errfile &]
     } else {
-        set pid [exec ../../../src/${prgname} $cfgfile 2>> $errfile &]
+        set pid [exec $execpath/redis-server $cfgfile 2>> $errfile &]
     }
     return $pid
 }
@@ -129,7 +129,14 @@ proc spawn_instance {type base_port count {conf {}} {base_conf_file ""}} {
         # Finally exec it and remember the pid for later cleanup.
         set retry 100
         while {$retry} {
-            set pid [exec_instance $type $dirname $cfgfile]
+            # Randomly select the path
+            # set random_num [expr {int(rand()*2)}]
+            # if {$random_num % 2 == 0} {
+            #     set redis_path "../../../src"
+            # } else {
+                set redis_path "../../tmp/redis-stable/src"
+            # }
+            set pid [exec_instance $type $dirname $cfgfile $redis_path]
 
             # Check availability
             if {[server_is_up 127.0.0.1 $port 100] == 0} {
@@ -169,7 +176,14 @@ proc spawn_instance {type base_port count {conf {}} {base_conf_file ""}} {
             plaintext-port $pport \
             link $link \
         ]
+        # puts ::${type}_instances
+        # puts [llength ::${type}_instances]
+        set id [expr {[llength [set ::${type}_instances]] - 1}]
+        set_instance_attrib $type $id exec_path $redis_path
     }
+    # foreach_instance_id [set ::${type}_instances] id {
+    #     puts [get_instance_attrib $type $id exec_path]
+    # }
 }
 
 proc log_crashes {} {
@@ -685,10 +699,11 @@ proc restart_instance {type id} {
     set dirname "${type}_${id}"
     set cfgfile [file join $dirname $type.conf]
     set port [get_instance_attrib $type $id port]
+    set exec_path [get_instance_attrib $type $id exec_path]
 
     # Execute the instance with its old setup and append the new pid
     # file for cleanup.
-    set pid [exec_instance $type $dirname $cfgfile]
+    set pid [exec_instance $type $dirname $cfgfile $exec_path]
     set_instance_attrib $type $id pid $pid
     lappend ::pids $pid
 
