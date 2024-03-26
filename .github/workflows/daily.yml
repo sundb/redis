@@ -597,10 +597,10 @@ jobs:
         sudo sysctl vm.mmap_rnd_bits=28
     - name: test
       if: true && !contains(github.event.inputs.skiptests, 'redis')
-      run: TSAN_OPTIONS="suppressions=./asan.sup:allocator_may_return_null=1:detect_deadlocks=0" ./runtest --config io-threads 4 --config io-threads-do-reads yes --accurate --verbose --tags network --dump-logs ${{github.event.inputs.test_args}}
+      run: TSAN_OPTIONS="suppressions=./asan.sup:allocator_may_return_null=1:detect_deadlocks=0" ./runtest --config io-threads 4 --config io-threads-do-reads yes --accurate --verbose --tags -signal --dump-logs ${{github.event.inputs.test_args}}
     - name: module api test
       if: true && !contains(github.event.inputs.skiptests, 'modules')
-      run: TSAN_OPTIONS="suppressions=./asan.sup:allocator_may_return_null=1:detect_deadlocks=0" CFLAGS='-Werror' ./runtest-moduleapi  --config io-threads 4 --config io-threads-do-reads yes --verbose --dump-logs ${{github.event.inputs.test_args}}
+      run: TSAN_OPTIONS="suppressions=./asan.sup:allocator_may_return_null=1:detect_deadlocks=0" CFLAGS='-Werror' ./runtest-moduleapi --config io-threads 4 --config io-threads-do-reads yes --verbose --tags -signal --dump-logs ${{github.event.inputs.test_args}}
 
   test-centos7-jemalloc:
     runs-on: ubuntu-latest
