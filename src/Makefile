@@ -110,6 +110,7 @@ ifeq ($(SANITIZER),undefined)
 	LDFLAGS+=-fsanitize=undefined
 else
 ifeq ($(SANITIZER),thread)
+	MALLOC=libc
 	CFLAGS+=-fsanitize=thread -fno-sanitize-recover=all -fno-omit-frame-pointer
 	LDFLAGS+=-fsanitize=thread
 else
