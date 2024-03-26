@@ -158,7 +158,7 @@ start_server {} {
         assert_lessthan 999 [s rdb_changes_since_last_save]
         # make sure the server is still writable
         r set x xx
-    } {} {signal}
+    } {OK} {signal}
 
     test {bgsave resets the change counter} {
         r config set rdb-key-save-delay 0
