@@ -992,7 +992,7 @@ start_server {tags {"repl external:skip"} overrides {save ""}} {
                     }
                 }
             }
-        }
+        } {} {signal}
     }
 }
 
@@ -1117,7 +1117,7 @@ test "diskless replication read pipe cleanup" {
             $master ping
         }
     }
-} {} {external:skip}
+} {} {external:skip signal}
 
 test {replicaof right after disconnection} {
     # this is a rare race condition that was reproduced sporadically by the psync2 unit.
