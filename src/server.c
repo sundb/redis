@@ -1,30 +1,9 @@
 /*
- * Copyright (c) 2009-2016, Salvatore Sanfilippo <antirez at gmail dot com>
+ * Copyright (c) 2009-Present, Redis Ltd.
  * All rights reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
+ * Licensed under your choice of the Redis Source Available License 2.0
+ * (RSALv2) or the Server Side Public License v1 (SSPLv1).
  */
 
 #include "server.h"
@@ -2607,6 +2586,7 @@ void initServer(void) {
     server.main_thread_id = pthread_self();
     server.current_client = NULL;
     server.errors = raxNew();
+    server.errors_enabled = 1;
     server.execution_nesting = 0;
     server.clients = listCreate();
     server.clients_index = raxNew();
@@ -3111,8 +3091,9 @@ void resetCommandTableStats(dict* commands) {
 }
 
 void resetErrorTableStats(void) {
-    raxFreeWithCallback(server.errors, zfree);
+    freeErrorsRadixTreeAsync(server.errors);
     server.errors = raxNew();
+    server.errors_enabled = 1;
 }
 
 /* ========================== Redis OP Array API ============================ */
@@ -4203,9 +4184,49 @@ int processCommand(client *c) {
 
 /* ====================== Error lookup and execution ===================== */
 
+/* Users who abuse lua error_reply will generate a new error object on each
+ * error call, which can make server.errors get bigger and bigger. This will
+ * cause the server to block when calling INFO (we also return errorstats by
+ * default). To prevent the damage it can cause, when a misuse is detected,
+ * we will print the warning log and disable the errorstats to avoid adding
+ * more new errors. It can be re-enabled via CONFIG RESETSTAT. */
+#define ERROR_STATS_NUMBER 128
 void incrementErrorCount(const char *fullerr, size_t namelen) {
+    /* errorstats is disabled, return ASAP. */
+    if (!server.errors_enabled) return;
+
     void *result;
     if (!raxFind(server.errors,(unsigned char*)fullerr,namelen,&result)) {
+        if (server.errors->numele >= ERROR_STATS_NUMBER) {
+            sds errors = sdsempty();
+            raxIterator ri;
+            raxStart(&ri, server.errors);
+            raxSeek(&ri, "^", NULL, 0);
+            while (raxNext(&ri)) {
+                char *tmpsafe;
+                errors = sdscatlen(errors, getSafeInfoString((char *)ri.key, ri.key_len, &tmpsafe), ri.key_len);
+                errors = sdscatlen(errors, ", ", 2);
+                if (tmpsafe != NULL) zfree(tmpsafe);
+            }
+            sdsrange(errors, 0, -3); /* Remove final ", ". */
+            raxStop(&ri);
+
+            /* Print the warning log and the contents of server.errors to the log. */
+            serverLog(LL_WARNING,
+                      "Errorstats stopped adding new errors because the number of "
+                      "errors reached the limit, may be misuse of lua error_reply, "
+                      "please check INFO ERRORSTATS, this can be re-enabled via "
+                      "CONFIG RESETSTAT.");
+            serverLog(LL_WARNING, "Current errors code list: %s", errors);
+            sdsfree(errors);
+
+            /* Reset the errors and add a single element to indicate that it is disabled. */
+            resetErrorTableStats();
+            incrementErrorCount("ERRORSTATS_DISABLED", 19);
+            server.errors_enabled = 0;
+            return;
+        }
+
         struct redisError *error = zmalloc(sizeof(*error));
         error->count = 1;
         raxInsert(server.errors,(unsigned char*)fullerr,namelen,error,NULL);

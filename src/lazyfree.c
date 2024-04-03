@@ -28,6 +28,14 @@ void lazyfreeFreeDatabase(void *args[]) {
     kvstoreRelease(da2);
     atomicDecr(lazyfree_objects,numkeys);
     atomicIncr(lazyfreed_objects,numkeys);
+
+#if defined(USE_JEMALLOC)
+    /* Only clear the current thread cache.
+     * Ignore the return call since this will fail if the tcache is disabled. */
+    je_mallctl("thread.tcache.flush", NULL, NULL, NULL, 0);
+
+    jemalloc_purge();
+#endif
 }
 
 /* Release the key tracking table. */
@@ -35,6 +43,15 @@ void lazyFreeTrackingTable(void *args[]) {
     rax *rt = args[0];
     size_t len = rt->numele;
     freeTrackingRadixTree(rt);
+    atomicDecr(lazyfree_objects,len);
+    atomicIncr(lazyfreed_objects,len);
+}
+
+/* Release the error stats rax tree. */
+void lazyFreeErrors(void *args[]) {
+    rax *errors = args[0];
+    size_t len = errors->numele;
+    raxFreeWithCallback(errors, zfree);
     atomicDecr(lazyfree_objects,len);
     atomicIncr(lazyfreed_objects,len);
 }
@@ -199,6 +216,18 @@ void freeTrackingRadixTreeAsync(rax *tracking) {
         bioCreateLazyFreeJob(lazyFreeTrackingTable,1,tracking);
     } else {
         freeTrackingRadixTree(tracking);
+    }
+}
+
+/* Free the error stats rax tree.
+ * If the rax tree is huge enough, free it in async way. */
+void freeErrorsRadixTreeAsync(rax *errors) {
+    /* Because this rax has only keys and no values so we use numnodes. */
+    if (errors->numnodes > LAZYFREE_THRESHOLD) {
+        atomicIncr(lazyfree_objects,errors->numele);
+        bioCreateLazyFreeJob(lazyFreeErrors,1,errors);
+    } else {
+        raxFreeWithCallback(errors, zfree);
     }
 }
 
