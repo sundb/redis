@@ -182,7 +182,7 @@ tags "modules" {
                     $master config set rdb-key-save-delay 0
                 }
             }
-        }
+        } {} {signal}
 
         # Module events for diskless load swapdb when async_loading (matching master replid)
         foreach test_case {6 7} {

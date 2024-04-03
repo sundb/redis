@@ -813,7 +813,7 @@ test {diskless loading short read} {
             $master config set rdb-key-save-delay 0
         }
     }
-} {} {external:skip}
+} {} {external:skip signal}
 
 # get current stime and utime metrics for a thread (since it's creation)
 proc get_cpu_metrics { statfile } {
@@ -992,7 +992,7 @@ start_server {tags {"repl external:skip"} overrides {save ""}} {
                     }
                 }
             }
-        }
+        } {} {signal}
     }
 }
 
@@ -1117,7 +1117,7 @@ test "diskless replication read pipe cleanup" {
             $master ping
         }
     }
-} {} {external:skip}
+} {} {external:skip signal}
 
 test {replicaof right after disconnection} {
     # this is a rare race condition that was reproduced sporadically by the psync2 unit.

@@ -58,6 +58,6 @@ if {!$::valgrind} {
                 assert_equal 3 [count_log_message 0 "modulesCollectInfo"]
             }
             assert_equal 1 [count_log_message 0 "=== REDIS BUG REPORT START: Cut & paste starting from here ==="]
-        }
+        } {} {signal}
     }
 }

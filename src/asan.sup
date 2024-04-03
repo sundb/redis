@@ -1,0 +1,7 @@
+signal:collect_stacktrace_data
+signal:invoke_callback
+signal:printCrashReport
+signal:sigalrmSignalHandler
+signal:sigsegvHandler
+race:g_callback
+race:sigShutdownHandler
