@@ -333,17 +333,7 @@ void freeZsetObject(robj *o) {
 }
 
 void freeHashObject(robj *o) {
-    switch (o->encoding) {
-    case OBJ_ENCODING_HT:
-        dictRelease((dict*) o->ptr);
-        break;
-    case OBJ_ENCODING_LISTPACK:
-        lpFree(o->ptr);
-        break;
-    default:
-        serverPanic("Unknown hash encoding type");
-        break;
-    }
+    hashTypeFree(o);
 }
 
 void freeModuleObject(robj *o) {
