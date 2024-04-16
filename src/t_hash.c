@@ -21,7 +21,6 @@ static ExpireMeta *hashGetExpireMeta(const eItem hash);
 static void hexpireGenericCommand(client *c, const char *cmd, long long basetime, int unit);
 static ExpireAction hashTypeActiveExpire(eItem hashObj, void *ctx);
 static void hfieldPersist(robj *hashObj, hfield field);
-static uint64_t hfieldGetExpireTime(hfield field);
 
 /* hash dictType funcs */
 static int dictHfieldKeyCompare(dict *d, const void *key1, const void *key2);
@@ -2657,7 +2656,8 @@ static ExpireMeta* hfieldGetExpireMeta(const eItem field) {
     return mstrMetaRef(field, &mstrFieldKind, (int) HFIELD_META_EXPIRE);
 }
 
-static uint64_t hfieldGetExpireTime(hfield field) {
+/* returned value is unix time in milliseconds */
+uint64_t hfieldGetExpireTime(hfield field) {
     if (!hfieldIsExpireAttached(field))
         return EB_EXPIRE_TIME_INVALID;
 
