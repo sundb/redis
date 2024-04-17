@@ -590,6 +590,12 @@ void defragRadixTree(rax **raxref, int defrag_data, raxDefragFunction *element_c
     raxStop(&ri);
 }
 
+void ebScanDefrag(ebuckets eb) {
+    if (eb == NULL || ebIsList(eb)) return;
+    rax *rax = ebGetRaxPtr(eb);
+    defragRadixTree(&rax, 1, NULL, NULL);
+}
+
 typedef struct {
     streamCG *cg;
     streamConsumer *c;
@@ -672,7 +678,7 @@ void defragModule(redisDb *db, dictEntry *kde) {
  * all the various pointers it has. */
 void defragKey(defragCtx *ctx, dictEntry *de) {
     sds keysds = dictGetKey(de);
-    robj *newob, *ob;
+    robj *newob, *ob, *originob = NULL;
     unsigned char *newzl;
     sds newsds;
     redisDb *db = ctx->privdata;
@@ -695,6 +701,7 @@ void defragKey(defragCtx *ctx, dictEntry *de) {
     ob = dictGetVal(de);
     if ((newob = activeDefragStringOb(ob))) {
         kvstoreDictSetVal(db->keys, slot, de, newob);
+        originob = ob;
         ob = newob;
     }
 
@@ -734,10 +741,23 @@ void defragKey(defragCtx *ctx, dictEntry *de) {
         if (ob->encoding == OBJ_ENCODING_LISTPACK) {
             if ((newzl = activeDefragAlloc(ob->ptr)))
                 ob->ptr = newzl;
+        } else if (ob->encoding == OBJ_ENCODING_LISTPACK_TTL) {
+            listpackTTL *lpt = ob->ptr;
+            if (newsds) lpt->key = newsds;
+            if ((newzl = activeDefragAlloc(lpt->lp))) {
+                lpt->lp = newzl;
+            }
         } else if (ob->encoding == OBJ_ENCODING_HT) {
             defragHash(db, de);
         } else {
             serverPanic("Unknown hash encoding");
+        }
+
+        /* */
+        if (originob && ebRemove(&db->hexpires, &hashExpireBucketsType, originob)) {
+            uint64_t newMinExpire = hashTypeGetNextTimeToExpire(ob, 0);
+            if (newMinExpire != EB_EXPIRE_TIME_INVALID)
+                ebAdd(&db->hexpires, &hashExpireBucketsType, ob, newMinExpire);
         }
     } else if (ob->type == OBJ_STREAM) {
         defragStream(db, de);
@@ -750,6 +770,7 @@ void defragKey(defragCtx *ctx, dictEntry *de) {
 
 /* Defrag scan callback for the main db dictionary. */
 void defragScanCallback(void *privdata, const dictEntry *de) {
+    // printf("defragScanCallback\n");
     long long hits_before = server.stat_active_defrag_hits;
     defragKey((defragCtx*)privdata, (dictEntry*)de);
     if (server.stat_active_defrag_hits != hits_before)
@@ -1002,6 +1023,7 @@ void activeDefragCycle(void) {
         return;
     }
 
+#if 1
     if (hasActiveChildProcess())
         return; /* Defragging memory while there's a fork will just do damage. */
 
@@ -1017,7 +1039,9 @@ void activeDefragCycle(void) {
         computeDefragCycles();
         server.active_defrag_configuration_changed = 0;
     }
+#endif 
 
+    // server.active_defrag_running = 1;
     if (!server.active_defrag_running)
         return;
 
@@ -1073,6 +1097,7 @@ void activeDefragCycle(void) {
             db = &server.db[current_db];
             kvstoreDictLUTDefrag(db->keys, dictDefragTables);
             kvstoreDictLUTDefrag(db->expires, dictDefragTables);
+            ebScanDefrag(db->hexpires);
             defrag_stage = 0;
             defrag_cursor = 0;
             slot = -1;
@@ -1103,6 +1128,7 @@ void activeDefragCycle(void) {
                 quit = 1; /* time is up, we didn't finish all the work */
                 break; /* this will exit the function and we'll continue on the next cycle */
             }
+            // printf("defrag_later_item_in_progress: %d\n", defrag_later_item_in_progress);
 
             if (!defrag_later_item_in_progress) {
                 /* Continue defragmentation from the previous stage.
@@ -1153,6 +1179,7 @@ void activeDefragCycle(void) {
             }
         } while(!all_stages_finished && !quit);
     } while(!quit);
+    // printf("111111111111\n");
 
     latencyEndMonitor(latency);
     latencyAddSampleIfNeeded("active-defrag-cycle",latency);

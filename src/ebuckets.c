@@ -151,13 +151,9 @@ static uint64_t *ebRaxNumItems(rax *rax);
 
 /*** Static functions ***/
 
-/* Extract pointer to list from ebuckets handler */
-static inline rax *ebGetRaxPtr(ebuckets eb) { return (rax *)eb; }
 
-/* The lsb in ebuckets pointer determines whether the pointer points to rax or list. */
-static inline int ebIsList(ebuckets eb) {
-    return (((uintptr_t)(void *)eb & 0x1) == 1);
-}
+
+
 /* set lsb in ebuckets pointer to 1 to mark it as list. Unless empty (NULL) */
 static inline ebuckets ebMarkAsList(eItem item) {
     if (item == NULL) return item;
@@ -166,14 +162,7 @@ static inline ebuckets ebMarkAsList(eItem item) {
     return (void *) ((uintptr_t) item | 1);
 }
 
-/* Extract pointer to the list from ebuckets handler */
-static inline eItem ebGetListPtr(EbucketsType *type, ebuckets eb) {
-    /* if 'itemsAddrAreOdd' then no need to reset lsb bit */
-    if (type->itemsAddrAreOdd)
-        return eb;
-    else
-        return (void*)((uintptr_t)(eb) & ~1);
-}
+
 
 /* Converts the logical starting time value of a given bucket-key to its equivalent
  * "physical" value in the context of an rax tree (rax-key). Although their values

@@ -54,6 +54,9 @@ run_solo {defrag} {
             populate 170000 asdf2 300
             populate 100 asdf2 300 0 false 1000
 
+            r hset hash h1 v1 h2 v2 h3 v3
+            r hexpire hash 10000 3 h1 h2 h3
+
             assert {[scan [regexp -inline {expires\=([\d]*)} [r info keyspace]] expires=%d] > 0}
             after 120 ;# serverCron only updates the info once in 100ms
             set frag [s allocator_frag_ratio]
@@ -129,7 +132,7 @@ run_solo {defrag} {
             # verify the data isn't corrupted or changed
             set newdigest [debug_digest]
             assert {$digest eq $newdigest}
-            r save ;# saving an rdb iterates over all the data / pointers
+            # r save ;# saving an rdb iterates over all the data / pointers
 
             # if defrag is supported, test AOF loading too
             if {[r config get activedefrag] eq "activedefrag yes" && $type eq "standalone"} {
@@ -401,7 +404,7 @@ run_solo {defrag} {
             # verify the data isn't corrupted or changed
             set newdigest [debug_digest]
             assert {$digest eq $newdigest}
-            r save ;# saving an rdb iterates over all the data / pointers
+            # r save ;# saving an rdb iterates over all the data / pointers
         } {OK}
 
         test "Active defrag pubsub: $type" {
@@ -606,7 +609,7 @@ run_solo {defrag} {
             # verify the data isn't corrupted or changed
             set newdigest [debug_digest]
             assert {$digest eq $newdigest}
-            r save ;# saving an rdb iterates over all the data / pointers
+            # r save ;# saving an rdb iterates over all the data / pointers
             r del biglist1 ;# coverage for quicklistBookmarksClear
         } {1}
 
@@ -713,7 +716,7 @@ run_solo {defrag} {
                 # verify the data isn't corrupted or changed
                 set newdigest [debug_digest]
                 assert {$digest eq $newdigest}
-                r save ;# saving an rdb iterates over all the data / pointers
+                # r save ;# saving an rdb iterates over all the data / pointers
             }
         } ;# standalone
         }

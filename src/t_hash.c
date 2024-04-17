@@ -93,19 +93,7 @@ EbucketsType hashFieldExpireBucketsType = {
     .itemsAddrAreOdd = 1,                 /* Addresses of hfield (mstr) are odd!! */
 };
 
-/* Each dict of hash object that has fields with time-Expiration will have the
- * following metadata attached to dict header */
-typedef struct dictExpireMetadata {
-    ExpireMeta expireMeta;   /* embedded ExpireMeta in dict.
-                                To be used in order to register the hash in the
-                                global ebuckets (i.e db->hexpires) with next,
-                                minimum, hash-field to expire */
-    ebuckets hfe;            /* DS of Hash Fields Expiration, associated to each hash */
-    sds key;                 /* reference to the key, same one that stored in
-                               db->dict. Will be used from active-expiration flow
-                               for notification and deletion of the object, if
-                               needed. */
-} dictExpireMetadata;
+
 
 /* ActiveExpireCtx passed to hashTypeActiveExpire() */
 typedef struct ActiveExpireCtx {
@@ -222,16 +210,6 @@ static void hashDictWithExpireOnRelease(dict *d) {
 
 /* Data structure for OBJ_ENCODING_LISTPACK_TTL. It contains listpack and
  * metadata fields for hash field expiration.*/
-typedef struct listpackTTL {
-    ExpireMeta meta;  /* To be used in order to register the hash in the
-                         global ebuckets (i.e. db->hexpires) with next,
-                         minimum, hash-field to expire. */
-    sds key;          /* reference to the key, same one that stored in
-                         db->dict. Will be used from active-expiration flow
-                         for notification and deletion of the object, if
-                         needed. */
-    void *lp;         /* listpack that contains 'key-value-ttl' tuples in it. */
-} listpackTTL;
 
 
 static struct listpackTTL *listpackTTLCreate(size_t lpCap) {

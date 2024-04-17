@@ -694,6 +694,8 @@ int rdbSaveObjectType(rio *rdb, robj *o) {
     case OBJ_HASH:
         if (o->encoding == OBJ_ENCODING_LISTPACK)
             return rdbSaveType(rdb,RDB_TYPE_HASH_LISTPACK);
+        if (o->encoding == OBJ_ENCODING_LISTPACK_TTL)
+            return rdbSaveType(rdb,RDB_TYPE_HASH_LISTPACK);
         else if (o->encoding == OBJ_ENCODING_HT)
             return rdbSaveType(rdb,RDB_TYPE_HASH);
         else

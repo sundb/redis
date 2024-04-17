@@ -272,6 +272,23 @@ static inline void ebSetMetaExpTime(ExpireMeta *expMeta, uint64_t t) {
     expMeta->expireTimeHi = (uint16_t)((t) >> 32);
 }
 
+/* The lsb in ebuckets pointer determines whether the pointer points to rax or list. */
+static inline int ebIsList(ebuckets eb) {
+    return (((uintptr_t)(void *)eb & 0x1) == 1);
+}
+
+/* Extract pointer to the list from ebuckets handler */
+static inline eItem ebGetListPtr(EbucketsType *type, ebuckets eb) {
+    /* if 'itemsAddrAreOdd' then no need to reset lsb bit */
+    if (type->itemsAddrAreOdd)
+        return eb;
+    else
+        return (void*)((uintptr_t)(eb) & ~1);
+}
+
+/* Extract pointer to list from ebuckets handler */
+static inline rax *ebGetRaxPtr(ebuckets eb) { return (rax *)eb; }
+
 #ifdef REDIS_TEST
 int ebucketsTest(int argc, char *argv[], int flags);
 #endif
