@@ -2435,7 +2435,7 @@ typedef struct {
     int encoding;
 
     unsigned char *fptr, *vptr, *tptr;
-    uint64_t expire_time; /* Only used with OBJ_ENCODING_LISTPACK_TTL */
+    uint64_t expire_time; /* Only used with OBJ_ENCODING_LISTPACK_EX */
 
     dictIterator *di;
     dictEntry *de;
@@ -3201,6 +3201,10 @@ void hashTypeFree(robj *o);
 unsigned char *hashTypeListpackGetLp(robj *o);
 size_t hashTypeListpackMemUsage(robj *o);
 int hashTypeListpackIsExpired(uint64_t expireTime);
+void *listpackExCreateFromListpack(void *lp);
+void *listpackExGetListpack(const robj *o);
+void listpackExUpdateListpack(const robj *o, void *lp);
+void listpackExExpire(robj *o, ExpireInfo *info, long long *expire_stat);
 
 /* Hash-Field data type (of t_hash.c) */
 hfield hfieldNew(const void *field, size_t fieldlen, int withExpireMeta);
