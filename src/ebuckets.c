@@ -1842,6 +1842,46 @@ eItem ebDefragItem(ebuckets *eb, EbucketsType *type, eItem item, ebDefragFunctio
     redis_unreachable();
 }
 
+void ebDefrag(ebuckets *eb, EbucketsType *type, ebDefragFunction *defragfn) {
+    printf("1111111111\n");
+    assert(!ebIsEmpty(*eb));
+    printf("2222222222\n");
+    if (ebIsList(*eb)) return;
+
+    raxIterator raxIter;
+    raxStart(&raxIter, ebGetRaxPtr(*eb));
+    raxSeek(&raxIter, "^", NULL, 0);
+    while (raxNext(&raxIter)) {
+        int expectFirstItemBucket = 1;
+        FirstSegHdr *firstSegHdr = raxIter.data;
+        eItem iter;
+        ExpireMeta *mIter, *mHead;
+        iter = firstSegHdr->head;
+        mHead = type->getExpireMeta(iter);
+        uint64_t numItemsBucket = 0, countSegments = 0;
+
+        int extendedSeg = (firstSegHdr->numSegs > 1) ? 1 : 0;
+        void *segHdr = firstSegHdr;
+
+        mIter = type->getExpireMeta(iter);
+        while (1) {
+            for (int i = 0; i < mHead->numItems ; ++i) {
+                mIter = type->getExpireMeta(iter);
+                iter = mIter->next;
+            }
+
+            if (mIter->lastItemBucket)
+                break;
+
+            NextSegHdr *nextSegHdr = mIter->next;
+            iter = nextSegHdr->head;
+            mHead = type->getExpireMeta(iter);
+            segHdr = nextSegHdr;
+        }
+    }
+    raxStop(&raxIter);
+}
+
 /* Retrieves the expiration time associated with the given item. If associated
  * ExpireMeta is marked as trash, then return EB_EXPIRE_TIME_INVALID */
 uint64_t ebGetExpireTime(EbucketsType *type, eItem item) {
@@ -2389,6 +2429,8 @@ int ebucketsTest(int argc, char **argv, int flags) {
                 ebAdd(&eb, &myEbucketsType, items[i], i);
             }
             assert((s <= EB_LIST_MAX_ITEMS) ? ebIsList(eb) : !ebIsList(eb));
+            printf("%d\n", s);
+            ebDefrag(&eb, &myEbucketsType, defragCallback);
             /* Defrag all the items. */
             for (int i = 0; i < s; i++) {
                 MyItem *newitem = ebDefragItem(&eb, &myEbucketsType, items[i], defragCallback);
