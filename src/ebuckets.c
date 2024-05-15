@@ -138,7 +138,7 @@ static uint64_t *ebRaxNumItems(rax *rax);
 static inline rax *ebGetRaxPtr(ebuckets eb) { return (rax *)eb; }
 
 /* The lsb in ebuckets pointer determines whether the pointer points to rax or list. */
-static inline int ebIsList(ebuckets eb) {
+int ebIsList(ebuckets eb) {
     return (((uintptr_t)(void *)eb & 0x1) == 1);
 }
 /* set lsb in ebuckets pointer to 1 to mark it as list. Unless empty (NULL) */

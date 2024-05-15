@@ -17,6 +17,10 @@
 
 #ifdef HAVE_DEFRAG
 
+/* optional callback used defrag each rax element (not including the element pointer itself) */
+typedef void *(raxDefragFunction)(raxIterator *ri, void *privdata);
+void defragRadixTree(rax **raxref, int defrag_data, raxDefragFunction *element_cb, void *element_cb_data);
+
 typedef struct defragCtx {
     void *privdata;
     int slot;
@@ -321,6 +325,10 @@ void activeDefragHfieldDict(dict *d) {
         cursor = dictScanDefrag(d, cursor, activeDefragHfieldDictCallback,
                                 &defragfns, d);
     } while (cursor != 0);
+
+    ebuckets *eb = hashTypeGetDictMetaHFE(d);
+    if (*eb && !ebIsList(*eb))
+        defragRadixTree((rax **)eb, 0, NULL, NULL);
 }
 
 /* Defrag a list of ptr, sds or robj string values */
@@ -615,8 +623,7 @@ int scanLaterStreamListpacks(robj *ob, unsigned long *cursor, long long endtime)
     return 0;
 }
 
-/* optional callback used defrag each rax element (not including the element pointer itself) */
-typedef void *(raxDefragFunction)(raxIterator *ri, void *privdata);
+
 
 /* defrag radix tree including:
  * 1) rax struct
@@ -1145,6 +1152,8 @@ void activeDefragCycle(void) {
             db = &server.db[current_db];
             kvstoreDictLUTDefrag(db->keys, dictDefragTables);
             kvstoreDictLUTDefrag(db->expires, dictDefragTables);
+            if (db->hexpires && !ebIsList(db->hexpires))
+                defragRadixTree((rax **)&db->hexpires, 0, NULL, NULL);
             defrag_stage = 0;
             defrag_cursor = 0;
             slot = -1;

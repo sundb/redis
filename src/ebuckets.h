@@ -275,6 +275,8 @@ uint64_t ebGetMaxExpireTime(ebuckets eb, EbucketsType *type, int accurate);
 
 uint64_t ebGetTotalItems(ebuckets eb, EbucketsType *type);
 
+int ebIsList(ebuckets eb);
+
 /* Item related API */
 
 int ebRemove(ebuckets *eb, EbucketsType *type, eItem item);

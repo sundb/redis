@@ -510,7 +510,7 @@ run_solo {defrag} {
             r config set activedefrag no
             # TODO: Lower the threshold after defraging the ebuckets.
             # Now just to ensure that the reference is updated correctly.
-            r config set active-defrag-threshold-lower 12
+            r config set active-defrag-threshold-lower 5
             r config set active-defrag-cycle-min 65
             r config set active-defrag-cycle-max 75
             r config set active-defrag-ignore-bytes 1500kb
@@ -598,7 +598,7 @@ run_solo {defrag} {
                     puts "frag [s allocator_frag_ratio]"
                     puts "frag_bytes [s allocator_frag_bytes]"
                 }
-                assert_lessthan_equal [s allocator_frag_ratio] 1.5
+                assert_lessthan_equal [s allocator_frag_ratio] 1.05
             }
         }
 
