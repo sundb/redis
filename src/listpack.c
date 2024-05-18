@@ -651,8 +651,9 @@ unsigned char *lpGet(unsigned char *p, int64_t *count, unsigned char *intbuf) {
     return lpGetWithSize(p, count, intbuf, NULL);
 }
 
-/* This is just a wrapper to lpGet() that is able to get entry value directly.
- * When the function returns NULL, it populates the integer value by reference in 'lval'.
+/* This is just a wrapper to lpGet() that is able to get ntry value directly.
+ * If the entry is an integer, the function returns NULL and populates 'lval'
+ * with the integer value.
  * Otherwise if the element is encoded as a string a pointer to the string (pointing
  * inside the listpack itself) is returned, and 'slen' is set to the length of the
  * string. */
@@ -667,6 +668,18 @@ unsigned char *lpGetValue(unsigned char *p, unsigned int *slen, long long *lval)
         *lval = ele_len;
     }
     return vstr;
+}
+
+/* This is just a wrapper to lpGet() that is able to get an integer from an entry directly.
+ * Returns 1 and stores the integer in 'lval' if the entry is an integer.
+ * Returns 0 if the entry is a string. */
+int lpGetIntegerValue(unsigned char *p, long long *lval) {
+    int64_t ele_len;
+    if (!lpGet(p, &ele_len, NULL)) {
+        *lval = ele_len;
+        return 1;
+    }
+    return 0;
 }
 
 /* Find pointer to the entry equal to the specified entry. Skip 'skip' entries
