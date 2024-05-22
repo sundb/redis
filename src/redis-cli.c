@@ -3357,7 +3357,7 @@ static void repl(void) {
     linenoiseSetFreeHintsCallback(freeHintsCallback);
 
     /* Only use history and load the rc file when stdin is a tty. */
-    if (isatty(fileno(stdin))) {
+    if (getenv("FAKETTY_WITH_PROMPT") != NULL || isatty(fileno(stdin))) {
         historyfile = getDotfilePath(REDIS_CLI_HISTFILE_ENV,REDIS_CLI_HISTFILE_DEFAULT);
         //keep in-memory history always regardless if history file can be determined
         history = 1;
@@ -9099,7 +9099,9 @@ static void sendReadOnly(void) {
     if (read_reply == NULL){
         fprintf(stderr, "\nI/O error\n");
         exit(1);
-    } else if (read_reply->type == REDIS_REPLY_ERROR && strcmp(read_reply->str, "ERR This instance has cluster support disabled") != 0) {
+    } else if (read_reply->type == REDIS_REPLY_ERROR && 
+               strcmp(read_reply->str, "ERR This instance has cluster support disabled") != 0 &&
+               strncmp(read_reply->str, "ERR unknown command", 19) != 0) {
         fprintf(stderr, "Error: %s\n", read_reply->str);
         exit(1);
     }
