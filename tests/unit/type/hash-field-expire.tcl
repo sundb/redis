@@ -972,7 +972,7 @@ start_server {tags {"external:skip needs:debug"}} {
                 r hexpireat h2 [expr [clock seconds]+10] NX FIELDS 1 f4
 
                 wait_for_condition 50 100 {
-                    [r hexists h2 f2] eq 0
+                    [r hlen h2] eq 2
                 } else {
                     fail "Field f2 of hash h2 wasn't deleted"
                 }
@@ -998,14 +998,9 @@ start_server {tags {"external:skip needs:debug"}} {
 
         test "Lazy Expire - fields are lazy deleted and propagated to replicas ($type)" {
             start_server {overrides {appendonly {yes} appendfsync always} tags {external:skip}} {
-                # TODO remove the SELECT once dbid will be embedded inside dict/listpack
-                r select 0
-
                 r debug set-active-expire 0
                 set aof [get_last_incr_aof_path r]
 
-                r select 0
-                r debug set-active-expire 0
                 r del myhash
 
                 r hset myhash f1 v1 f2 v2 f3 v3
