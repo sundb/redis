@@ -1959,6 +1959,8 @@ void createSharedObjects(void) {
     shared.persist = createStringObject("PERSIST",7);
     shared.set = createStringObject("SET",3);
     shared.eval = createStringObject("EVAL",4);
+    shared.hpexpireat = createStringObject("HPEXPIREAT",10);
+    shared.hdel = createStringObject("HDEL",4);
 
     /* Shared command argument */
     shared.left = createStringObject("left",4);

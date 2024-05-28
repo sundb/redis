@@ -276,6 +276,11 @@ static void dbSetValue(redisDb *db, robj *key, robj *val, int overwrite, dictEnt
         old = dictGetVal(de);
     }
     kvstoreDictSetVal(db->keys, slot, de, val);
+
+    /* if hash with HFEs, take care to remove from global HFE DS */
+    if (old->type == OBJ_HASH)
+        hashTypeRemoveFromExpires(&db->hexpires, old);
+
     if (server.lazyfree_lazy_server_del) {
         freeObjAsync(key,old,db->id);
     } else {
@@ -1764,11 +1769,13 @@ void swapMainDbWithTempDb(redisDb *tempDb) {
          * remain in the same DB they were. */
         activedb->keys = newdb->keys;
         activedb->expires = newdb->expires;
+        activedb->hexpires = newdb->hexpires;
         activedb->avg_ttl = newdb->avg_ttl;
         activedb->expires_cursor = newdb->expires_cursor;
 
         newdb->keys = aux.keys;
         newdb->expires = aux.expires;
+        newdb->hexpires = aux.hexpires;
         newdb->avg_ttl = aux.avg_ttl;
         newdb->expires_cursor = aux.expires_cursor;
 
