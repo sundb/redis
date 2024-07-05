@@ -3,9 +3,9 @@ name: CI
 on: [push, pull_request]
 
 jobs:
-  build-centos7-jemalloc:
+  build-old-chain-jemalloc:
     runs-on: ubuntu-latest
-    container: ubuntu:latest
+    container: ubuntu:20.04
     steps:
     - uses: actions/checkout@v4
     - name: make
