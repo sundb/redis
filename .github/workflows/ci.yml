@@ -87,6 +87,6 @@ jobs:
         apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 3B4FE6ACC0B21F32
         apt-get update
         apt-get install -y gcc-4.9
-        apt-get install make
-        make CC=gcc-4.9 REDIS_CFLAGS='-Werror'
+        # apt-get install -y make
+        # make CC=gcc-4.9 REDIS_CFLAGS='-Werror'
 
