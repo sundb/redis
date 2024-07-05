@@ -88,5 +88,5 @@ jobs:
         apt-get update
         apt-get install -y gcc-4.9
         apt-get install make
-        CC=gcc-4.9 make REDIS_CFLAGS='-Werror'
+        make CC=gcc-4.9 REDIS_CFLAGS='-Werror'
 
