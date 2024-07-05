@@ -74,6 +74,7 @@ jobs:
 
   build-centos7-jemalloc:
     runs-on: ubuntu-latest
+    container: ubuntu:latest
     steps:
     - uses: actions/checkout@v4
     - name: make
