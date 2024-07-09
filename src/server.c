@@ -1389,6 +1389,11 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     /* Handle background operations on Redis databases. */
     databasesCron();
 
+    run_with_period(100) {
+        evalScriptsGC();
+        functionsGC();
+    }
+
     /* Start a scheduled AOF rewrite if this was requested by the user while
      * a BGSAVE was in progress. */
     if (!hasActiveChildProcess() &&

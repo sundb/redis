@@ -1106,3 +1106,14 @@ int functionsInit(void) {
 
     return C_OK;
 }
+
+void functionsGC(void) {
+    dictIterator *iter = dictGetIterator(engines);
+    dictEntry *entry = NULL;
+    while ((entry = dictNext(iter))) {
+        engineInfo *ei = dictGetVal(entry);
+        engine *engine = ei->engine;
+        engine->gc_step(engine->engine_ctx, 1);
+    }
+    dictReleaseIterator(iter);
+}
