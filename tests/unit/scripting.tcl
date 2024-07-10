@@ -266,8 +266,10 @@ start_server {tags {"scripting"}} {
     } {0}
 
     test {EVAL - Scripts do not block on waitaof} {
-        run_script {return redis.pcall('waitaof','0','1','0')} 0
-    } {0 0}
+        set ret [run_script {return redis.pcall('waitaof','0','1','0')} 0]
+        puts [r info all]
+        assert_equal $ret {0 0}
+    }
 
     test {EVAL - Scripts do not block on XREAD with BLOCK option} {
         r del s
