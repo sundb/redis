@@ -24,7 +24,6 @@ static size_t engine_cache_memory = 0;
 static void engineFunctionDispose(dict *d, void *obj);
 static void engineStatsDispose(dict *d, void *obj);
 static void engineLibraryDispose(dict *d, void *obj);
-static void engineDispose(dict *d, void *obj);
 static int functionsVerifyName(sds name);
 
 typedef struct functionsLibEngineStats {
@@ -51,7 +50,7 @@ dictType engineDictType = {
         NULL,                  /* val dup */
         dictSdsKeyCaseCompare, /* key compare */
         dictSdsDestructor,     /* key destructor */
-        engineDispose,         /* val destructor */
+        NULL,                  /* val destructor */
         NULL                   /* allow to expand */
 };
 
@@ -149,16 +148,6 @@ static void engineLibraryDispose(dict *d, void *obj) {
     engineLibraryFree(obj);
 }
 
-static void engineDispose(dict *d, void *obj) {
-    UNUSED(d);
-    engineInfo *ei = obj;
-    freeClient(ei->c);
-    sdsfree(ei->name);
-    ei->engine->free_ctx(ei->engine->engine_ctx);
-    zfree(ei->engine);
-    zfree(ei);
-}
-
 /* Clear all the functions from the given library ctx */
 void functionsLibCtxClear(functionsLibCtx *lib_ctx) {
     dictEmpty(lib_ctx->functions, NULL);
@@ -177,13 +166,11 @@ void functionsLibCtxClear(functionsLibCtx *lib_ctx) {
 void functionsLibCtxClearCurrent(int async) {
     if (async) {
         functionsLibCtx *old_l_ctx = curr_functions_lib_ctx;
-        dict *old_engines = engines;
-        freeFunctionsAsync(old_l_ctx, old_engines);
+        curr_functions_lib_ctx = functionsLibCtxCreate();
+        freeFunctionsAsync(old_l_ctx);
     } else {
-        functionsLibCtxFree(curr_functions_lib_ctx);
-        dictRelease(engines);
+        functionsLibCtxClear(curr_functions_lib_ctx);
     }
-    functionsInit();
 }
 
 /* Free the given functions ctx */
