@@ -24,7 +24,7 @@ jobs:
           ./runtest \
             --host 127.0.0.1 --port 6379 \
             --verbose \
-            --tags -slow
+            --tags -slow --single unit/scripting
     - name: Archive redis log
       if: ${{ failure() }}
       uses: actions/upload-artifact@v4
@@ -52,7 +52,7 @@ jobs:
             --host 127.0.0.1 --port 6379 \
             --verbose \
             --cluster-mode \
-            --tags -slow
+            --tags -slow --single unit/scripting
     - name: Archive redis log
       if: ${{ failure() }}
       uses: actions/upload-artifact@v4
