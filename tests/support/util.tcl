@@ -1154,7 +1154,8 @@ proc system_backtrace_supported {} {
 
     # libmusl does not support backtrace. Also return 0 on
     # static binaries (ldd exit code 1) where we can't detect libmusl
-    if {![catch {set ldd [exec ldd src/redis-server]}]} {
+    catch {
+        set ldd [exec ldd src/redis-server]
         if {![string match {*libc.*musl*} $ldd]} {
             return 1
         }
