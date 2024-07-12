@@ -764,8 +764,8 @@ test {diskless loading short read} {
             $replica replicaof $master_host $master_port
 
             # kill the replication at various points
-            set attempts 100
-            if {$::accurate} { set attempts 500 }
+            set attempts 100000
+            # if {$::accurate} { set attempts 500 }
             for {set i 0} {$i < $attempts} {incr i} {
                 # wait for the replica to start reading the rdb
                 # using the log file since the replica only responds to INFO once in 2mb

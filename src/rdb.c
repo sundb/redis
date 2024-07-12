@@ -3814,6 +3814,8 @@ void killRDBChild(void) {
      * - resetChildState
      * - rdbRemoveTempFile */
 
+    printf("11111111111111, killRDBChild\n");
+
     /* However, there's a chance the child already exited, and will not receive the signal,
      * in that case it could have been resulsted in success and the done handler will override some
      * server metrics (e.g. the dirty counter) which it shouldn't (e.g. in case of FLUSHALL).
@@ -3891,6 +3893,8 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
 
         if (retval == C_OK) {
             sendChildCowInfo(CHILD_INFO_TYPE_RDB_COW_SIZE, "RDB");
+        } else {
+            printf("if (retval == C_OK && rioFlush(&rdb) == 0) failed\n");
         }
 
         rioFreeFd(&rdb);

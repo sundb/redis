@@ -1597,7 +1597,10 @@ void updateSlavesWaitingBgsave(int bgsaveerr, int type) {
         client *slave = ln->value;
 
         /* We can get here via freeClient()->killRDBChild()->checkChildrenDone(). skip disconnected slaves. */
-        if (!slave->conn) continue;
+        if (!slave->conn) {
+            printf("skip disconnected slaves\n");
+            continue;
+        }
 
         if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_END) {
             struct redis_stat buf;
@@ -3949,6 +3952,7 @@ int shouldStartChildReplication(int *mincapa_out, int *req_out) {
 }
 
 void replicationStartPendingFork(void) {
+    printf("replicationStartPendingFork\n");
     int mincapa = -1;
     int req = -1;
 

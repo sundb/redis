@@ -1159,10 +1159,12 @@ void exitExecutionUnit(void) {
 }
 
 void checkChildrenDone(void) {
+    printf("checkChildrenDone\n");
     int statloc = 0;
     pid_t pid;
 
     if ((pid = waitpid(-1, &statloc, WNOHANG)) != 0) {
+        printf("checkChildrenDone, waitpid\n");
         int exitcode = WIFEXITED(statloc) ? WEXITSTATUS(statloc) : -1;
         int bysignal = 0;
 
