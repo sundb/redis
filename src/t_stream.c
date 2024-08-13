@@ -726,16 +726,17 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
         /* Check if we can remove the whole node. */
         int remove_node;
         streamID master_id = {0}; /* For MINID */
+
+        /* Read the master ID from the radix tree key. */
+        streamDecodeID(ri.key, &master_id);
+
+        /* Read last ID. */
+        streamID last_id = {0,0};
+        lpGetEdgeStreamID(lp, 0, &master_id, &last_id);
+
         if (trim_strategy == TRIM_STRATEGY_MAXLEN) {
             remove_node = s->length - entries >= maxlen;
         } else {
-            /* Read the master ID from the radix tree key. */
-            streamDecodeID(ri.key, &master_id);
-
-            /* Read last ID. */
-            streamID last_id = {0,0};
-            lpGetEdgeStreamID(lp, 0, &master_id, &last_id);
-
             /* We can remove the entire node id its last ID < 'id' */
             remove_node = streamCompareID(&last_id, id) < 0;
         }
@@ -746,6 +747,11 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
             raxSeek(&ri,">=",ri.key,ri.key_len);
             s->length -= entries;
             deleted += entries;
+
+            /* Update the stream's maximal tombstone if needed. */
+            if (streamCompareID(&last_id,&s->max_deleted_entry_id) > 0) {
+                s->max_deleted_entry_id = last_id;
+            }
             continue;
         }
 
@@ -769,6 +775,7 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
         /* 'p' is now pointing to the first entry inside the listpack.
          * We have to run entry after entry, marking entries as deleted
          * if they are already not deleted. */
+        streamID deleted_id = {0,0};
         while (p) {
             /* We keep a copy of p (which point to flags part) in order to
              * update it after (and if) we actually remove the entry */
@@ -819,9 +826,18 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
                 deleted_from_lp++;
                 s->length--;
                 p = lp + delta;
+
+                /* */
+                deleted_id.ms = master_id.ms + ms_delta;
+                deleted_id.seq = master_id.seq + seq_delta;
             }
         }
         deleted += deleted_from_lp;
+
+        /* Update the stream's maximal tombstone if needed. */
+        if (streamCompareID(&deleted_id,&s->max_deleted_entry_id) > 0) {
+            s->max_deleted_entry_id = deleted_id;
+        }
 
         /* Now we update the entries/deleted counters. */
         p = lpFirst(lp);
@@ -851,6 +867,8 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
     if (s->length == 0) {
         s->first_id.ms = 0;
         s->first_id.seq = 0;
+        s->max_deleted_entry_id.ms = 0;
+        s->max_deleted_entry_id.seq = 0;
     } else if (deleted) {
         streamGetEdgeID(s,1,1,&s->first_id);
     }
