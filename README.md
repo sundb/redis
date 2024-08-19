@@ -1,4 +1,4 @@
-[![codecov](https://codecov.io/gh/vitahlin/redis/graph/badge.svg?token=S6OA4QLLEI)](https://codecov.io/gh/vitahlin/redis)
+[![codecov](https://codecov.io/gh/sundb/redis/graph/badge.svg?token=S6OA4QLLEI)](https://codecov.io/gh/sundb/redis)
 
 This README is just a fast *quick start* document. You can find more detailed documentation at [redis.io](https://redis.io).
 
