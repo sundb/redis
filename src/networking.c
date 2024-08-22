@@ -28,6 +28,7 @@ int postponeClientRead(client *c);
 char *getClientSockname(client *c);
 int ProcessingEventsWhileBlocked = 0; /* See processEventsWhileBlocked(). */
 __thread sds thread_shared_qb = NULL;
+__thread int thread_shared_qb_used = 0;
 
 /* Return the size consumed from the allocator, for the specified SDS string,
  * including internal fragmentation. This function is used in order to compute
@@ -1631,6 +1632,8 @@ void freeClient(client *c) {
 
     /* Free the query buffer */
     if (c->querybuf && c->querybuf == thread_shared_qb) {
+        thread_shared_qb_used = 0;
+        c->flags &= ~CLIENT_SHARED_QUERYBUFFER;
         sdsclear(c->querybuf);
     } else {
         sdsfree(c->querybuf);
@@ -2137,48 +2140,6 @@ void resetClient(client *c) {
     }
 }
 
-/* Initializes the shared query buffer to a new sds with the default capacity */
-void initSharedQueryBuf(void) {
-    thread_shared_qb = sdsnewlen(NULL, PROTO_IOBUF_LEN);
-    sdsclear(thread_shared_qb);
-}
-
-/* Resets the shared query buffer used by the given client.
- * If any data remained in the buffer, the client will take ownership of the buffer
- * and a new empty buffer will be allocated for the shared buffer. */
-void resetSharedQueryBuf(client *c) {
-    serverAssert(c->querybuf == thread_shared_qb);
-    size_t remaining = sdslen(c->querybuf) - c->qb_pos;
-
-    if (remaining > 0) {
-        /* Let the client take ownership of the shared buffer. */
-        initSharedQueryBuf();
-        return;
-    }
-
-    c->querybuf = NULL;
-    sdsclear(thread_shared_qb);
-    c->qb_pos = 0;
-}
-
-/* Trims the client query buffer to the current position. */
-void trimClientQueryBuffer(client *c) {
-    if (c->querybuf == thread_shared_qb) {
-        resetSharedQueryBuf(c);
-    }
-
-    if (c->querybuf == NULL) {
-        return;
-    }
-
-    serverAssert(c->qb_pos <= sdslen(c->querybuf));
-
-    if (c->qb_pos > 0) {
-        sdsrange(c->querybuf, c->qb_pos, -1);
-        c->qb_pos = 0;
-    }
-}
-
 /* This function is used when we want to re-enter the event loop but there
  * is the risk that the client we are dealing with will be freed in some
  * way. This happens for instance in:
@@ -2441,10 +2402,6 @@ int processMultibulkBuffer(client *c) {
                  * ll+2, trimming querybuf is just a waste of time, because
                  * at this time the querybuf contains not only our bulk. */
                 if (sdslen(c->querybuf)-c->qb_pos <= (size_t)ll+2) {
-                    if (c->querybuf == thread_shared_qb) {
-                        /* Let the client take the ownership of the shared buffer. */
-                        initSharedQueryBuf();
-                    }
                     sdsrange(c->querybuf,c->qb_pos,-1);
                     c->qb_pos = 0;
                     /* Hint the sds library about the amount of bytes this string is
@@ -2660,13 +2617,6 @@ int processInputBuffer(client *c) {
                 break;
             }
 
-            if (c->querybuf == thread_shared_qb) {
-                /* Before processing the command, reset the shared query buffer to its default state.
-                 * This avoids unintentionally modifying the shared qb during processCommand as we may use
-                 * the shared qb for other clients during processEventsWhileBlocked */
-                resetSharedQueryBuf(c);
-            }
-
             /* We are finally ready to execute the command. */
             if (processCommandAndResetClient(c) == C_ERR) {
                 /* If the client is no longer valid, we avoid exiting this
@@ -2696,7 +2646,9 @@ int processInputBuffer(client *c) {
             c->repl_applied = 0;
         }
     } else {
-        trimClientQueryBuffer(c);
+        /* Trim to pos */
+        sdsrange(c->querybuf,c->qb_pos,-1);
+        c->qb_pos = 0;
     }
 
     /* Update client memory usage after processing the query buffer, this is
@@ -2744,9 +2696,23 @@ void readQueryFromClient(connection *conn) {
     }
 
     if (c->querybuf == NULL) {
-        serverAssert(sdslen(thread_shared_qb) == 0);
-        c->querybuf = big_arg ? sdsempty() : thread_shared_qb;
-        qblen = sdslen(c->querybuf);
+        if (big_arg) {
+            c->querybuf = sdsempty();
+        } else {
+            if (unlikely(thread_shared_qb_used)) {
+                c->querybuf = sdsnewlen(NULL, PROTO_IOBUF_LEN);
+                sdsclear(c->querybuf);
+            } else {
+                if (!thread_shared_qb) {
+                    thread_shared_qb = sdsnewlen(NULL, PROTO_IOBUF_LEN);
+                    sdsclear(thread_shared_qb);
+                }
+                serverAssert(sdslen(thread_shared_qb) == 0);
+                c->querybuf = thread_shared_qb;
+                c->flags |= CLIENT_SHARED_QUERYBUFFER;
+                thread_shared_qb_used = 1;
+            }
+        }
     }
 
     if (!(c->flags & CLIENT_MASTER) && // master client's querybuf can grow greedy.
@@ -2821,9 +2787,21 @@ void readQueryFromClient(connection *conn) {
          c = NULL;
 
 done:
-    if (c && c->querybuf == thread_shared_qb) {
-        sdsclear(thread_shared_qb);
-        c->querybuf = NULL;
+    if (c && (c->flags & CLIENT_SHARED_QUERYBUFFER)) {
+        serverAssert(c->qb_pos == 0);
+        if (c->querybuf == thread_shared_qb) {
+            if (sdslen(c->querybuf)) { /* remain */
+                thread_shared_qb = NULL;
+            } else {
+                c->querybuf = NULL;
+                c->qb_pos = 0;
+                sdsclear(thread_shared_qb);
+            }
+        } else { /* changed */
+            thread_shared_qb = NULL;
+        }
+        c->flags &= ~CLIENT_SHARED_QUERYBUFFER;
+        thread_shared_qb_used = 0;
     }
     beforeNextClient(c);
 }
@@ -4313,7 +4291,6 @@ void *IOThreadMain(void *myid) {
     redis_set_thread_title(thdname);
     redisSetCpuAffinity(server.server_cpulist);
     makeThreadKillable();
-    initSharedQueryBuf();
 
     while(1) {
         /* Wait for start */
