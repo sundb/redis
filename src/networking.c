@@ -2566,7 +2566,7 @@ int processPendingCommandAndInputBuffer(client *c) {
  * return C_ERR in case the client was freed during the processing */
 int processInputBuffer(client *c) {
     /* Keep processing while there is something in the input buffer */
-    while (c->querybuf && c->qb_pos < sdslen(c->querybuf)) {
+    while (c->qb_pos < sdslen(c->querybuf)) {
         /* Immediately abort if the client is in the middle of something. */
         if (c->flags & CLIENT_BLOCKED) break;
 
@@ -2645,7 +2645,7 @@ int processInputBuffer(client *c) {
             c->qb_pos -= c->repl_applied;
             c->repl_applied = 0;
         }
-    } else {
+    } else if (c->qb_pos) {
         /* Trim to pos */
         sdsrange(c->querybuf,c->qb_pos,-1);
         c->qb_pos = 0;
