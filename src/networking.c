@@ -28,7 +28,8 @@ int postponeClientRead(client *c);
 char *getClientSockname(client *c);
 int ProcessingEventsWhileBlocked = 0; /* See processEventsWhileBlocked(). */
 __thread sds thread_shared_qb = NULL;
-__thread int thread_shared_qb_used = 0;
+__thread int thread_shared_qb_used = 0; /* Avoid multiple clients using shared query
+                                         * buffer due to nested command execution. */
 
 /* Return the size consumed from the allocator, for the specified SDS string,
  * including internal fragmentation. This function is used in order to compute
@@ -1582,15 +1583,19 @@ void deauthenticateAndCloseClient(client *c) {
  * and a new empty buffer will be allocated for the shared buffer. */
 static void resetSharedQueryBuf(client *c) {
     serverAssert(c->flags & CLIENT_SHARED_QUERYBUFFER);
-    if (c->querybuf != thread_shared_qb || sdslen(c->querybuf) > c->qb_pos) { /* data remained. */
-        /* Let the client take ownership of the shared buffer. */
+    if (c->querybuf != thread_shared_qb || sdslen(c->querybuf) > c->qb_pos) {
+        /* If querybuf has been reallocated or there is still data left,
+         * let the client take ownership of the shared buffer. */
         thread_shared_qb = NULL;
     } else {
+        /* It is safe to dereference and reuse the shared query buffer. */
         c->querybuf = NULL;
         c->qb_pos = 0;
         sdsclear(thread_shared_qb);
     } 
 
+    /* Mark that the client is no longer using the shared query buffer
+     * and indicate that it is no longer used by any client. */
     c->flags &= ~CLIENT_SHARED_QUERYBUFFER;
     thread_shared_qb_used = 0;
 }
@@ -2710,12 +2715,18 @@ void readQueryFromClient(connection *conn) {
             readlen = PROTO_IOBUF_LEN;
     } else if (c->querybuf == NULL) {
         if (unlikely(thread_shared_qb_used)) {
-            c->querybuf = sdsempty();
+            /* The shared query buffer is already used by another client,
+             * switch to using the client's private query buffer. This only
+             * occurs when commands are executed nested via processEventsWhileBlocked(). */
+            c->querybuf = sdsnewlen(NULL, PROTO_IOBUF_LEN);
         } else {
+            /* Create the shared query buffer if it doesn't exist. */
             if (!thread_shared_qb) {
                 thread_shared_qb = sdsnewlen(NULL, PROTO_IOBUF_LEN);
                 sdsclear(thread_shared_qb);
             }
+
+            /* Assign the shared query buffer to the client and mark it as in use. */
             serverAssert(sdslen(thread_shared_qb) == 0);
             c->querybuf = thread_shared_qb;
             c->flags |= CLIENT_SHARED_QUERYBUFFER;
@@ -2797,7 +2808,7 @@ void readQueryFromClient(connection *conn) {
 
 done:
     if (c && (c->flags & CLIENT_SHARED_QUERYBUFFER)) {
-        serverAssert(c->qb_pos == 0);
+        serverAssert(c->qb_pos == 0); /* Ensure the client's query buffer is trimed in processInputBuffer */
         resetSharedQueryBuf(c);
     }
     beforeNextClient(c);
