@@ -2795,7 +2795,6 @@ done:
                 thread_shared_qb = NULL;
             } else {
                 c->querybuf = NULL;
-                c->qb_pos = 0;
                 sdsclear(thread_shared_qb);
             }
         } else { /* changed */
