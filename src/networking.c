@@ -1631,12 +1631,19 @@ void freeClient(client *c) {
     }
 
     /* Free the query buffer */
-    if (c->querybuf && c->querybuf == thread_shared_qb) {
-        thread_shared_qb_used = 0;
-        c->flags &= ~CLIENT_SHARED_QUERYBUFFER;
-        sdsclear(c->querybuf);
-    } else {
-        sdsfree(c->querybuf);
+    if (c->querybuf) {
+        if (c->flags & CLIENT_SHARED_QUERYBUFFER) {
+            if (c->querybuf == thread_shared_qb) {
+                sdsclear(c->querybuf);
+            } else {
+                sdsfree(c->querybuf);
+                thread_shared_qb = NULL;
+            }
+            thread_shared_qb_used = 0;
+            c->flags &= ~CLIENT_SHARED_QUERYBUFFER;
+        } else {
+            sdsfree(c->querybuf);
+        }
     }
     c->querybuf = NULL;
 
