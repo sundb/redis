@@ -2566,7 +2566,7 @@ int processPendingCommandAndInputBuffer(client *c) {
  * return C_ERR in case the client was freed during the processing */
 int processInputBuffer(client *c) {
     /* Keep processing while there is something in the input buffer */
-    while (c->qb_pos < sdslen(c->querybuf)) {
+    while(c->qb_pos < sdslen(c->querybuf)) {
         /* Immediately abort if the client is in the middle of something. */
         if (c->flags & CLIENT_BLOCKED) break;
 
@@ -2673,7 +2673,6 @@ void readQueryFromClient(connection *conn) {
     atomicIncr(server.stat_total_reads_processed, 1);
 
     readlen = PROTO_IOBUF_LEN;
-    qblen = c->querybuf ? sdslen(c->querybuf) : 0;
     /* If this is a multi bulk request, and we are processing a bulk reply
      * that is large enough, try to maximize the probability that the query
      * buffer contains exactly the SDS string representing the object, even
@@ -2683,7 +2682,8 @@ void readQueryFromClient(connection *conn) {
     if (c->reqtype == PROTO_REQ_MULTIBULK && c->multibulklen && c->bulklen != -1
         && c->bulklen >= PROTO_MBULK_BIG_ARG)
     {
-        ssize_t remaining = (size_t)(c->bulklen + 2) - (qblen - c->qb_pos);
+        if (!c->querybuf) c->querybuf = sdsempty();
+        ssize_t remaining = (size_t)(c->bulklen+2)-(sdslen(c->querybuf)-c->qb_pos);
         big_arg = 1;
 
         /* Note that the 'remaining' variable may be zero in some edge case,
@@ -2694,28 +2694,22 @@ void readQueryFromClient(connection *conn) {
          * but doesn't need align to the next arg, we can read more data. */
         if (c->flags & CLIENT_MASTER && readlen < PROTO_IOBUF_LEN)
             readlen = PROTO_IOBUF_LEN;
-    }
-
-    if (c->querybuf == NULL) {
-        if (big_arg) {
+    } else if (c->querybuf == NULL) {
+        if (unlikely(thread_shared_qb_used)) {
             c->querybuf = sdsempty();
         } else {
-            if (unlikely(thread_shared_qb_used)) {
-                c->querybuf = sdsnewlen(NULL, PROTO_IOBUF_LEN);
-                sdsclear(c->querybuf);
-            } else {
-                if (!thread_shared_qb) {
-                    thread_shared_qb = sdsnewlen(NULL, PROTO_IOBUF_LEN);
-                    sdsclear(thread_shared_qb);
-                }
-                serverAssert(sdslen(thread_shared_qb) == 0);
-                c->querybuf = thread_shared_qb;
-                c->flags |= CLIENT_SHARED_QUERYBUFFER;
-                thread_shared_qb_used = 1;
+            if (!thread_shared_qb) {
+                thread_shared_qb = sdsnewlen(NULL, PROTO_IOBUF_LEN);
+                sdsclear(thread_shared_qb);
             }
+            serverAssert(sdslen(thread_shared_qb) == 0);
+            c->querybuf = thread_shared_qb;
+            c->flags |= CLIENT_SHARED_QUERYBUFFER;
+            thread_shared_qb_used = 1;
         }
     }
 
+    qblen = sdslen(c->querybuf);
     if (!(c->flags & CLIENT_MASTER) && // master client's querybuf can grow greedy.
         (big_arg || sdsalloc(c->querybuf) < PROTO_IOBUF_LEN)) {
         /* When reading a BIG_ARG we won't be reading more than that one arg
