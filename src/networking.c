@@ -1577,6 +1577,24 @@ void deauthenticateAndCloseClient(client *c) {
     }
 }
 
+/* Resets the shared query buffer used by the given client.
+ * If any data remained in the buffer, the client will take ownership of the buffer
+ * and a new empty buffer will be allocated for the shared buffer. */
+static void resetSharedQueryBuf(client *c) {
+    serverAssert(c->flags & CLIENT_SHARED_QUERYBUFFER);
+    if (c->querybuf != thread_shared_qb || sdslen(c->querybuf) > c->qb_pos) { /* data remained. */
+        /* Let the client take ownership of the shared buffer. */
+        thread_shared_qb = NULL;
+    } else {
+        c->querybuf = NULL;
+        c->qb_pos = 0;
+        sdsclear(thread_shared_qb);
+    } 
+
+    c->flags &= ~CLIENT_SHARED_QUERYBUFFER;
+    thread_shared_qb_used = 0;
+}
+
 void freeClient(client *c) {
     listNode *ln;
 
@@ -1631,20 +1649,9 @@ void freeClient(client *c) {
     }
 
     /* Free the query buffer */
-    if (c->querybuf) {
-        if (c->flags & CLIENT_SHARED_QUERYBUFFER) {
-            if (c->querybuf == thread_shared_qb) {
-                sdsclear(c->querybuf);
-            } else {
-                sdsfree(c->querybuf);
-                thread_shared_qb = NULL;
-            }
-            thread_shared_qb_used = 0;
-            c->flags &= ~CLIENT_SHARED_QUERYBUFFER;
-        } else {
-            sdsfree(c->querybuf);
-        }
-    }
+    if (c->flags & CLIENT_SHARED_QUERYBUFFER)
+        resetSharedQueryBuf(c);
+    sdsfree(c->querybuf);
     c->querybuf = NULL;
 
     /* Deallocate structures used to block on blocking ops. */
@@ -2791,18 +2798,7 @@ void readQueryFromClient(connection *conn) {
 done:
     if (c && (c->flags & CLIENT_SHARED_QUERYBUFFER)) {
         serverAssert(c->qb_pos == 0);
-        if (c->querybuf == thread_shared_qb) {
-            if (sdslen(c->querybuf)) { /* remain */
-                thread_shared_qb = NULL;
-            } else {
-                c->querybuf = NULL;
-                sdsclear(thread_shared_qb);
-            }
-        } else { /* changed */
-            thread_shared_qb = NULL;
-        }
-        c->flags &= ~CLIENT_SHARED_QUERYBUFFER;
-        thread_shared_qb_used = 0;
+        resetSharedQueryBuf(c);
     }
     beforeNextClient(c);
 }
