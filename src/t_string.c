@@ -73,8 +73,8 @@ void setGenericCommand(client *c, int flags, robj *key, robj *val, robj *expire,
         if (getGenericCommand(c) == C_ERR) return;
     }
 
-    dictEntry *de = dbFind(c->db, key->ptr);
-    robj *o = lookupKeyWriteWithDictEntry(c->db,key,de);
+    dictEntry *de;
+    robj *o = lookupKeyWriteWithDictEntry(c->db,key,&de);
     found = (o != NULL);
 
     if ((flags & OBJ_SET_NX && found) ||
@@ -434,8 +434,8 @@ void setrangeCommand(client *c) {
         return;
     }
 
-    dictEntry *de = dbFind(c->db, c->argv[1]->ptr);
-    o = lookupKeyWriteWithDictEntry(c->db,c->argv[1],de);
+    dictEntry *de;
+    o = lookupKeyWriteWithDictEntry(c->db,c->argv[1],&de);
     if (o == NULL) {
         /* Return 0 when setting nothing on a non-existing string */
         if (value_len == 0) {
@@ -575,8 +575,8 @@ void msetnxCommand(client *c) {
 void incrDecrCommand(client *c, long long incr) {
     long long value, oldvalue;
     robj *o, *new;
-    dictEntry *de = dbFind(c->db, c->argv[1]->ptr);
-    o = lookupKeyWriteWithDictEntry(c->db,c->argv[1],de);
+    dictEntry *de;
+    o = lookupKeyWriteWithDictEntry(c->db,c->argv[1],&de);
     if (checkType(c,o,OBJ_STRING)) return;
     if (getLongLongFromObjectOrReply(c,o,&value,NULL) != C_OK) return;
 
@@ -641,8 +641,8 @@ void incrbyfloatCommand(client *c) {
     long double incr, value;
     robj *o, *new;
 
-    dictEntry *de = dbFind(c->db, c->argv[1]->ptr);
-    o = lookupKeyWriteWithDictEntry(c->db,c->argv[1],de);
+    dictEntry *de;
+    o = lookupKeyWriteWithDictEntry(c->db,c->argv[1],&de);
     if (checkType(c,o,OBJ_STRING)) return;
     if (getLongDoubleFromObjectOrReply(c,o,&value,NULL) != C_OK ||
         getLongDoubleFromObjectOrReply(c,c->argv[2],&incr,NULL) != C_OK)
@@ -675,8 +675,8 @@ void appendCommand(client *c) {
     size_t totlen;
     robj *o, *append;
 
-    dictEntry *de = dbFind(c->db, c->argv[1]->ptr);
-    o = lookupKeyWriteWithDictEntry(c->db,c->argv[1],de);
+    dictEntry *de;
+    o = lookupKeyWriteWithDictEntry(c->db,c->argv[1],&de);
     if (o == NULL) {
         /* Create the key */
         c->argv[2] = tryObjectEncoding(c->argv[2]);
