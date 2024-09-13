@@ -1890,6 +1890,7 @@ void ebStart(EbucketsIterator *iter, ebuckets eb, EbucketsType *type) {
     if (ebIsEmpty(eb)) {
         iter->currItem = NULL;
         iter->itemsCurrBucket = 0;
+        iter->isRax = 0;
     } else if (ebIsList(eb)) {
         iter->currItem = ebGetListPtr(type, eb);
         iter->itemsCurrBucket = type->getExpireMeta(iter->currItem)->numItems;
