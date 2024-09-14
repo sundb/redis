@@ -27,9 +27,16 @@ on:
       use_git_ref:
         description: 'git branch or sha to use'
         default: 'unstable'
-
+      pr:
+        description: 'pr id'
+        default: ''
 
 jobs:
+  echo_desc:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add note to logs
+        run: echo "This job was triggered by PR https://github.com/redis/redis/pull/${{github.event.inputs.pr}}."
 
   test-ubuntu-jemalloc:
     runs-on: ubuntu-latest
