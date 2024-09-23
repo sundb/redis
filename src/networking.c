@@ -1874,6 +1874,13 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
     listRewind(c->reply, &iter);
     while (remaining > 0) {
         next = listNext(&iter);
+        if (!next) {
+            serverLog(LL_WARNING, "Temp Fix: Detect next is NULL, nwritten: %ld, remain: %ld", *nwritten, remaining);
+            if (c->lastcmd) {
+                serverLog(LL_WARNING, "Temp Fix: c->lastcmd: %s", c->lastcmd->declared_name);
+            }
+            break;
+        }
         o = listNodeValue(next);
         if (remaining < (ssize_t)(o->used - c->sentlen)) {
             c->sentlen += remaining;
@@ -1928,8 +1935,12 @@ int _writeToClient(client *c, ssize_t *nwritten) {
 
         /* If there are no longer objects in the list, we expect
          * the count of reply bytes to be exactly zero. */
-        if (listLength(c->reply) == 0)
-            serverAssert(c->reply_bytes == 0);
+        if (listLength(c->reply) == 0 && c->reply_bytes) {
+            serverLog(LL_WARNING, "Temp Fix: c->reply is empty, but c->reply_bytes is %lld", c->reply_bytes);
+            if (c->lastcmd)
+                serverLog(LL_WARNING, "Temp Fix: c->lastcmd: %s", c->lastcmd->declared_name);
+            c->reply_bytes = 0;
+        }
     } else if (c->bufpos > 0) {
         *nwritten = connWrite(c->conn, c->buf + c->sentlen, c->bufpos - c->sentlen);
         if (*nwritten <= 0) return C_ERR;
