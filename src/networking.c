@@ -1883,6 +1883,9 @@ void beforeNextClient(client *c) {
         /* Trim to pos */
         sdsrange(c->querybuf,c->qb_pos,-1);
         c->qb_pos = 0;
+        if (c && (c->flags & CLIENT_REUSABLE_QUERYBUFFER)) {
+            resetReusableQueryBuf(c);
+        }
     }
     /* Handle async frees */
     /* Note: this doesn't make the server.clients_to_close list redundant because of

@@ -426,6 +426,7 @@ typedef enum {
 #define TLS_CONN_FLAG_READ_WANT_WRITE   (1<<0)
 #define TLS_CONN_FLAG_WRITE_WANT_READ   (1<<1)
 #define TLS_CONN_FLAG_FD_SET            (1<<2)
+#define TLS_CONN_FLAG_POSTPONE_UPDATE_STATE (1 << 3)
 
 typedef struct tls_connection {
     connection c;
@@ -633,6 +634,12 @@ static void updateSSLEvent(tls_connection *conn) {
         aeCreateFileEvent(server.el, conn->c.fd, AE_WRITABLE, tlsEventHandler, conn);
     if (!need_write && (mask & AE_WRITABLE))
         aeDeleteFileEvent(server.el, conn->c.fd, AE_WRITABLE);
+}
+
+static void updateSSLState(connection *conn_) {
+    tls_connection *conn = (tls_connection *)conn_;
+    updateSSLEvent(conn);
+    updatePendingData(conn);
 }
 
 static void tlsHandleEvent(tls_connection *conn, int mask) {
