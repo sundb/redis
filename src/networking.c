@@ -4615,9 +4615,9 @@ static inline unsigned long getIOPendingCount(int i) {
     return count;
 }
 
-static inline void setIOPendingCount(int i, unsigned long count) {
-    atomicSetWithSync(io_threads_pending[i].value, count);
-}
+// static inline void setIOPendingCount(int i, unsigned long count) {
+//     atomicSetWithSync(io_threads_pending[i].value, count);
+// }
 
 /* Return 1 if we want to handle the client read later using threaded I/O.
  * This is called by the readable handler of the event loop.
