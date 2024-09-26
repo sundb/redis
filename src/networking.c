@@ -4609,11 +4609,11 @@ int io_threads_op;      /* IO_THREADS_OP_IDLE, IO_THREADS_OP_READ or IO_THREADS_
  * itself. */
 list *io_threads_list[IO_THREADS_MAX_NUM];
 
-static inline unsigned long getIOPendingCount(int i) {
-    unsigned long count = 0;
-    atomicGetWithSync(io_threads_pending[i].value, count);
-    return count;
-}
+// static inline unsigned long getIOPendingCount(int i) {
+//     unsigned long count = 0;
+//     atomicGetWithSync(io_threads_pending[i].value, count);
+//     return count;
+// }
 
 // static inline void setIOPendingCount(int i, unsigned long count) {
 //     atomicSetWithSync(io_threads_pending[i].value, count);
