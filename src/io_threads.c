@@ -90,18 +90,6 @@ static size_t IOJobQueue_availableJobs(const IOJobQueue *jq) {
     }
 }
 
-/* Checks if the job Queue is empty.
- * returns 1 if the buffer is currently empty, 0 otherwise.
- * Called by the main-thread only.
- * This function uses relaxed memory order, so the caller need to use an acquire
- * memory fence before calling this function to be sure it has the latest index
- * from the other thread, especially when called repeatedly. */
-static int IOJobQueue_isEmpty(const IOJobQueue *jq) {
-    size_t current_head = atomic_load_explicit(&jq->head, memory_order_relaxed);
-    size_t current_tail = atomic_load_explicit(&jq->tail, memory_order_relaxed);
-    return current_head == current_tail;
-}
-
 /* Removes the next job from the given job queue by advancing the tail index.
  * Called by the IO thread.
  * The caller must ensure that the queue is not empty before calling this function.
@@ -232,9 +220,9 @@ void killIOThreads(void) {
                     "IO thread(tid:%lu) terminated",(unsigned long)io_threads[j]);
             }
         }
+        IOJobQueue_cleanup(&io_jobs[j]);
     }
 }
-
 
 /* Initialize the data structures needed for I/O threads. */
 void initIOThreads(void) {

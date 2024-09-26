@@ -19,6 +19,7 @@
 #include "cluster.h"
 #include "threads_mngr.h"
 #include "script.h"
+#include "io_threads.h"
 
 #include <arpa/inet.h>
 #include <signal.h>

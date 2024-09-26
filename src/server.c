@@ -26,6 +26,7 @@
 #include "fmtargs.h"
 #include "mstr.h"
 #include "ebuckets.h"
+#include "io_threads.h"
 
 #include <time.h>
 #include <signal.h>

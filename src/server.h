@@ -3927,7 +3927,6 @@ void xorDigest(unsigned char *digest, const void *ptr, size_t len);
 sds catSubCommandFullname(const char *parent_name, const char *sub_name);
 void commandAddSubcommand(struct redisCommand *parent, struct redisCommand *subcommand, const char *declared_name);
 void debugDelay(int usec);
-// void killIOThreads(void);
 void killThreads(void);
 void makeThreadKillable(void);
 void swapMainDbWithTempDb(redisDb *tempDb);
