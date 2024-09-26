@@ -389,6 +389,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_MODULE_PREVENT_REPL_PROP (1ULL<<49) /* Module client do not want to propagate to replica */
 #define CLIENT_REPROCESSING_COMMAND (1ULL<<50) /* The client is re-processing the command. */
 #define CLIENT_REUSABLE_QUERYBUFFER (1ULL<<51) /* The client is using the reusable query buffer. */
+#define CLIENT_PENDING_READ (1ULL<<52) /* TODO */
 
 /* Any flag that does not let optimize FLUSH SYNC to run it in bg as blocking client ASYNC */
 #define CLIENT_AVOID_BLOCKING_ASYNC_FLUSH (CLIENT_DENY_BLOCKING|CLIENT_MULTI|CLIENT_LUA_DEBUG|CLIENT_LUA_DEBUG_SYNC|CLIENT_MODULE)
@@ -1157,6 +1158,12 @@ typedef struct {
 } clientReqResInfo;
 #endif
 
+typedef enum {
+    CLIENT_IDLE = 0,        /* Initial state: client is idle. */
+    CLIENT_PENDING_IO = 1,  /* Main-thread sets this state when client is sent to IO-thread for read/write. */
+    CLIENT_COMPLETED_IO = 2 /* IO-thread sets this state after completing IO operation. */
+} clientIOState;
+
 typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
@@ -1175,6 +1182,13 @@ typedef struct client {
     int original_argc;      /* Num of arguments of original command if arguments were rewritten. */
     robj **original_argv;   /* Arguments of original command if arguments were rewritten. */
     size_t argv_len_sum;    /* Sum of lengths of objects in argv list. */
+    volatile uint8_t io_read_state;      /* Indicate the IO read state of the client */
+    volatile uint8_t io_write_state;     /* Indicate the IO write state of the client */
+    uint8_t cur_tid;                     /* ID of IO thread currently performing IO for this client */
+    int nread;                           /* Number of bytes of the last read. */
+    int nwritten;                        /* Number of bytes of the last write. */
+    int read_flags;                      /* Client Read flags - used to communicate the client read state. */
+    uint16_t write_flags;                /* Client Write flags - used to communicate the client write state. */
     struct redisCommand *cmd, *lastcmd;  /* Last command executed. */
     struct redisCommand *realcmd; /* The original command that was executed by the client,
                                      Used to update error stats in case the c->cmd was modified
@@ -1186,6 +1200,7 @@ typedef struct client {
     int multibulklen;       /* Number of multi bulk arguments left to read. */
     long bulklen;           /* Length of bulk argument in multi bulk request. */
     list *reply;            /* List of reply objects to send to the client. */
+    listNode *io_last_reply_block;       /* Last client reply block when sent to IO thread */
     unsigned long long reply_bytes; /* Tot bytes of objects in reply list. */
     list *deferred_reply_errors;    /* Used for module thread safe contexts. */
     size_t sentlen;         /* Amount of bytes already sent in the current
@@ -1229,7 +1244,6 @@ typedef struct client {
     sds sockname;           /* Cached connection target address. */
     listNode *client_list_node; /* list node in client list */
     listNode *postponed_list_node; /* list node within the postponed list */
-    listNode *pending_read_list_node; /* list node in clients pending read list */
     void *module_blocked_client; /* Pointer to the RedisModuleBlockedClient associated with this
                                   * client. This is set in case of module authentication before the
                                   * unblocked client is reprocessed to handle reply callbacks. */
@@ -1269,12 +1283,14 @@ typedef struct client {
     size_t ref_block_pos;        /* Access position of referenced buffer block,
                                   * i.e. the next offset to send. */
 
-    /* list node in clients_pending_write list */
+    /* list node in clients_pending_write or in clients_pending_io_write list */
     listNode clients_pending_write_node;
+    listNode pending_read_list_node; /* list node in clients_pending_io_read list */
     /* Response buffer */
     size_t buf_peak; /* Peak used size of buffer in last 5 sec interval. */
     mstime_t buf_peak_last_reset_time; /* keeps the last time the buffer peak value was reset */
     int bufpos;
+    size_t io_last_bufpos;  /* The client's bufpos at the time it was sent to the IO thread */
     size_t buf_usable_size; /* Usable size of buffer. */
     char *buf;
 #ifdef LOG_REQ_RES
@@ -1613,7 +1629,9 @@ struct redisServer {
     list *clients;              /* List of active clients */
     list *clients_to_close;     /* Clients to close asynchronously */
     list *clients_pending_write; /* There is to write or install handler. */
-    list *clients_pending_read;  /* Client has pending read socket buffers. */
+    // list *clients_pending_read;  /* TODO Client has pending read socket buffers. */
+    list *clients_pending_io_read;         /* List of clients with pending read to be process by I/O threads. */
+    list *clients_pending_io_write;        /* List of clients with pending write to be process by I/O threads. */
     list *slaves, *monitors;    /* List of slaves and MONITORs */
     client *current_client;     /* The client that triggered the command execution (External or AOF). */
     client *executing_client;   /* The client executing the current command (possibly script or module). */
@@ -2462,11 +2480,6 @@ typedef struct {
 #define OBJ_HASH_KEY 1
 #define OBJ_HASH_VALUE 2
 
-#define IO_THREADS_OP_IDLE 0
-#define IO_THREADS_OP_READ 1
-#define IO_THREADS_OP_WRITE 2
-extern int io_threads_op;
-
 /* Hash-field data type (of t_hash.c) */
 typedef mstr hfield;
 extern  mstrKind mstrFieldKind;
@@ -2577,6 +2590,28 @@ int validateProcTitleTemplate(const char *template);
 int redisCommunicateSystemd(const char *sd_notify_msg);
 void redisSetCpuAffinity(const char *cpulist);
 
+/* Read flags for various read errors and states */
+#define READ_FLAGS_QB_LIMIT_REACHED (1 << 0)
+#define READ_FLAGS_ERROR_BIG_INLINE_REQUEST (1 << 1)
+#define READ_FLAGS_ERROR_BIG_MULTIBULK (1 << 2)
+#define READ_FLAGS_ERROR_INVALID_MULTIBULK_LEN (1 << 3)
+#define READ_FLAGS_ERROR_UNAUTHENTICATED_MULTIBULK_LEN (1 << 4)
+#define READ_FLAGS_ERROR_UNAUTHENTICATED_BULK_LEN (1 << 5)
+#define READ_FLAGS_ERROR_BIG_BULK_COUNT (1 << 6)
+#define READ_FLAGS_ERROR_MBULK_UNEXPECTED_CHARACTER (1 << 7)
+#define READ_FLAGS_ERROR_MBULK_INVALID_BULK_LEN (1 << 8)
+#define READ_FLAGS_ERROR_UNEXPECTED_INLINE_FROM_PRIMARY (1 << 9)
+#define READ_FLAGS_ERROR_UNBALANCED_QUOTES (1 << 10)
+#define READ_FLAGS_INLINE_ZERO_QUERY_LEN (1 << 11)
+#define READ_FLAGS_PARSING_NEGATIVE_MBULK_LEN (1 << 12)
+#define READ_FLAGS_PARSING_COMPLETED (1 << 13)
+#define READ_FLAGS_PRIMARY (1 << 14)
+#define READ_FLAGS_DONT_PARSE (1 << 15)
+#define READ_FLAGS_AUTH_REQUIRED (1 << 16)
+
+/* Write flags for various write errors and states */
+#define WRITE_FLAGS_WRITE_ERROR (1 << 0)
+
 /* afterErrorReply flags */
 #define ERR_REPLY_FLAG_NO_STATS_UPDATE (1ULL<<0) /* Indicating that we should not update
                                                     error stats after sending error reply */
@@ -2586,7 +2621,7 @@ void freeClient(client *c);
 void freeClientAsync(client *c);
 void deauthenticateAndCloseClient(client *c);
 void logInvalidUseAndFreeClientAsync(client *c, const char *fmt, ...);
-int beforeNextClient(client *c);
+void beforeNextClient(client *c);
 void clearClientConnectionState(client *c);
 void resetClient(client *c);
 void freeClientOriginalArgv(client *c);
@@ -2681,21 +2716,28 @@ void whileBlockedCron(void);
 void blockingOperationStarts(void);
 void blockingOperationEnds(void);
 int handleClientsWithPendingWrites(void);
-int handleClientsWithPendingWritesUsingThreads(void);
-int handleClientsWithPendingReadsUsingThreads(void);
-int stopThreadedIOIfNeeded(void);
+// int handleClientsWithPendingWritesUsingThreads(void);
+// int handleClientsWithPendingReadsUsingThreads(void);
+// int stopThreadedIOIfNeeded(void);
 int clientHasPendingReplies(client *c);
 int updateClientMemUsageAndBucket(client *c);
 void removeClientFromMemUsageBucket(client *c, int allow_eviction);
 void unlinkClient(client *c);
-int writeToClient(client *c, int handler_installed);
+int writeToClient(client *c);
 void linkClient(client *c);
 void protectClient(client *c);
 void unprotectClient(client *c);
-void initThreadedIO(void);
+// void initThreadedIO(void);
 client *lookupClientByID(uint64_t id);
 int authRequired(client *c);
 void putClientInPendingWriteQueue(client *c);
+void waitForClientIO(client *c);
+void ioThreadReadQueryFromClient(void *data);
+void ioThreadWriteToClient(void *data);
+int canParseCommand(client *c);
+int processIOThreadsReadDone(void);
+int processIOThreadsWriteDone(void);
+
 /* reply macros */
 #define ADD_REPLY_BULK_CBUFFER_STRING_CONSTANT(c, str) addReplyBulkCBuffer(c, str, strlen(str))
 
@@ -3885,7 +3927,7 @@ void xorDigest(unsigned char *digest, const void *ptr, size_t len);
 sds catSubCommandFullname(const char *parent_name, const char *sub_name);
 void commandAddSubcommand(struct redisCommand *parent, struct redisCommand *subcommand, const char *declared_name);
 void debugDelay(int usec);
-void killIOThreads(void);
+// void killIOThreads(void);
 void killThreads(void);
 void makeThreadKillable(void);
 void swapMainDbWithTempDb(redisDb *tempDb);

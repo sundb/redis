@@ -949,7 +949,6 @@ void removeClientFromMemUsageBucket(client *c, int allow_eviction) {
  * returns 1 if client eviction for this client is allowed, 0 otherwise.
  */
 int updateClientMemUsageAndBucket(client *c) {
-    serverAssert(io_threads_op == IO_THREADS_OP_IDLE && c->conn);
     int allow_eviction = clientEvictionAllowed(c);
     removeClientFromMemUsageBucket(c, allow_eviction);
 
@@ -1045,6 +1044,7 @@ void clientsCron(void) {
         head = listFirst(server.clients);
         c = listNodeValue(head);
         listRotateHeadToTail(server.clients);
+        if (c->io_read_state != CLIENT_IDLE || c->io_write_state != CLIENT_IDLE) continue;
         /* The following functions do different service checks on the client.
          * The protocol is that they return non-zero if the client was
          * terminated. */
@@ -1320,22 +1320,16 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     monotime cron_start = getMonotonicUs();
 
     run_with_period(100) {
-        long long stat_net_input_bytes, stat_net_output_bytes;
-        long long stat_net_repl_input_bytes, stat_net_repl_output_bytes;
-        atomicGet(server.stat_net_input_bytes, stat_net_input_bytes);
-        atomicGet(server.stat_net_output_bytes, stat_net_output_bytes);
-        atomicGet(server.stat_net_repl_input_bytes, stat_net_repl_input_bytes);
-        atomicGet(server.stat_net_repl_output_bytes, stat_net_repl_output_bytes);
         monotime current_time = getMonotonicUs();
         long long factor = 1000000;  // us
         trackInstantaneousMetric(STATS_METRIC_COMMAND, server.stat_numcommands, current_time, factor);
-        trackInstantaneousMetric(STATS_METRIC_NET_INPUT, stat_net_input_bytes + stat_net_repl_input_bytes,
+        trackInstantaneousMetric(STATS_METRIC_NET_INPUT, server.stat_net_input_bytes + server.stat_net_repl_input_bytes,
                                  current_time, factor);
-        trackInstantaneousMetric(STATS_METRIC_NET_OUTPUT, stat_net_output_bytes + stat_net_repl_output_bytes,
+        trackInstantaneousMetric(STATS_METRIC_NET_OUTPUT, server.stat_net_output_bytes + server.stat_net_repl_output_bytes,
                                  current_time, factor);
-        trackInstantaneousMetric(STATS_METRIC_NET_INPUT_REPLICATION, stat_net_repl_input_bytes, current_time,
+        trackInstantaneousMetric(STATS_METRIC_NET_INPUT_REPLICATION, server.stat_net_repl_input_bytes, current_time,
                                  factor);
-        trackInstantaneousMetric(STATS_METRIC_NET_OUTPUT_REPLICATION, stat_net_repl_output_bytes,
+        trackInstantaneousMetric(STATS_METRIC_NET_OUTPUT_REPLICATION, server.stat_net_repl_output_bytes,
                                  current_time, factor);
         trackInstantaneousMetric(STATS_METRIC_EL_CYCLE, server.duration_stats[EL_DURATION_TYPE_EL].cnt,
                                  current_time, factor);
@@ -1514,7 +1508,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
     /* Stop the I/O threads if we don't have enough pending work. */
-    stopThreadedIOIfNeeded();
+    // stopThreadedIOIfNeeded();
 
     /* Resize tracking keys table if needed. This is also done at every
      * command execution, but we want to be sure that if the last command
@@ -1667,24 +1661,31 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * events to handle. */
     if (ProcessingEventsWhileBlocked) {
         uint64_t processed = 0;
-        processed += handleClientsWithPendingReadsUsingThreads();
+        processed += processIOThreadsReadDone();
         processed += connTypeProcessPendingData();
         if (server.aof_state == AOF_ON || server.aof_state == AOF_WAIT_REWRITE)
             flushAppendOnlyFile(0);
         processed += handleClientsWithPendingWrites();
+        int last_procssed = 0;
+        do {
+            /* Try to process all the pending IO events. */
+            last_procssed = processIOThreadsReadDone() + processIOThreadsWriteDone();
+            processed += last_procssed;
+        } while (last_procssed != 0);
         processed += freeClientsInAsyncFreeQueue();
         server.events_processed_while_blocked += processed;
         return;
     }
 
     /* We should handle pending reads clients ASAP after event loop. */
-    handleClientsWithPendingReadsUsingThreads();
+    processIOThreadsReadDone();
 
     /* Handle pending data(typical TLS). (must be done before flushAppendOnlyFile) */
     connTypeProcessPendingData();
 
     /* If any connection type(typical TLS) still has pending unread data don't sleep at all. */
-    int dont_sleep = connTypeHasPendingData();
+    int dont_sleep = connTypeHasPendingData() || listLength(server.clients_pending_io_read) > 0 ||
+                     listLength(server.clients_pending_io_write) > 0;;
 
     /* Call the Redis Cluster before sleep function. Note that this function
      * may change the state of Redis Cluster (from ok to fail or vice versa),
@@ -1773,7 +1774,14 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     }
 
     /* Handle writes with pending output buffers. */
-    handleClientsWithPendingWritesUsingThreads();
+    handleClientsWithPendingWrites();
+
+    /* Try to process more IO reads that are ready to be processed. */
+    if (server.aof_fsync != AOF_FSYNC_ALWAYS) {
+        processIOThreadsReadDone();
+    }
+
+    processIOThreadsWriteDone();
 
     /* Record cron time in beforeSleep. This does not include the time consumed by AOF writing and IO writing above. */
     monotime cron_start_time_after_write = getMonotonicUs();
@@ -2569,10 +2577,10 @@ void resetServerStats(void) {
     server.stat_sync_partial_ok = 0;
     server.stat_sync_partial_err = 0;
     server.stat_io_reads_processed = 0;
-    atomicSet(server.stat_total_reads_processed, 0);
+    server.stat_total_reads_processed = 0;
     server.stat_io_writes_processed = 0;
-    atomicSet(server.stat_total_writes_processed, 0);
-    atomicSet(server.stat_client_qbuf_limit_disconnections, 0);
+    server.stat_total_writes_processed = 0;
+    server.stat_client_qbuf_limit_disconnections = 0;
     server.stat_client_outbuf_limit_disconnections = 0;
     for (j = 0; j < STATS_METRIC_COUNT; j++) {
         server.inst_metric[j].idx = 0;
@@ -2584,10 +2592,10 @@ void resetServerStats(void) {
     server.stat_aof_rewrites = 0;
     server.stat_rdb_saves = 0;
     server.stat_aofrw_consecutive_failures = 0;
-    atomicSet(server.stat_net_input_bytes, 0);
-    atomicSet(server.stat_net_output_bytes, 0);
-    atomicSet(server.stat_net_repl_input_bytes, 0);
-    atomicSet(server.stat_net_repl_output_bytes, 0);
+    server.stat_net_input_bytes = 0;
+    server.stat_net_output_bytes = 0;
+    server.stat_net_repl_input_bytes = 0;
+    server.stat_net_repl_output_bytes = 0;
     server.stat_unexpected_error_replies = 0;
     server.stat_total_error_replies = 0;
     server.stat_dump_payload_sanitizations = 0;
@@ -2638,7 +2646,8 @@ void initServer(void) {
     server.slaves = listCreate();
     server.monitors = listCreate();
     server.clients_pending_write = listCreate();
-    server.clients_pending_read = listCreate();
+    server.clients_pending_io_write = listCreate();
+    server.clients_pending_io_read = listCreate();
     server.clients_timeout_table = raxNew();
     server.replication_allowed = 1;
     server.slaveseldb = -1; /* Force to emit the first SELECT command. */
@@ -2898,7 +2907,7 @@ void initListeners(void) {
  * see: https://sourceware.org/bugzilla/show_bug.cgi?id=19329 */
 void InitServerLast(void) {
     bioInit();
-    initThreadedIO();
+    initIOThreads();
     set_jemalloc_bg_thread(server.jemalloc_bg_thread);
     server.initial_memory_usage = zmalloc_used_memory();
 }

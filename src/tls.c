@@ -594,6 +594,31 @@ static void registerSSLEvent(tls_connection *conn, WantIOType want) {
     }
 }
 
+static void postPoneUpdateSSLState(connection *conn_, int postpone) {
+    tls_connection *conn = (tls_connection *)conn_;
+    if (postpone) {
+        conn->flags |= TLS_CONN_FLAG_POSTPONE_UPDATE_STATE;
+    } else {
+        conn->flags &= ~TLS_CONN_FLAG_POSTPONE_UPDATE_STATE;
+    }
+}
+
+static void updatePendingData(tls_connection *conn) {
+    if (conn->flags & TLS_CONN_FLAG_POSTPONE_UPDATE_STATE) return;
+
+    /* If SSL has pending data, already read from the socket, we're at risk of not calling the read handler again, make
+     * sure to add it to a list of pending connection that should be handled anyway. */
+    if (SSL_pending(conn->ssl) > 0) {
+        if (!conn->pending_list_node) {
+            listAddNodeTail(pending_list, conn);
+            conn->pending_list_node = listLast(pending_list);
+        }
+    } else if (conn->pending_list_node) {
+        listDelNode(pending_list, conn->pending_list_node);
+        conn->pending_list_node = NULL;
+    }
+}
+
 static void updateSSLEvent(tls_connection *conn) {
     int mask = aeGetFileEvents(server.el, conn->c.fd);
     int need_read = conn->c.read_handler || (conn->flags & TLS_CONN_FLAG_WRITE_WANT_READ);
@@ -1128,6 +1153,8 @@ static ConnectionType CT_TLS = {
     /* pending data */
     .has_pending_data = tlsHasPendingData,
     .process_pending_data = tlsProcessPendingData,
+    .postpone_update_state = postPoneUpdateSSLState,
+    .update_state = updateSSLState,
 
     /* TLS specified methods */
     .get_peer_cert = connTLSGetPeerCert,
