@@ -721,7 +721,7 @@ void trimReplyUnusedTailSpace(client *c) {
      * Also, to avoid large memmove which happens as part of realloc, we only do
      * that if the used part is small.  */
     if (tail->size - tail->used > tail->size / 4 &&
-        tail->used < PROTO_REPLY_CHUNK_BYTES)
+        tail->used < PROTO_REPLY_CHUNK_BYTES && c->io_write_state != CLIENT_PENDING_IO)
     {
         size_t usable_size;
         size_t old_size = tail->size;
@@ -783,7 +783,7 @@ void setDeferredReply(client *c, void *node, const char *s, size_t length) {
      * - It has enough room already allocated
      * - And not too large (avoid large memmove) */
     if (ln->prev != NULL && (prev = listNodeValue(ln->prev)) &&
-        prev->size - prev->used > 0)
+        prev->size - prev->used > 0 && c->io_write_state != CLIENT_PENDING_IO)
     {
         size_t len_to_copy = prev->size - prev->used;
         if (len_to_copy > length)
@@ -800,7 +800,7 @@ void setDeferredReply(client *c, void *node, const char *s, size_t length) {
 
     if (ln->next != NULL && (next = listNodeValue(ln->next)) &&
         next->size - next->used >= length &&
-        next->used < PROTO_REPLY_CHUNK_BYTES * 4)
+        next->used < PROTO_REPLY_CHUNK_BYTES * 4 && c->io_write_state != CLIENT_PENDING_IO)
     {
         memmove(next->buf + length, next->buf, next->used);
         memcpy(next->buf, s, length);
@@ -3115,12 +3115,6 @@ void readToQueryBuf(client *c) {
             c->read_flags |= READ_FLAGS_QB_LIMIT_REACHED;
         }
     }
-
-// done:
-//     if (c && (c->flags & CLIENT_REUSABLE_QUERYBUFFER)) {
-//         serverAssert(c->qb_pos == 0); /* Ensure the client's query buffer is trimmed in processInputBuffer */
-//         resetReusableQueryBuf(c);
-//     }
 }
 
 void readQueryFromClient(connection *conn) {
@@ -4873,10 +4867,6 @@ void ioThreadReadQueryFromClient(void *data) {
     parseCommand(c);
 
 done:
-    if (c && (c->flags & CLIENT_REUSABLE_QUERYBUFFER)) {
-        // serverAssert(c->qb_pos == 0); /* Ensure the client's query buffer is trimmed in processInputBuffer */
-        resetReusableQueryBuf(c);
-    }
     atomic_thread_fence(memory_order_release);
     c->io_read_state = CLIENT_COMPLETED_IO;
 }
