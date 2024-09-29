@@ -772,6 +772,7 @@ int masterTryPartialResynchronization(client *c, long long psync_offset) {
      * 1) Set client state to make it a slave.
      * 2) Inform the client we can continue with +CONTINUE
      * 3) Send the backlog data (from the offset to the end) to the slave. */
+    waitForClientIO(c);
     c->flags |= CLIENT_SLAVE;
     c->replstate = SLAVE_STATE_ONLINE;
     c->repl_ack_time = server.unixtime;
@@ -1024,6 +1025,7 @@ void syncCommand(client *c) {
     if (server.repl_disable_tcp_nodelay)
         connDisableTcpNoDelay(c->conn); /* Non critical if it fails. */
     c->repldbfd = -1;
+    waitForClientIO(c);
     c->flags |= CLIENT_SLAVE;
     listAddNodeTail(server.slaves,c);
 

@@ -793,6 +793,7 @@ int clientsCronResizeQueryBuffer(client *c) {
  * The buffer peak will be reset back to the buffer position every server.reply_buffer_peak_reset_time milliseconds
  * The function always returns 0 as it never terminates the client. */
 int clientsCronResizeOutputBuffer(client *c, mstime_t now_ms) {
+    if (c->io_write_state != CLIENT_IDLE) return 0;
 
     size_t new_buffer_size = 0;
     char *oldbuf = NULL;
