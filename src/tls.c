@@ -621,6 +621,8 @@ static void updatePendingData(tls_connection *conn) {
 }
 
 static void updateSSLEvent(tls_connection *conn) {
+    if (conn->flags & TLS_CONN_FLAG_POSTPONE_UPDATE_STATE) return;
+
     int mask = aeGetFileEvents(server.el, conn->c.fd);
     int need_read = conn->c.read_handler || (conn->flags & TLS_CONN_FLAG_WRITE_WANT_READ);
     int need_write = conn->c.write_handler || (conn->flags & TLS_CONN_FLAG_READ_WANT_WRITE);
@@ -749,15 +751,7 @@ static void tlsHandleEvent(tls_connection *conn, int mask) {
              * risk of not calling the read handler again, make sure to add it
              * to a list of pending connection that should be handled anyway. */
             if ((mask & AE_READABLE)) {
-                if (SSL_pending(conn->ssl) > 0) {
-                    if (!conn->pending_list_node) {
-                        listAddNodeTail(pending_list, conn);
-                        conn->pending_list_node = listLast(pending_list);
-                    }
-                } else if (conn->pending_list_node) {
-                    listDelNode(pending_list, conn->pending_list_node);
-                    conn->pending_list_node = NULL;
-                }
+                updatePendingData(conn);
             }
 
             break;
@@ -1086,11 +1080,13 @@ static int tlsProcessPendingData(void) {
     listIter li;
     listNode *ln;
 
-    int processed = listLength(pending_list);
+    int processed = 0;
     listRewind(pending_list,&li);
     while((ln = listNext(&li))) {
         tls_connection *conn = listNodeValue(ln);
+        if (conn->flags & TLS_CONN_FLAG_POSTPONE_UPDATE_STATE) continue;
         tlsHandleEvent(conn, AE_READABLE);
+        processed++;
     }
     return processed;
 }
