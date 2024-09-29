@@ -156,23 +156,23 @@ static void *IOThreadMain(void *myid) {
     IOJobQueue *jq = &io_jobs[id];
     while (1) {
         /* Wait for jobs */
-        // for (int j = 0; j < 1000000; j++) {
-        //     jobs_to_process = IOJobQueue_availableJobs(jq);
-        //     if (jobs_to_process) break;
-        // }
-
-        // /* Give the main thread a chance to stop this thread. */
-        // if (jobs_to_process == 0) {
-        //     pthread_mutex_lock(&io_threads_mutex[id]);
-        //     pthread_mutex_unlock(&io_threads_mutex[id]);
-        //     continue;
-        // }
-
-        pthread_mutex_lock(&jq->cond_mutex);
-        while (!(jobs_to_process = IOJobQueue_availableJobs(jq))) {
-            pthread_cond_wait(&jq->cond, &jq->cond_mutex);
+        for (int j = 0; j < 1000000; j++) {
+            jobs_to_process = IOJobQueue_availableJobs(jq);
+            if (jobs_to_process) break;
         }
-        pthread_mutex_unlock(&jq->cond_mutex);
+
+        /* Give the main thread a chance to stop this thread. */
+        if (jobs_to_process == 0) {
+            pthread_mutex_lock(&io_threads_mutex[id]);
+            pthread_mutex_unlock(&io_threads_mutex[id]);
+            continue;
+        }
+
+        // pthread_mutex_lock(&jq->cond_mutex);
+        // while (!(jobs_to_process = IOJobQueue_availableJobs(jq))) {
+        //     pthread_cond_wait(&jq->cond, &jq->cond_mutex);
+        // }
+        // pthread_mutex_unlock(&jq->cond_mutex);
 
         for (size_t j = 0; j < jobs_to_process; j++) {
             // printf("IOThreadMain job: %d\n", j);
