@@ -109,7 +109,7 @@ ifeq ($(SANITIZER),address)
 else
 ifeq ($(SANITIZER),undefined)
 	MALLOC=libc
-	CFLAGS+=-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+	CFLAGS+=-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -fno-sanitize=function
 	LDFLAGS+=-fsanitize=undefined
 else
 ifeq ($(SANITIZER),thread)
