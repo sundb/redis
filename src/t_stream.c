@@ -1461,13 +1461,12 @@ long long streamEstimateDistance(stream *s, streamCG *cg, streamID *next_id) {
     /* If the values of next_id and last_id are the same,
      * it is considered that only the current value needs to be returned,
      * otherwise it is considered to be the calculated value.
-     * This is used to align with the streamEstimateDistanceFromFirstEverEntry method.
-     */
-    long long step = streamCompareID(&cg->last_id, next_id) == 0 ? 0 : 1;
+     * This is used to align with the streamEstimateDistanceFromFirstEverEntry method. */
     if (cg->entries_read != SCG_INVALID_ENTRIES_READ && !streamRangeHasTombstones(s, &cg->last_id, NULL)) {
         /* A valid counter and no future tombstones mean we can
          * increment the read counter to keep tracking the group's
          * progress. */
+        long long step = streamCompareID(&cg->last_id, next_id) == 0 ? 0 : 1;
         return cg->entries_read + step;
     }
     return streamEstimateDistanceFromFirstEverEntry(s, next_id);
@@ -1693,7 +1692,15 @@ size_t streamReplyWithRange(client *c, stream *s, streamID *start, streamID *end
     while(streamIteratorGetID(&si,&id,&numfields)) {
         /* Update the group last_id if needed. */
         if (group && streamCompareID(&id,&group->last_id) > 0) {
-            group->entries_read = streamEstimateDistance(s, group, &id);
+            if (group->entries_read != SCG_INVALID_ENTRIES_READ && !streamRangeHasTombstones(s,&group->last_id,NULL)) {
+                /* A valid counter and no tombstones between the group's last-delivered-id
+                 * and the stream's last-generated-id mean we can increment the read counter
+                 * to keep tracking the group's progress. */
+                group->entries_read++;
+            } else if (s->entries_added) {
+                /* The group's counter may be invalid, so we try to obtain it. */
+                group->entries_read = streamEstimateDistanceFromFirstEverEntry(s,&id);
+            }
             group->last_id = id;
             /* In the past, we would only set it when NOACK was specified. And in
              * #9127, XCLAIM did not propagate entries_read in ACK, which would
@@ -2191,9 +2198,9 @@ void xreadCommand(client *c) {
             streams_arg = i+1;
             streams_count = (c->argc-streams_arg);
             if ((streams_count % 2) != 0) {
-                char symbol = xreadgroup ? '>' : '$';
+                const char *symbol = xreadgroup ? "ID or '>'" : "ID, '+', or '$'";
                 addReplyErrorFormat(c,"Unbalanced '%s' list of streams: "
-                                      "for each stream key an ID or '%c' must be "
+                                      "for each stream key an %s must be "
                                       "specified.", c->cmd->fullname,symbol);
                 return;
             }
