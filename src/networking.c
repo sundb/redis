@@ -4318,7 +4318,7 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) threads_pending {
     redisAtomic unsigned long value;
 } threads_pending;
 
-pthread_t io_threads[IO_THREADS_MAX_NUM];
+// pthread_t io_threads[IO_THREADS_MAX_NUM];
 pthread_mutex_t io_threads_mutex[IO_THREADS_MAX_NUM];
 threads_pending io_threads_pending[IO_THREADS_MAX_NUM];
 int io_threads_op;      /* IO_THREADS_OP_IDLE, IO_THREADS_OP_READ or IO_THREADS_OP_WRITE. */ // TODO: should access to this be atomic??!
@@ -4338,50 +4338,26 @@ static inline void setIOPendingCount(int i, unsigned long count) {
     atomicSetWithSync(io_threads_pending[i].value, count);
 }
 
-void *IOThreadMain(void *myid) {
+typedef struct iothread {
+    long id;
+    aeEventLoop *ae;
+    pthread_t tid;
+} iothread;
+
+iothread **io_threads;
+
+void *IOThreadMain(void *ptr) {
     /* The ID is the thread number (from 0 to server.io_threads_num-1), and is
      * used by the thread to just manipulate a single sub-array of clients. */
-    long id = (unsigned long)myid;
+    iothread *iot = ptr;
     char thdname[16];
 
-    snprintf(thdname, sizeof(thdname), "io_thd_%ld", id);
+    snprintf(thdname, sizeof(thdname), "io_thd_%ld", iot->id);
     redis_set_thread_title(thdname);
     redisSetCpuAffinity(server.server_cpulist);
     makeThreadKillable();
-
-    while(1) {
-        /* Wait for start */
-        for (int j = 0; j < 1000000; j++) {
-            if (getIOPendingCount(id) != 0) break;
-        }
-
-        /* Give the main thread a chance to stop this thread. */
-        if (getIOPendingCount(id) == 0) {
-            pthread_mutex_lock(&io_threads_mutex[id]);
-            pthread_mutex_unlock(&io_threads_mutex[id]);
-            continue;
-        }
-
-        serverAssert(getIOPendingCount(id) != 0);
-
-        /* Process: note that the main thread will never touch our list
-         * before we drop the pending count to 0. */
-        listIter li;
-        listNode *ln;
-        listRewind(io_threads_list[id],&li);
-        while((ln = listNext(&li))) {
-            client *c = listNodeValue(ln);
-            if (io_threads_op == IO_THREADS_OP_WRITE) {
-                writeToClient(c,0);
-            } else if (io_threads_op == IO_THREADS_OP_READ) {
-                readQueryFromClient(c->conn);
-            } else {
-                serverPanic("io_threads_op value is unknown");
-            }
-        }
-        listEmpty(io_threads_list[id]);
-        setIOPendingCount(id, 0);
-    }
+    aeMain(iot->ae);
+    return NULL;
 }
 
 /* Initialize the data structures needed for threaded I/O. */
@@ -4402,36 +4378,36 @@ void initThreadedIO(void) {
     }
 
     /* Spawn and initialize the I/O threads. */
-    for (int i = 0; i < server.io_threads_num; i++) {
-        /* Things we do for all the threads including the main thread. */
-        io_threads_list[i] = listCreate();
-        if (i == 0) continue; /* Thread 0 is the main thread. */
+    io_threads = zmalloc(sizeof(*io_threads) * (server.io_threads_num - 1));
+    for (int i = 1; i < server.io_threads_num; i++) {
+        iothread *iot = zmalloc(sizeof(*iot));
+        iot->id = i;
+        iot->ae = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
 
         /* Things we do only for the additional threads. */
         pthread_t tid;
-        pthread_mutex_init(&io_threads_mutex[i],NULL);
-        setIOPendingCount(i, 0);
-        pthread_mutex_lock(&io_threads_mutex[i]); /* Thread will be stopped. */
-        if (pthread_create(&tid,NULL,IOThreadMain,(void*)(long)i) != 0) {
+        if (pthread_create(&tid,NULL,IOThreadMain,(void*)iot) != 0) {
             serverLog(LL_WARNING,"Fatal: Can't initialize IO thread.");
             exit(1);
         }
-        io_threads[i] = tid;
+        iot->tid = tid;
+        io_threads[i] = iot;
     }
+    server.io_threads_num = 1;
 }
 
 void killIOThreads(void) {
     int err, j;
     for (j = 0; j < server.io_threads_num; j++) {
-        if (io_threads[j] == pthread_self()) continue;
-        if (io_threads[j] && pthread_cancel(io_threads[j]) == 0) {
-            if ((err = pthread_join(io_threads[j],NULL)) != 0) {
+        if (io_threads[j]->tid == pthread_self()) continue;
+        if (io_threads[j]->tid && pthread_cancel(io_threads[j]->tid) == 0) {
+            if ((err = pthread_join(io_threads[j]->tid,NULL)) != 0) {
                 serverLog(LL_WARNING,
                     "IO thread(tid:%lu) can not be joined: %s",
-                        (unsigned long)io_threads[j], strerror(err));
+                        (unsigned long)io_threads[j]->tid, strerror(err));
             } else {
                 serverLog(LL_WARNING,
-                    "IO thread(tid:%lu) terminated",(unsigned long)io_threads[j]);
+                    "IO thread(tid:%lu) terminated",(unsigned long)io_threads[j]->tid);
             }
         }
     }
@@ -4609,6 +4585,7 @@ int postponeClientRead(client *c) {
  * it can safely perform post-processing and return to normal synchronous
  * work. */
 int handleClientsWithPendingReadsUsingThreads(void) {
+    return 0;
     if (!server.io_threads_active || !server.io_threads_do_reads) return 0;
     int processed = listLength(server.clients_pending_read);
     if (processed == 0) return 0;
