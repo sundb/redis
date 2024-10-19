@@ -1667,7 +1667,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * events to handle. */
     if (ProcessingEventsWhileBlocked) {
         uint64_t processed = 0;
-        processed += handleClientsWithPendingReadsUsingThreads();
+        // processed += handleClientsWithPendingReadsUsingThreads();
         processed += connTypeProcessPendingData();
         if (server.aof_state == AOF_ON || server.aof_state == AOF_WAIT_REWRITE)
             flushAppendOnlyFile(0);
@@ -1678,7 +1678,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     }
 
     /* We should handle pending reads clients ASAP after event loop. */
-    handleClientsWithPendingReadsUsingThreads();
+    // handleClientsWithPendingReadsUsingThreads();
 
     /* Handle pending data(typical TLS). (must be done before flushAppendOnlyFile) */
     connTypeProcessPendingData();
@@ -2534,12 +2534,46 @@ int listenToPort(connListener *sfd) {
     return C_OK;
 }
 
+void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
+    UNUSED(el);
+    UNUSED(ptr);
+    UNUSED(mask);
+    listNode *ln;
+    char x;
+
+    if (read(fd, &x, 1) < 0) {
+        serverLog(LL_WARNING, "Failed reading from io threading cmd pipe: %s", strerror(errno));
+        exit(1);
+    }
+
+    pthread_mutex_lock(&server.jobs_mutex);
+    ln = listFirst(server.jobs);
+    client *c = ln->value;
+    processCommandAndResetClient(c);
+    printf("handleExecute\n");
+    // connSetReadHandler(c->conn, readQueryFromClient);
+    // iojob *job = ln->value;
+    // job->handler(job->data);
+    // zfree(job);
+    listDelNode(server.jobs, ln);
+    pthread_mutex_unlock(&server.jobs_mutex);
+}
+
 /* Resets the stats that we expose via INFO or other means that we want
  * to reset via CONFIG RESETSTAT. The function is also used in order to
  * initialize these fields in initServer() at server startup. */
 void resetServerStats(void) {
     int j;
 
+    server.jobs = listCreate();
+    if (anetPipe(server.pipeexec, O_NONBLOCK, 0) == -1) {
+        serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
+    }
+    if (aeCreateFileEvent(server.el, server.pipeexec[0], AE_READABLE, handleExecute, NULL) != AE_OK) {
+        serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
+        exit(1);
+    }
+    
     server.stat_numcommands = 0;
     server.stat_numconnections = 0;
     server.stat_expiredkeys = 0;

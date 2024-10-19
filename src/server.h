@@ -1618,6 +1618,10 @@ struct redisServer {
     client *current_client;     /* The client that triggered the command execution (External or AOF). */
     client *executing_client;   /* The client executing the current command (possibly script or module). */
 
+    list *jobs;
+    pthread_mutex_t jobs_mutex;
+    int pipeexec[2];
+
 #ifdef LOG_REQ_RES
     char *req_res_logfile; /* Path of log file for logging all requests and their replies. If NULL, no logging will be performed */
     unsigned int client_default_resp;

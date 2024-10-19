@@ -139,8 +139,8 @@ static int connUnixSetWriteHandler(connection *conn, ConnectionCallbackFunc func
     return connectionTypeTcp()->set_write_handler(conn, func, barrier);
 }
 
-static int connUnixSetReadHandler(connection *conn, ConnectionCallbackFunc func) {
-    return connectionTypeTcp()->set_read_handler(conn, func);
+static int connUnixSetReadHandler(struct aeEventLoop *el, connection *conn, ConnectionCallbackFunc func) {
+    return connectionTypeTcp()->set_read_handler(el, conn, func);
 }
 
 static const char *connUnixGetLastError(connection *conn) {

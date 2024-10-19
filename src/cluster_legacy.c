@@ -1236,7 +1236,7 @@ static void clusterConnAcceptHandler(connection *conn) {
     connSetPrivateData(conn, link);
 
     /* Register read handler */
-    connSetReadHandler(conn, clusterReadHandler);
+    connSetReadHandler(server.el, conn, clusterReadHandler);
 }
 
 #define MAX_CLUSTER_ACCEPTS_PER_CALL 1000
@@ -3329,7 +3329,7 @@ void clusterLinkConnectHandler(connection *conn) {
     }
 
     /* Register a read handler from now on */
-    connSetReadHandler(conn, clusterReadHandler);
+    connSetReadHandler(server.el, conn, clusterReadHandler);
 
     /* Queue a PING in the new connection ASAP: this is crucial
      * to avoid false positives in failure detection.

@@ -22,6 +22,19 @@
 #include <math.h>
 #include <ctype.h>
 
+typedef struct iothread {
+    long id;
+    aeEventLoop *ae;
+    pthread_t tid;
+
+    list *jobs;
+    pthread_mutex_t mutex;
+
+    int pipefd[2];
+} iothread;
+
+iothread **io_threads;
+
 static void setProtocolError(const char *errstr, client *c);
 static void pauseClientsByClient(mstime_t end, int isPauseClientAll);
 int postponeClientRead(client *c);
@@ -124,7 +137,7 @@ client *createClient(connection *conn) {
         connEnableTcpNoDelay(conn);
         if (server.tcpkeepalive)
             connKeepAlive(conn,server.tcpkeepalive);
-        connSetReadHandler(conn, readQueryFromClient);
+        // connSetReadHandler(conn, readQueryFromClient);
         connSetPrivateData(conn, c);
     }
     c->buf = zmalloc_usable(PROTO_REPLY_CHUNK_BYTES, &c->buf_usable_size);
@@ -1428,6 +1441,15 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
         freeClient(connGetPrivateData(conn));
         return;
     }
+
+    iothread *iot = io_threads[c->id % (server.io_threads_num - 1)];
+    // printf("add client to iothread %d, %p\n", c->id % (server.io_threads_num - 1), iot);
+    pthread_mutex_lock(&iot->mutex);
+    listAddNodeTail(iot->jobs, c);
+   if (write(iot->pipefd[1],"A",1) != 1) {
+        /* Ignore the error, this is best-effort. */
+    } 
+    pthread_mutex_unlock(&iot->mutex);
 }
 
 void freeClientOriginalArgv(client *c) {
@@ -2211,8 +2233,8 @@ void resetClient(client *c) {
 void protectClient(client *c) {
     c->flags |= CLIENT_PROTECTED;
     if (c->conn) {
-        connSetReadHandler(c->conn,NULL);
-        connSetWriteHandler(c->conn,NULL);
+        // connSetReadHandler(c->conn,NULL);
+        // connSetWriteHandler(c->conn,NULL);
     }
 }
 
@@ -2221,7 +2243,7 @@ void unprotectClient(client *c) {
     if (c->flags & CLIENT_PROTECTED) {
         c->flags &= ~CLIENT_PROTECTED;
         if (c->conn) {
-            connSetReadHandler(c->conn,readQueryFromClient);
+            // connSetReadHandler(c->conn,readQueryFromClient);
             if (clientHasPendingReplies(c)) putClientInPendingWriteQueue(c);
         }
     }
@@ -2673,12 +2695,12 @@ int processInputBuffer(client *c) {
             }
 
             /* We are finally ready to execute the command. */
-            if (processCommandAndResetClient(c) == C_ERR) {
-                /* If the client is no longer valid, we avoid exiting this
-                 * loop and trimming the client buffer later. So we return
-                 * ASAP in that case. */
-                return C_ERR;
-            }
+            // if (processCommandAndResetClient(c) == C_ERR) {
+            //     /* If the client is no longer valid, we avoid exiting this
+            //      * loop and trimming the client buffer later. So we return
+            //      * ASAP in that case. */
+            //     return C_ERR;
+            // }
         }
     }
 
@@ -2722,7 +2744,7 @@ void readQueryFromClient(connection *conn) {
 
     /* Check if we want to read from the client later when exiting from
      * the event loop. This is the case if threaded I/O is enabled. */
-    if (postponeClientRead(c)) return;
+    // if (postponeClientRead(c)) return;
 
     /* Update total number of reads on server */
     atomicIncr(server.stat_total_reads_processed, 1);
@@ -2844,6 +2866,12 @@ void readQueryFromClient(connection *conn) {
 
     /* There is more data in the client input buffer, continue parsing it
      * and check if there is a full command to execute. */
+    pthread_mutex_lock(&server.jobs_mutex);
+    listAddNodeTail(server.jobs, c);
+    if (write(server.pipeexec[1],"A",1) != 1) {
+        /* Ignore the error, this is best-effort. */
+    } 
+    pthread_mutex_unlock(&server.jobs_mutex);
     if (processInputBuffer(c) == C_ERR)
          c = NULL;
 
@@ -2854,6 +2882,8 @@ done:
     }
     beforeNextClient(c);
 }
+
+
 
 /* A Redis "Address String" is a colon separated ip:port pair.
  * For IPv4 it's in the form x.y.z.k:port, example: "127.0.0.1:1234".
@@ -4338,14 +4368,6 @@ static inline void setIOPendingCount(int i, unsigned long count) {
     atomicSetWithSync(io_threads_pending[i].value, count);
 }
 
-typedef struct iothread {
-    long id;
-    aeEventLoop *ae;
-    pthread_t tid;
-} iothread;
-
-iothread **io_threads;
-
 void *IOThreadMain(void *ptr) {
     /* The ID is the thread number (from 0 to server.io_threads_num-1), and is
      * used by the thread to just manipulate a single sub-array of clients. */
@@ -4358,6 +4380,38 @@ void *IOThreadMain(void *ptr) {
     makeThreadKillable();
     aeMain(iot->ae);
     return NULL;
+}
+
+/* IO jobs queue functions - Used to send jobs from the main-thread to the IO thread. */
+typedef void (*job_handler)(void *);
+typedef struct iojob {
+    job_handler handler;
+    void *data;
+} iojob;
+
+static void handleJobs(struct aeEventLoop *ae, int fd, void *ptr, int mask) {
+    UNUSED(ae);
+    UNUSED(fd);
+    UNUSED(ptr);
+    UNUSED(mask);
+    iothread *iot = ptr;
+    listNode *ln;
+    char x;
+
+    if (read(fd, &x, 1) < 0) {
+        serverLog(LL_WARNING, "Failed reading from io threading cmd pipe: %s", strerror(errno));
+        exit(1);
+    }
+
+    pthread_mutex_lock(&iot->mutex);
+    ln = listFirst(iot->jobs);
+    client *c = ln->value;
+    connSetReadHandler(ae, c->conn, readQueryFromClient);
+    // iojob *job = ln->value;
+    // job->handler(job->data);
+    // zfree(job);
+    listDelNode(iot->jobs, ln);
+    pthread_mutex_unlock(&iot->mutex);
 }
 
 /* Initialize the data structures needed for threaded I/O. */
@@ -4379,21 +4433,29 @@ void initThreadedIO(void) {
 
     /* Spawn and initialize the I/O threads. */
     io_threads = zmalloc(sizeof(*io_threads) * (server.io_threads_num - 1));
-    for (int i = 1; i < server.io_threads_num; i++) {
+    for (int i = 0; i < server.io_threads_num - 1; i++) {
         iothread *iot = zmalloc(sizeof(*iot));
         iot->id = i;
         iot->ae = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
+        iot->jobs = listCreate();
+        pthread_mutex_init(&iot->mutex, NULL);
+        if (anetPipe(iot->pipefd, O_NONBLOCK, 0) == -1) {
+            serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
+        }
+        if (aeCreateFileEvent(iot->ae, iot->pipefd[0], AE_READABLE, handleJobs, iot) != AE_OK) {
+            serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
+            exit(1);
+        }
 
         /* Things we do only for the additional threads. */
-        pthread_t tid;
-        if (pthread_create(&tid,NULL,IOThreadMain,(void*)iot) != 0) {
+        if (pthread_create(&iot->tid,NULL,IOThreadMain,(void*)iot) != 0) {
             serverLog(LL_WARNING,"Fatal: Can't initialize IO thread.");
             exit(1);
         }
-        iot->tid = tid;
+        printf("%p\n", iot);
         io_threads[i] = iot;
     }
-    server.io_threads_num = 1;
+    // server.io_threads_num = 1;
 }
 
 void killIOThreads(void) {
@@ -4423,7 +4485,7 @@ void startThreadedIO(void) {
 void stopThreadedIO(void) {
     /* We may have still clients with pending reads when this function
      * is called: handle them before stopping the threads. */
-    handleClientsWithPendingReadsUsingThreads();
+    // handleClientsWithPendingReadsUsingThreads();
     serverAssert(server.io_threads_active == 1);
     for (int j = 1; j < server.io_threads_num; j++)
         pthread_mutex_lock(&io_threads_mutex[j]);
