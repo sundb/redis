@@ -167,35 +167,6 @@ void listDelNode(list *list, listNode *node)
     zfree(node);
 }
 
-/* Move the whole source list into the head or tail of the target list.
- * The source list is emptied.
- * No memory is allocated or released.
- *
- * This function can't fail. */
-list *listFuse(list *target, list *source, int tail) {
-    if (!source->head)
-        return target;
-    if (target->head) {
-        if (tail) {
-            target->tail->next = source->head;
-            source->head->prev = target->tail;
-            target->tail = source->tail;
-        } else {
-            target->head->prev = source->tail;
-            source->tail->next = target->head;
-            target->head = source->head;
-        }
-        target->len += source->len;
-    } else {
-        target->head = source->head;
-        target->tail = source->tail;
-        target->len = source->len;
-    }
-    source->head = source->tail = NULL;
-    source->len = 0;
-    return target;
-}
-
 /*
  * Remove the specified node from the list without freeing it.
  */

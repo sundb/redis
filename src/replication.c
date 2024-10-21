@@ -1433,7 +1433,7 @@ void sendBulkToSlave(connection *conn) {
     atomicIncr(server.stat_net_repl_output_bytes, nwritten);
     if (slave->repldboff == slave->repldbsize) {
         closeRepldbfd(slave);
-        connSetWriteHandler(slave->conn,NULL);
+        connSetWriteHandler(server.el, slave->conn,NULL);
         if (!replicaPutOnline(slave)) {
             freeClient(slave);
             return;
@@ -1447,7 +1447,7 @@ void sendBulkToSlave(connection *conn) {
 void rdbPipeWriteHandlerConnRemoved(struct connection *conn) {
     if (!connHasWriteHandler(conn))
         return;
-    connSetWriteHandler(conn, NULL);
+    connSetWriteHandler(server.el, conn, NULL);
     client *slave = connGetPrivateData(conn);
     slave->repl_last_partial_write = 0;
     server.rdb_pipe_numconns_writing--;
@@ -1563,7 +1563,7 @@ void rdbPipeReadHandler(struct aeEventLoop *eventLoop, int fd, void *clientData,
             if (nwritten != server.rdb_pipe_bufflen) {
                 slave->repl_last_partial_write = server.unixtime;
                 server.rdb_pipe_numconns_writing++;
-                connSetWriteHandler(conn, rdbPipeWriteHandler);
+                connSetWriteHandler(server.el, conn, rdbPipeWriteHandler);
             }
             stillAlive++;
         }
@@ -1664,8 +1664,8 @@ void updateSlavesWaitingBgsave(int bgsaveerr, int type) {
                 slave->replpreamble = sdscatprintf(sdsempty(),"$%lld\r\n",
                     (unsigned long long) slave->repldbsize);
 
-                connSetWriteHandler(slave->conn,NULL);
-                if (connSetWriteHandler(slave->conn,sendBulkToSlave) == C_ERR) {
+                connSetWriteHandler(server.el, slave->conn,NULL);
+                if (connSetWriteHandler(server.el, slave->conn,sendBulkToSlave) == C_ERR) {
                     freeClientAsync(slave);
                     continue;
                 }
@@ -2637,7 +2637,7 @@ void syncWithMaster(connection *conn) {
         /* Delete the writable event so that the readable event remains
          * registered and we can wait for the PONG reply. */
         connSetReadHandler(server.el, conn, syncWithMaster);
-        connSetWriteHandler(conn, NULL);
+        connSetWriteHandler(server.el, conn, NULL);
         server.repl_state = REPL_STATE_RECEIVE_PING_REPLY;
         /* Send the PING, don't check for errors at all, we have the timeout
          * that will take care about this. */
@@ -3418,7 +3418,7 @@ void replicationResurrectCachedMaster(connection *conn) {
     /* We may also need to install the write handler as well if there is
      * pending data in the write buffers. */
     if (clientHasPendingReplies(server.master)) {
-        if (connSetWriteHandler(server.master->conn, sendReplyToClient)) {
+        if (connSetWriteHandler(server.el, server.master->conn, sendReplyToClient)) {
             serverLog(LL_WARNING,"Error resurrecting the cached master, impossible to add the writable handler: %s", strerror(errno));
             freeClientAsync(server.master); /* Close ASAP. */
         }

@@ -135,8 +135,8 @@ static int connUnixRead(connection *conn, void *buf, size_t buf_len) {
     return connectionTypeTcp()->read(conn, buf, buf_len);
 }
 
-static int connUnixSetWriteHandler(connection *conn, ConnectionCallbackFunc func, int barrier) {
-    return connectionTypeTcp()->set_write_handler(conn, func, barrier);
+static int connUnixSetWriteHandler(struct aeEventLoop *el, connection *conn, ConnectionCallbackFunc func, int barrier) {
+    return connectionTypeTcp()->set_write_handler(el, conn, func, barrier);
 }
 
 static int connUnixSetReadHandler(struct aeEventLoop *el, connection *conn, ConnectionCallbackFunc func) {

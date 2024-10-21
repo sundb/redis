@@ -3309,7 +3309,7 @@ void clusterWriteHandler(connection *conn) {
     }
 
     if (listLength(link->send_msg_queue) == 0)
-        connSetWriteHandler(link->conn, NULL);
+        connSetWriteHandler(server.el, link->conn, NULL);
 }
 
 /* A connect handler that gets called when a connection to another node
@@ -3454,7 +3454,7 @@ void clusterSendMessage(clusterLink *link, clusterMsgSendBlock *msgblock) {
         return;
     }
     if (listLength(link->send_msg_queue) == 0 && msgblock->msg.totlen != 0)
-        connSetWriteHandlerWithBarrier(link->conn, clusterWriteHandler, 1);
+        connSetWriteHandlerWithBarrier(server.el, link->conn, clusterWriteHandler, 1);
 
     listAddNodeTail(link->send_msg_queue, msgblock);
     msgblock->refcount++;
