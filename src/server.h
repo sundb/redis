@@ -425,6 +425,26 @@ typedef enum blocking_type {
                                     buffer configuration. Just the first
                                     three: normal, slave, pubsub. */
 
+typedef struct iothread {
+    long id;
+    aeEventLoop *ae;
+    pthread_t tid;
+
+    list *jobs;
+    pthread_mutex_t mutex;
+
+    int pipefd[2];
+} iothread;
+
+/* IO jobs queue functions - Used to send jobs from the main-thread to the IO thread. */
+typedef void (*job_handler)(iothread *, void *);
+typedef struct iojob {
+    job_handler handler;
+    void *data;
+} iojob;
+
+
+
 /* Slave replication state. Used in server.repl_state for slaves to remember
  * what to do next. */
 typedef enum {
@@ -1618,6 +1638,10 @@ struct redisServer {
     client *current_client;     /* The client that triggered the command execution (External or AOF). */
     client *executing_client;   /* The client executing the current command (possibly script or module). */
 
+    list *jobs;
+    pthread_mutex_t jobs_mutex;
+    int pipeexec[2];
+
 #ifdef LOG_REQ_RES
     char *req_res_logfile; /* Path of log file for logging all requests and their replies. If NULL, no logging will be performed */
     unsigned int client_default_resp;
@@ -2705,6 +2729,8 @@ void reqresSaveClientReplyOffset(client *c);
 size_t reqresAppendRequest(client *c);
 size_t reqresAppendResponse(client *c);
 
+void handleWriteClient(iothread *iot, void *data);
+
 #ifdef __GNUC__
 void addReplyErrorFormatEx(client *c, int flags, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
@@ -3144,6 +3170,7 @@ robj *activeDefragStringOb(robj* ob);
 void dismissSds(sds s);
 void dismissMemory(void* ptr, size_t size_hint);
 void dismissMemoryInChild(void);
+iothread *getIOThreadByClient(client *c);
 
 #define RESTART_SERVER_NONE 0
 #define RESTART_SERVER_GRACEFULLY (1<<0)     /* Do proper shutdown. */

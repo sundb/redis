@@ -1433,7 +1433,7 @@ void sendBulkToSlave(connection *conn) {
     atomicIncr(server.stat_net_repl_output_bytes, nwritten);
     if (slave->repldboff == slave->repldbsize) {
         closeRepldbfd(slave);
-        connSetWriteHandler(slave->conn,NULL);
+        connSetWriteHandler(server.el, slave->conn,NULL);
         if (!replicaPutOnline(slave)) {
             freeClient(slave);
             return;
@@ -1447,7 +1447,7 @@ void sendBulkToSlave(connection *conn) {
 void rdbPipeWriteHandlerConnRemoved(struct connection *conn) {
     if (!connHasWriteHandler(conn))
         return;
-    connSetWriteHandler(conn, NULL);
+    connSetWriteHandler(server.el, conn, NULL);
     client *slave = connGetPrivateData(conn);
     slave->repl_last_partial_write = 0;
     server.rdb_pipe_numconns_writing--;
@@ -1563,7 +1563,7 @@ void rdbPipeReadHandler(struct aeEventLoop *eventLoop, int fd, void *clientData,
             if (nwritten != server.rdb_pipe_bufflen) {
                 slave->repl_last_partial_write = server.unixtime;
                 server.rdb_pipe_numconns_writing++;
-                connSetWriteHandler(conn, rdbPipeWriteHandler);
+                connSetWriteHandler(server.el, conn, rdbPipeWriteHandler);
             }
             stillAlive++;
         }
@@ -1664,8 +1664,8 @@ void updateSlavesWaitingBgsave(int bgsaveerr, int type) {
                 slave->replpreamble = sdscatprintf(sdsempty(),"$%lld\r\n",
                     (unsigned long long) slave->repldbsize);
 
-                connSetWriteHandler(slave->conn,NULL);
-                if (connSetWriteHandler(slave->conn,sendBulkToSlave) == C_ERR) {
+                connSetWriteHandler(server.el, slave->conn,NULL);
+                if (connSetWriteHandler(server.el, slave->conn,sendBulkToSlave) == C_ERR) {
                     freeClientAsync(slave);
                     continue;
                 }
@@ -1764,7 +1764,7 @@ static void rdbLoadEmptyDbFunc(void) {
 void replicationCreateMasterClient(connection *conn, int dbid) {
     server.master = createClient(conn);
     if (conn)
-        connSetReadHandler(server.master->conn, readQueryFromClient);
+        connSetReadHandler(server.el, server.master->conn, readQueryFromClient);
 
     /**
      * Important note:
@@ -2059,7 +2059,7 @@ void readSyncBulkPayload(connection *conn) {
      * handler, otherwise it will get called recursively since
      * rdbLoad() will call the event loop to process events from time to
      * time for non blocking loading. */
-    connSetReadHandler(conn, NULL);
+    connSetReadHandler(server.el, conn, NULL);
     
     serverLog(LL_NOTICE, "MASTER <-> REPLICA sync: Loading DB in memory");
     rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
@@ -2476,7 +2476,7 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
         if (reply != NULL) {
             serverLog(LL_WARNING,"Unable to send PSYNC to master: %s",reply);
             sdsfree(reply);
-            connSetReadHandler(conn, NULL);
+            connSetReadHandler(server.el, conn, NULL);
             return PSYNC_WRITE_ERROR;
         }
         return PSYNC_WAIT_REPLY;
@@ -2486,7 +2486,7 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
     reply = receiveSynchronousResponse(conn);
     /* Master did not reply to PSYNC */
     if (reply == NULL) {
-        connSetReadHandler(conn, NULL);
+        connSetReadHandler(server.el, conn, NULL);
         serverLog(LL_WARNING, "Master did not reply to PSYNC, will try later");
         return PSYNC_TRY_LATER;
     }
@@ -2498,7 +2498,7 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
         return PSYNC_WAIT_REPLY;
     }
 
-    connSetReadHandler(conn, NULL);
+    connSetReadHandler(server.el, conn, NULL);
 
     if (!strncmp(reply,"+FULLRESYNC",11)) {
         char *replid = NULL, *offset = NULL;
@@ -2636,8 +2636,8 @@ void syncWithMaster(connection *conn) {
         serverLog(LL_NOTICE,"Non blocking connect for SYNC fired the event.");
         /* Delete the writable event so that the readable event remains
          * registered and we can wait for the PONG reply. */
-        connSetReadHandler(conn, syncWithMaster);
-        connSetWriteHandler(conn, NULL);
+        connSetReadHandler(server.el, conn, syncWithMaster);
+        connSetWriteHandler(server.el, conn, NULL);
         server.repl_state = REPL_STATE_RECEIVE_PING_REPLY;
         /* Send the PING, don't check for errors at all, we have the timeout
          * that will take care about this. */
@@ -2884,7 +2884,7 @@ void syncWithMaster(connection *conn) {
     }
 
     /* Setup the non blocking download of the bulk file. */
-    if (connSetReadHandler(conn, readSyncBulkPayload)
+    if (connSetReadHandler(server.el, conn, readSyncBulkPayload)
             == C_ERR)
     {
         char conninfo[CONN_INFO_LEN];
@@ -3410,7 +3410,7 @@ void replicationResurrectCachedMaster(connection *conn) {
 
     /* Re-add to the list of clients. */
     linkClient(server.master);
-    if (connSetReadHandler(server.master->conn, readQueryFromClient)) {
+    if (connSetReadHandler(server.el, server.master->conn, readQueryFromClient)) {
         serverLog(LL_WARNING,"Error resurrecting the cached master, impossible to add the readable handler: %s", strerror(errno));
         freeClientAsync(server.master); /* Close ASAP. */
     }
@@ -3418,7 +3418,7 @@ void replicationResurrectCachedMaster(connection *conn) {
     /* We may also need to install the write handler as well if there is
      * pending data in the write buffers. */
     if (clientHasPendingReplies(server.master)) {
-        if (connSetWriteHandler(server.master->conn, sendReplyToClient)) {
+        if (connSetWriteHandler(server.el, server.master->conn, sendReplyToClient)) {
             serverLog(LL_WARNING,"Error resurrecting the cached master, impossible to add the writable handler: %s", strerror(errno));
             freeClientAsync(server.master); /* Close ASAP. */
         }

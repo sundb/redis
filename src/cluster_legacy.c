@@ -1236,7 +1236,7 @@ static void clusterConnAcceptHandler(connection *conn) {
     connSetPrivateData(conn, link);
 
     /* Register read handler */
-    connSetReadHandler(conn, clusterReadHandler);
+    connSetReadHandler(server.el, conn, clusterReadHandler);
 }
 
 #define MAX_CLUSTER_ACCEPTS_PER_CALL 1000
@@ -3309,7 +3309,7 @@ void clusterWriteHandler(connection *conn) {
     }
 
     if (listLength(link->send_msg_queue) == 0)
-        connSetWriteHandler(link->conn, NULL);
+        connSetWriteHandler(server.el, link->conn, NULL);
 }
 
 /* A connect handler that gets called when a connection to another node
@@ -3329,7 +3329,7 @@ void clusterLinkConnectHandler(connection *conn) {
     }
 
     /* Register a read handler from now on */
-    connSetReadHandler(conn, clusterReadHandler);
+    connSetReadHandler(server.el, conn, clusterReadHandler);
 
     /* Queue a PING in the new connection ASAP: this is crucial
      * to avoid false positives in failure detection.
@@ -3454,7 +3454,7 @@ void clusterSendMessage(clusterLink *link, clusterMsgSendBlock *msgblock) {
         return;
     }
     if (listLength(link->send_msg_queue) == 0 && msgblock->msg.totlen != 0)
-        connSetWriteHandlerWithBarrier(link->conn, clusterWriteHandler, 1);
+        connSetWriteHandlerWithBarrier(server.el, link->conn, clusterWriteHandler, 1);
 
     listAddNodeTail(link->send_msg_queue, msgblock);
     msgblock->refcount++;
