@@ -1177,6 +1177,12 @@ typedef struct {
 } clientReqResInfo;
 #endif
 
+typedef struct CommandArgs {
+    int argc;               /* Num of arguments of current command. */
+    robj **argv;            /* Arguments of current command. */
+    size_t argv_len_sum;    /* Sum of lengths of objects in argv list. */
+} CommandArgs;
+
 typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
@@ -1193,6 +1199,7 @@ typedef struct client {
     robj **argv;            /* Arguments of current command. */
     int argv_len;           /* Size of argv array (may be more than argc) */
     int original_argc;      /* Num of arguments of original command if arguments were rewritten. */
+    list *argv_list;
     robj **original_argv;   /* Arguments of original command if arguments were rewritten. */
     size_t argv_len_sum;    /* Sum of lengths of objects in argv list. */
     struct redisCommand *cmd, *lastcmd;  /* Last command executed. */

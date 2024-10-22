@@ -157,6 +157,7 @@ client *createClient(connection *conn) {
     c->argv = NULL;
     c->argv_len = 0;
     c->argv_len_sum = 0;
+    c->argv_list = listCreate();
     c->original_argc = 0;
     c->original_argv = NULL;
     c->cmd = c->lastcmd = c->realcmd = NULL;
@@ -1369,6 +1370,7 @@ void handleWriteClient(iothread *iot, void *data) {
 }
 
 void acceptCommonHandler(connection *conn, int flags, char *ip) {
+    printf("acceptCommonHandler\n");
     client *c;
     UNUSED(ip);
 
@@ -2385,7 +2387,7 @@ int processMultibulkBuffer(client *c) {
 
     if (c->multibulklen == 0) {
         /* The client should have been reset */
-        serverAssertWithInfo(c,NULL,c->argc == 0);
+        // serverAssertWithInfo(c,NULL,c->argc == 0);
 
         /* Multi bulk length cannot be read without a \r\n */
         newline = strchr(c->querybuf+c->qb_pos,'\r');
@@ -2698,7 +2700,14 @@ int processInputBuffer(client *c) {
                 break;
             }
 
-            break;
+            CommandArgs *ca = zmalloc(sizeof(CommandArgs));
+            ca->argc = c->argc;
+            c->argc = 0;
+            ca->argv = c->argv;
+            c->argv = NULL;
+            ca->argv_len_sum = c->argv_len_sum;
+            listAddNodeTail(c->argv_list, ca);
+            // break;
 
             /* We are finally ready to execute the command. */
             // if (processCommandAndResetClient(c) == C_ERR) {
@@ -2879,21 +2888,24 @@ void readQueryFromClient(connection *conn) {
     if (processInputBuffer(c) == C_ERR)
          c = NULL;
 
-    pthread_mutex_lock(&server.jobs_mutex);
-    listAddNodeTail(server.jobs, c);
-    if (write(server.pipeexec[1],"A",1) != 1) {
-        /* Ignore the error, this is best-effort. */
-    } 
-    iothread *iot = io_threads[c->id % (server.io_threads_num - 1)];
-    connSetReadHandler(iot->ae, conn, NULL);
-    pthread_mutex_unlock(&server.jobs_mutex);
-
 done:
     if (c && (c->flags & CLIENT_REUSABLE_QUERYBUFFER)) {
         serverAssert(c->qb_pos == 0); /* Ensure the client's query buffer is trimmed in processInputBuffer */
         resetReusableQueryBuf(c);
     }
     beforeNextClient(c);
+
+    if (listLength(c->argv_list)) {
+        printf("c->argc: %d\n", c->argc);
+        pthread_mutex_lock(&server.jobs_mutex);
+        listAddNodeTail(server.jobs, c);
+        if (write(server.pipeexec[1],"A",1) != 1) {
+            /* Ignore the error, this is best-effort. */
+        } 
+        iothread *iot = io_threads[c->id % (server.io_threads_num - 1)];
+        connSetReadHandler(iot->ae, conn, NULL);
+        pthread_mutex_unlock(&server.jobs_mutex);
+    }
 }
 
 
