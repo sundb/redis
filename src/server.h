@@ -1195,6 +1195,7 @@ typedef struct client {
     sds querybuf;           /* Buffer we use to accumulate client queries. */
     size_t qb_pos;          /* The position we have read in querybuf. */
     size_t querybuf_peak;   /* Recent (100ms or more) peak of querybuf size. */
+    int read_flags;
     int argc;               /* Num of arguments of current command. */
     robj **argv;            /* Arguments of current command. */
     int argv_len;           /* Size of argv array (may be more than argc) */
@@ -2612,6 +2613,26 @@ void redisSetCpuAffinity(const char *cpulist);
 #define ERR_REPLY_FLAG_NO_STATS_UPDATE (1ULL<<0) /* Indicating that we should not update
                                                     error stats after sending error reply */
 /* networking.c -- Networking and Client related operations */
+
+/* Read flags for various read errors and states */
+#define READ_FLAGS_QB_LIMIT_REACHED (1 << 0)
+#define READ_FLAGS_ERROR_BIG_INLINE_REQUEST (1 << 1)
+#define READ_FLAGS_ERROR_BIG_MULTIBULK (1 << 2)
+#define READ_FLAGS_ERROR_INVALID_MULTIBULK_LEN (1 << 3)
+#define READ_FLAGS_ERROR_UNAUTHENTICATED_MULTIBULK_LEN (1 << 4)
+#define READ_FLAGS_ERROR_UNAUTHENTICATED_BULK_LEN (1 << 5)
+#define READ_FLAGS_ERROR_BIG_BULK_COUNT (1 << 6)
+#define READ_FLAGS_ERROR_MBULK_UNEXPECTED_CHARACTER (1 << 7)
+#define READ_FLAGS_ERROR_MBULK_INVALID_BULK_LEN (1 << 8)
+#define READ_FLAGS_ERROR_UNEXPECTED_INLINE_FROM_PRIMARY (1 << 9)
+#define READ_FLAGS_ERROR_UNBALANCED_QUOTES (1 << 10)
+#define READ_FLAGS_INLINE_ZERO_QUERY_LEN (1 << 11)
+#define READ_FLAGS_PARSING_NEGATIVE_MBULK_LEN (1 << 12)
+#define READ_FLAGS_PARSING_COMPLETED (1 << 13)
+#define READ_FLAGS_PRIMARY (1 << 14)
+#define READ_FLAGS_DONT_PARSE (1 << 15)
+#define READ_FLAGS_AUTH_REQUIRED (1 << 16)
+
 client *createClient(connection *conn);
 void freeClient(client *c);
 void freeClientAsync(client *c);
@@ -2712,8 +2733,8 @@ void whileBlockedCron(void);
 void blockingOperationStarts(void);
 void blockingOperationEnds(void);
 int handleClientsWithPendingWrites(void);
-int handleClientsWithPendingWritesUsingThreads(void);
-int handleClientsWithPendingReadsUsingThreads(void);
+// int handleClientsWithPendingWritesUsingThreads(void);
+// int handleClientsWithPendingReadsUsingThreads(void);
 int stopThreadedIOIfNeeded(void);
 int clientHasPendingReplies(client *c);
 int updateClientMemUsageAndBucket(client *c);

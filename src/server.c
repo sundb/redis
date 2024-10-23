@@ -1036,35 +1036,35 @@ void clientsCron(void) {
     ClientsPeakMemOutput[zeroidx] = 0;
 
 
-    while(listLength(server.clients) && iterations--) {
-        client *c;
-        listNode *head;
+    // while(listLength(server.clients) && iterations--) {
+    //     client *c;
+    //     listNode *head;
 
-        /* Take the current head, process, and then rotate the head to tail.
-         * This way we can fairly iterate all clients step by step. */
-        head = listFirst(server.clients);
-        c = listNodeValue(head);
-        listRotateHeadToTail(server.clients);
-        /* The following functions do different service checks on the client.
-         * The protocol is that they return non-zero if the client was
-         * terminated. */
-        if (clientsCronHandleTimeout(c,now)) continue;
-        if (clientsCronResizeQueryBuffer(c)) continue;
-        if (clientsCronResizeOutputBuffer(c,now)) continue;
+    //     /* Take the current head, process, and then rotate the head to tail.
+    //      * This way we can fairly iterate all clients step by step. */
+    //     head = listFirst(server.clients);
+    //     c = listNodeValue(head);
+    //     listRotateHeadToTail(server.clients);
+    //     /* The following functions do different service checks on the client.
+    //      * The protocol is that they return non-zero if the client was
+    //      * terminated. */
+    //     if (clientsCronHandleTimeout(c,now)) continue;
+    //     if (clientsCronResizeQueryBuffer(c)) continue;
+    //     if (clientsCronResizeOutputBuffer(c,now)) continue;
 
-        if (clientsCronTrackExpansiveClients(c, curr_peak_mem_usage_slot)) continue;
+    //     if (clientsCronTrackExpansiveClients(c, curr_peak_mem_usage_slot)) continue;
 
-        /* Iterating all the clients in getMemoryOverheadData() is too slow and
-         * in turn would make the INFO command too slow. So we perform this
-         * computation incrementally and track the (not instantaneous but updated
-         * to the second) total memory used by clients using clientsCron() in
-         * a more incremental way (depending on server.hz).
-         * If client eviction is enabled, update the bucket as well. */
-        if (!updateClientMemUsageAndBucket(c))
-            updateClientMemoryUsage(c);
+    //     /* Iterating all the clients in getMemoryOverheadData() is too slow and
+    //      * in turn would make the INFO command too slow. So we perform this
+    //      * computation incrementally and track the (not instantaneous but updated
+    //      * to the second) total memory used by clients using clientsCron() in
+    //      * a more incremental way (depending on server.hz).
+    //      * If client eviction is enabled, update the bucket as well. */
+    //     if (!updateClientMemUsageAndBucket(c))
+    //         updateClientMemoryUsage(c);
 
-        if (closeClientOnOutputBufferLimitReached(c, 0)) continue;
-    }
+    //     if (closeClientOnOutputBufferLimitReached(c, 0)) continue;
+    // }
 }
 
 /* This function handles 'background' operations we are required to do
@@ -1403,7 +1403,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
     /* We need to do a few operations on clients asynchronously. */
-    clientsCron();
+    // clientsCron();
 
     /* Handle background operations on Redis databases. */
     databasesCron();
@@ -2546,27 +2546,28 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
         exit(1);
     }
 
-    printf("handleExecute\n");
+    // printf("handleExecute\n");
     pthread_mutex_lock(&server.jobs_mutex);
     while ((ln = listFirst(server.jobs))) {
         client *c = ln->value;
-        printf("handleExecute, c->id: %d, %p\n", c->id, c->argv_list);
+        // printf("handleExecute, c->id: %d, %p\n", c->id, c->argv_list);
         while ((ln1 = listFirst(c->argv_list))) {
             CommandArgs *ca = listNodeValue(ln1);
             c->argc = ca->argc;
             c->argv = ca->argv;
             c->argv_len_sum = ca->argv_len_sum;
-            printf("1111111111111111, c->argc: %d, c->argv: %p, argv_len_sum: %d\n", c->argc, c->argv, c->argv_len_sum);
-            printf("c->argv[0]: %s\n", c->argv[0]->ptr);
+            // printf("1111111111111111, c->argc: %d, c->argv: %p, argv_len_sum: %d\n", c->argc, c->argv, c->argv_len_sum);
+            // printf("c->argv[0]: %s\n", c->argv[0]->ptr);
             // printf("handleExecute, ca->argv[0]: %s\n", ca->argv[0]->ptr);
-            processCommandAndResetClient(c);
-            printf("222222222222222\n");
+            serverAssert(processCommandAndResetClient(c) == C_OK);
+            // printf("222222222222222\n");
             zfree(ca);
-            printf("3333333333333333\n");
+            // printf("3333333333333333\n");
             listDelNode(c->argv_list, ln1);
         }
 
         iothread *iot = getIOThreadByClient(c);
+        pthread_mutex_lock(&iot->mutex);
         iojob *job = zmalloc(sizeof(*job));
         job->handler = handleWriteClient;
         job->data = c;
@@ -2580,6 +2581,7 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
         // job->handler(job->data);
         // zfree(job);
         listDelNode(server.jobs, ln);
+        pthread_mutex_unlock(&iot->mutex);
     }
     // ln = listFirst(server.jobs);
 
@@ -2593,7 +2595,7 @@ void resetServerStats(void) {
     int j;
 
     server.jobs = listCreate();
-    if (anetPipe(server.pipeexec, O_NONBLOCK, 0) == -1) {
+    if (anetPipe(server.pipeexec, O_NONBLOCK, O_NONBLOCK) == -1) {
         serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
     }
     if (aeCreateFileEvent(server.el, server.pipeexec[0], AE_READABLE, handleExecute, NULL) != AE_OK) {
