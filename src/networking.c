@@ -186,6 +186,7 @@ client *createClient(connection *conn) {
     c->slave_req = SLAVE_REQ_NONE;
     c->reply = listCreate();
     c->deferred_reply_errors = NULL;
+    c->in_exec = 0;
     c->reply_bytes = 0;
     c->obuf_soft_limit_reached_time = 0;
     listSetFreeMethod(c->reply,freeClientReplyValue);
@@ -2910,6 +2911,8 @@ done:
 
     if (!c->argv && listLength(c->argv_list)) {
         iothread *iot = io_threads[c->id % (server.io_threads_num - 1)];
+        c->in_exec = 1;
+        listAddNodeTail(iot->in_exec_clients, c);
         // printf("c->argc: %d\n", c->argc);
         pthread_mutex_lock(&iot->write_mutex);
         listAddNodeTail(iot->write_jobs, c);
@@ -4405,6 +4408,24 @@ static inline void setIOPendingCount(int i, unsigned long count) {
     atomicSetWithSync(io_threads_pending[i].value, count);
 }
 
+void ioBeforeSlee(struct aeEventLoop *el) {
+    // printf("ioBeforeSlee\n");
+    iothread *iot = el->privdata;
+
+    listIter li;
+    listNode *ln;
+    listRewind(iot->in_exec_clients,&li);
+    while((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);
+        if (!c->in_exec) {
+            connSetWriteHandler(iot->ae, c->conn, sendReplyToClient);
+            connSetReadHandler(iot->ae, c->conn, readQueryFromClient); 
+            listDelNode(iot->in_exec_clients,ln);
+            continue;
+        }
+    }
+}
+
 void *IOThreadMain(void *ptr) {
     /* The ID is the thread number (from 0 to server.io_threads_num-1), and is
      * used by the thread to just manipulate a single sub-array of clients. */
@@ -4415,6 +4436,8 @@ void *IOThreadMain(void *ptr) {
     redis_set_thread_title(thdname);
     redisSetCpuAffinity(server.server_cpulist);
     makeThreadKillable();
+    iot->ae->privdata = iot;
+    aeSetBeforeSleepProc(iot->ae, ioBeforeSlee);
     aeMain(iot->ae);
     return NULL;
 }
@@ -4474,6 +4497,7 @@ void initThreadedIO(void) {
         iot->id = i;
         iot->ae = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
         iot->read_jobs = listCreate();
+        iot->in_exec_clients = listCreate();
         pthread_mutex_init(&iot->read_mutex, NULL);
         iot->read_efd = eventfd(0, EFD_NONBLOCK);
         // if (anetPipe(iot->read_pipefd, O_NONBLOCK, O_NONBLOCK) == -1) {

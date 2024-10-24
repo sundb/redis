@@ -2565,6 +2565,7 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
             zfree(ca);
             listDelNode(c->argv_list, ln1);
         }
+        c->in_exec = 0;
 
         // iojob *job = zmalloc(sizeof(*job));
         // job->handler = handleWriteClient;
@@ -2584,19 +2585,19 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
     // }
 
     
-    pthread_mutex_lock(&iot->read_mutex);
-    listRewind(l, &li);
-    while((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);;
-        iojob *job = zmalloc(sizeof(*job));
-        job->handler = handleWriteClient;
-        job->data = c;
-        listAddNodeTail(iot->read_jobs, job);
-    } 
+    // pthread_mutex_lock(&iot->read_mutex);
+    // listRewind(l, &li);
+    // while((ln = listNext(&li))) {
+    //     client *c = listNodeValue(ln);;
+    //     iojob *job = zmalloc(sizeof(*job));
+    //     job->handler = handleWriteClient;
+    //     job->data = c;
+    //     listAddNodeTail(iot->read_jobs, job);
+    // } 
 
-    uint64_t u = 1;
-    if (write(iot->read_efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {}
-    pthread_mutex_unlock(&iot->read_mutex);
+    // uint64_t u = 1;
+    // if (write(iot->read_efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {}
+    // pthread_mutex_unlock(&iot->read_mutex);
 }
 
 /* Resets the stats that we expose via INFO or other means that we want

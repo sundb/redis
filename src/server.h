@@ -437,6 +437,8 @@ typedef struct iothread {
     list *write_jobs;
     pthread_mutex_t write_mutex;
     int write_efd;
+
+    list *in_exec_clients;
 } iothread;
 
 /* IO jobs queue functions - Used to send jobs from the main-thread to the IO thread. */
@@ -1217,6 +1219,7 @@ typedef struct client {
     int multibulklen;       /* Number of multi bulk arguments left to read. */
     long bulklen;           /* Length of bulk argument in multi bulk request. */
     list *reply;            /* List of reply objects to send to the client. */
+    int in_exec;
     unsigned long long reply_bytes; /* Tot bytes of objects in reply list. */
     list *deferred_reply_errors;    /* Used for module thread safe contexts. */
     size_t sentlen;         /* Amount of bytes already sent in the current
