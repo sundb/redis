@@ -1448,14 +1448,15 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
 
     iothread *iot = io_threads[c->id % (server.io_threads_num - 1)];
     // printf("add client to iothread %d, %p\n", c->id % (server.io_threads_num - 1), iot);
-    pthread_mutex_lock(&iot->read_mutex);
+    // pthread_mutex_lock(&iot->read_mutex);
     iojob *job = zmalloc(sizeof(*job));
     job->handler = handleBindClient;
     job->data = c;
-    listAddNodeTail(iot->read_jobs, job);
+    atomicqueueTryPush(iot->read_queue, &job);
+    // listAddNodeTail(iot->read_jobs, job);
     uint64_t u = 1; // 通知事件数
     if (write(iot->read_efd, &u, sizeof(uint64_t))) {}
-    pthread_mutex_unlock(&iot->read_mutex);
+    // pthread_mutex_unlock(&iot->read_mutex);
 }
 
 void freeClientOriginalArgv(client *c) {
@@ -2911,12 +2912,13 @@ done:
     if (!c->argv && listLength(c->argv_list)) {
         iothread *iot = io_threads[c->id % (server.io_threads_num - 1)];
         // printf("c->argc: %d\n", c->argc);
-        pthread_mutex_lock(&iot->write_mutex);
-        listAddNodeTail(iot->write_jobs, c);
+        // pthread_mutex_lock(&iot->write_mutex);
+        atomicqueueTryPush(iot->write_queue, &c);
+        // listAddNodeTail(iot->write_jobs, c);
         uint64_t u = 1;
         if (write(iot->write_efd, &u, sizeof(uint64_t))) {}
         connSetReadHandler(iot->ae, conn, NULL);
-        pthread_mutex_unlock(&iot->write_mutex);
+        // pthread_mutex_unlock(&iot->write_mutex);
     }
 }
 
@@ -4434,16 +4436,23 @@ static void handleJobs(struct aeEventLoop *ae, int fd, void *ptr, int mask) {
         exit(1);
     }
 
-    pthread_mutex_lock(&iot->read_mutex);
-    list *l = iot->read_jobs;
-    iot->read_jobs = listCreate();
-    pthread_mutex_unlock(&iot->read_mutex);
-    while ((ln = listFirst(l))) {
-        iojob *job = ln->value;
+
+    iojob *job;
+    while (atomicqueueTryPop(iot->read_queue, &job)) {
         job->handler(iot, job->data);
         zfree(job);
-        listDelNode(l, ln);
     }
+
+    // pthread_mutex_lock(&iot->read_mutex);
+    // list *l = iot->read_jobs;
+    // iot->read_jobs = listCreate();
+    // pthread_mutex_unlock(&iot->read_mutex);
+    // while ((ln = listFirst(l))) {
+    //     iojob *job = ln->value;
+    //     job->handler(iot, job->data);
+    //     zfree(job);
+    //     listDelNode(l, ln);
+    // }
     // ln = listFirst(iot->jobs);
     // client *c = ln->value;
     // connSetReadHandler(ae, c->conn, readQueryFromClient);
@@ -4473,8 +4482,8 @@ void initThreadedIO(void) {
         iothread *iot = zmalloc(sizeof(*iot));
         iot->id = i;
         iot->ae = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
-        iot->read_jobs = listCreate();
-        pthread_mutex_init(&iot->read_mutex, NULL);
+        iot->read_queue = atomicqueueCreate(1024, sizeof(void*));
+        // pthread_mutex_init(&iot->read_mutex, NULL);
         iot->read_efd = eventfd(0, EFD_NONBLOCK);
         // if (anetPipe(iot->read_pipefd, O_NONBLOCK, O_NONBLOCK) == -1) {
         //     serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
@@ -4484,8 +4493,9 @@ void initThreadedIO(void) {
             exit(1);
         }
 
-        iot->write_jobs = listCreate();
-        pthread_mutex_init(&iot->write_mutex, NULL);
+        // iot->write_jobs = listCreate();
+        // pthread_mutex_init(&iot->write_mutex, NULL);
+        iot->write_queue = atomicqueueCreate(1024, sizeof(void*));
         iot->write_efd = eventfd(0, EFD_NONBLOCK);
         // if (anetPipe(iot->write_, O_NONBLOCK, O_NONBLOCK) == -1) {
         //     serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");

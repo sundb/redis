@@ -20,6 +20,7 @@
 #include "rio.h"
 #include "atomicvar.h"
 #include "commands.h"
+#include "atomicqueue.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -430,12 +431,14 @@ typedef struct iothread {
     aeEventLoop *ae;
     pthread_t tid;
 
-    list *read_jobs;
-    pthread_mutex_t read_mutex;
+    // list *read_jobs;
+    // pthread_mutex_t read_mutex;
+    atomicqueue *read_queue;
     int read_efd;
 
-    list *write_jobs;
-    pthread_mutex_t write_mutex;
+    // list *write_jobs;
+    // pthread_mutex_t write_mutex;
+    atomicqueue *write_queue;
     int write_efd;
 } iothread;
 

@@ -2548,14 +2548,8 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
         exit(1);
     }
 
-    // printf("handleExecute\n");
-    pthread_mutex_lock(&iot->write_mutex);
-    list *l = iot->write_jobs;
-    iot->write_jobs = listCreate();
-    pthread_mutex_unlock(&iot->write_mutex);
-    listRewind(l, &li);
-    while ((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);;
+    client *c;
+    while (atomicqueueTryPop(iot->write_queue, &c)) {
         while ((ln1 = listFirst(c->argv_list))) {
             CommandArgs *ca = listNodeValue(ln1);
             c->argc = ca->argc;
@@ -2566,37 +2560,63 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
             listDelNode(c->argv_list, ln1);
         }
 
-        // iojob *job = zmalloc(sizeof(*job));
-        // job->handler = handleWriteClient;
-        // job->data = c;
-        // listAddNodeTail(iot->read_jobs, job);
-        // if (write(iot->read_pipefd[1],"A",1) != 1) {
-        //     /* Ignore the error, this is best-effort. */
-        // } 
-    }
-
-    //     listIter li;
-    // listNode *ln;
-
-    // listRewind(reference, &li);
-    // while((ln = listNext(&li))) {
-    //     sds pattern = listNodeValue(ln);
-    // }
-
-    
-    pthread_mutex_lock(&iot->read_mutex);
-    listRewind(l, &li);
-    while((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);;
         iojob *job = zmalloc(sizeof(*job));
         job->handler = handleWriteClient;
         job->data = c;
-        listAddNodeTail(iot->read_jobs, job);
-    } 
+        atomicqueueTryPush(iot->read_queue, &job);
+        // listAddNodeTail(iot->read_queue, job);
+    }
+
+    // printf("handleExecute\n");
+    // pthread_mutex_lock(&iot->write_mutex);
+    // list *l = iot->write_jobs;
+    // iot->write_jobs = listCreate();
+    // pthread_mutex_unlock(&iot->write_mutex);
+    // listRewind(l, &li);
+    // while ((ln = listNext(&li))) {
+    //     client *c = listNodeValue(ln);;
+    //     while ((ln1 = listFirst(c->argv_list))) {
+    //         CommandArgs *ca = listNodeValue(ln1);
+    //         c->argc = ca->argc;
+    //         c->argv = ca->argv;
+    //         c->argv_len_sum = ca->argv_len_sum;
+    //         serverAssert(processCommandAndResetClient(c) == C_OK);
+    //         zfree(ca);
+    //         listDelNode(c->argv_list, ln1);
+    //     }
+        
+
+    //     // iojob *job = zmalloc(sizeof(*job));
+    //     // job->handler = handleWriteClient;
+    //     // job->data = c;
+    //     // listAddNodeTail(iot->read_jobs, job);
+    //     // if (write(iot->read_pipefd[1],"A",1) != 1) {
+    //     //     /* Ignore the error, this is best-effort. */
+    //     // } 
+    // }
+
+    // //     listIter li;
+    // // listNode *ln;
+
+    // // listRewind(reference, &li);
+    // // while((ln = listNext(&li))) {
+    // //     sds pattern = listNodeValue(ln);
+    // // }
+
+    
+    // pthread_mutex_lock(&iot->read_mutex);
+    // listRewind(l, &li);
+    // while((ln = listNext(&li))) {
+    //     client *c = listNodeValue(ln);;
+    //     iojob *job = zmalloc(sizeof(*job));
+    //     job->handler = handleWriteClient;
+    //     job->data = c;
+    //     listAddNodeTail(iot->read_jobs, job);
+    // } 
 
     uint64_t u = 1;
     if (write(iot->read_efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {}
-    pthread_mutex_unlock(&iot->read_mutex);
+    // pthread_mutex_unlock(&iot->read_mutex);
 }
 
 /* Resets the stats that we expose via INFO or other means that we want
