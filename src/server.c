@@ -2541,9 +2541,9 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
     listNode *ln, *ln1;
     listIter li;
     iothread *iot = ptr;
-    char x;
+    uint64_t x;
 
-    if (read(fd, &x, 1) < 0) {
+    if (read(fd, &x, sizeof(uint64_t)) < 0) {
         serverLog(LL_WARNING, "Failed reading from io threading cmd pipe: %s", strerror(errno));
         exit(1);
     }
@@ -2593,9 +2593,9 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
         job->data = c;
         listAddNodeTail(iot->read_jobs, job);
     } 
-    if (write(iot->read_pipefd[1],"A",1) != 1) {
-        /* Ignore the error, this is best-effort. */
-    } 
+
+    uint64_t u = 1;
+    if (write(iot->read_efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {}
     pthread_mutex_unlock(&iot->read_mutex);
 }
 

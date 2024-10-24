@@ -432,11 +432,11 @@ typedef struct iothread {
 
     list *read_jobs;
     pthread_mutex_t read_mutex;
-    int read_pipefd[2];
+    int read_efd;
 
     list *write_jobs;
     pthread_mutex_t write_mutex;
-    int write_pipefd[2];
+    int write_efd;
 } iothread;
 
 /* IO jobs queue functions - Used to send jobs from the main-thread to the IO thread. */

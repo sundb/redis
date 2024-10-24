@@ -21,6 +21,7 @@
 #include <sys/uio.h>
 #include <math.h>
 #include <ctype.h>
+#include <sys/eventfd.h>
 
 iothread **io_threads;
 
@@ -1452,9 +1453,8 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
     job->handler = handleBindClient;
     job->data = c;
     listAddNodeTail(iot->read_jobs, job);
-   if (write(iot->read_pipefd[1],"A",1) != 1) {
-        /* Ignore the error, this is best-effort. */
-    } 
+    uint64_t u = 1; // 通知事件数
+    if (write(iot->read_efd, &u, sizeof(uint64_t))) {}
     pthread_mutex_unlock(&iot->read_mutex);
 }
 
@@ -2913,9 +2913,8 @@ done:
         // printf("c->argc: %d\n", c->argc);
         pthread_mutex_lock(&iot->write_mutex);
         listAddNodeTail(iot->write_jobs, c);
-        if (write(iot->write_pipefd[1],"A",1) != 1) {
-            /* Ignore the error, this is best-effort. */
-        } 
+        uint64_t u = 1;
+        if (write(iot->write_efd, &u, sizeof(uint64_t))) {}
         connSetReadHandler(iot->ae, conn, NULL);
         pthread_mutex_unlock(&iot->write_mutex);
     }
@@ -4428,9 +4427,9 @@ static void handleJobs(struct aeEventLoop *ae, int fd, void *ptr, int mask) {
     UNUSED(mask);
     iothread *iot = ptr;
     listNode *ln;
-    char x;
+    uint64_t x;
 
-    if (read(fd, &x, 1) < 0) {
+    if (read(fd, &x, sizeof(uint64_t)) < 0) {
         serverLog(LL_WARNING, "Failed reading from io threading cmd pipe: %s", strerror(errno));
         exit(1);
     }
@@ -4476,20 +4475,22 @@ void initThreadedIO(void) {
         iot->ae = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
         iot->read_jobs = listCreate();
         pthread_mutex_init(&iot->read_mutex, NULL);
-        if (anetPipe(iot->read_pipefd, O_NONBLOCK, O_NONBLOCK) == -1) {
-            serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
-        }
-        if (aeCreateFileEvent(iot->ae, iot->read_pipefd[0], AE_READABLE, handleJobs, iot) != AE_OK) {
+        iot->read_efd = eventfd(0, EFD_NONBLOCK);
+        // if (anetPipe(iot->read_pipefd, O_NONBLOCK, O_NONBLOCK) == -1) {
+        //     serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
+        // }
+        if (aeCreateFileEvent(iot->ae, iot->read_efd, AE_READABLE, handleJobs, iot) != AE_OK) {
             serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
             exit(1);
         }
 
         iot->write_jobs = listCreate();
         pthread_mutex_init(&iot->write_mutex, NULL);
-        if (anetPipe(iot->write_pipefd, O_NONBLOCK, O_NONBLOCK) == -1) {
-            serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
-        }
-        if (aeCreateFileEvent(server.el, iot->write_pipefd[0], AE_READABLE, handleExecute, iot) != AE_OK) {
+        iot->write_efd = eventfd(0, EFD_NONBLOCK);
+        // if (anetPipe(iot->write_, O_NONBLOCK, O_NONBLOCK) == -1) {
+        //     serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
+        // }
+        if (aeCreateFileEvent(server.el, iot->write_efd, AE_READABLE, handleExecute, iot) != AE_OK) {
             serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
             exit(1);
         }
