@@ -430,10 +430,13 @@ typedef struct iothread {
     aeEventLoop *ae;
     pthread_t tid;
 
-    list *jobs;
-    pthread_mutex_t mutex;
+    list *read_jobs;
+    pthread_mutex_t read_mutex;
+    int read_pipefd[2];
 
-    int pipefd[2];
+    list *write_jobs;
+    pthread_mutex_t write_mutex;
+    int write_pipefd[2];
 } iothread;
 
 /* IO jobs queue functions - Used to send jobs from the main-thread to the IO thread. */
@@ -1646,9 +1649,9 @@ struct redisServer {
     client *current_client;     /* The client that triggered the command execution (External or AOF). */
     client *executing_client;   /* The client executing the current command (possibly script or module). */
 
-    list *jobs;
-    pthread_mutex_t jobs_mutex;
-    int pipeexec[2];
+    // list *jobs;
+    // pthread_mutex_t jobs_mutex;
+    // int pipeexec[2];
 
 #ifdef LOG_REQ_RES
     char *req_res_logfile; /* Path of log file for logging all requests and their replies. If NULL, no logging will be performed */
@@ -2594,6 +2597,7 @@ void moduleDefragStart(void);
 void moduleDefragEnd(void);
 void *moduleGetHandleByName(char *modulename);
 int moduleIsModuleCommand(void *module_handle, struct redisCommand *cmd);
+void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask);
 
 /* Utils */
 long long ustime(void);

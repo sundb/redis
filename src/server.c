@@ -2539,6 +2539,8 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
     UNUSED(ptr);
     UNUSED(mask);
     listNode *ln, *ln1;
+    listIter li;
+    iothread *iot = ptr;
     char x;
 
     if (read(fd, &x, 1) < 0) {
@@ -2547,45 +2549,54 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
     }
 
     // printf("handleExecute\n");
-    pthread_mutex_lock(&server.jobs_mutex);
-    while ((ln = listFirst(server.jobs))) {
-        client *c = ln->value;
-        // printf("handleExecute, c->id: %d, %p\n", c->id, c->argv_list);
+    pthread_mutex_lock(&iot->write_mutex);
+    list *l = iot->write_jobs;
+    iot->write_jobs = listCreate();
+    pthread_mutex_unlock(&iot->write_mutex);
+    listRewind(l, &li);
+    while ((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);;
         while ((ln1 = listFirst(c->argv_list))) {
             CommandArgs *ca = listNodeValue(ln1);
             c->argc = ca->argc;
             c->argv = ca->argv;
             c->argv_len_sum = ca->argv_len_sum;
-            // printf("1111111111111111, c->argc: %d, c->argv: %p, argv_len_sum: %d\n", c->argc, c->argv, c->argv_len_sum);
-            // printf("c->argv[0]: %s\n", c->argv[0]->ptr);
-            // printf("handleExecute, ca->argv[0]: %s\n", ca->argv[0]->ptr);
             serverAssert(processCommandAndResetClient(c) == C_OK);
-            // printf("222222222222222\n");
             zfree(ca);
-            // printf("3333333333333333\n");
             listDelNode(c->argv_list, ln1);
         }
 
-        iothread *iot = getIOThreadByClient(c);
-        pthread_mutex_lock(&iot->mutex);
+        // iojob *job = zmalloc(sizeof(*job));
+        // job->handler = handleWriteClient;
+        // job->data = c;
+        // listAddNodeTail(iot->read_jobs, job);
+        // if (write(iot->read_pipefd[1],"A",1) != 1) {
+        //     /* Ignore the error, this is best-effort. */
+        // } 
+    }
+
+    //     listIter li;
+    // listNode *ln;
+
+    // listRewind(reference, &li);
+    // while((ln = listNext(&li))) {
+    //     sds pattern = listNodeValue(ln);
+    // }
+
+    
+    pthread_mutex_lock(&iot->read_mutex);
+    listRewind(l, &li);
+    while((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);;
         iojob *job = zmalloc(sizeof(*job));
         job->handler = handleWriteClient;
         job->data = c;
-        listAddNodeTail(iot->jobs, job);
-        if (write(iot->pipefd[1],"A",1) != 1) {
-            /* Ignore the error, this is best-effort. */
-        } 
-        // connSetReadHandler(iot->ae, c->conn, readQueryFromClient);
-        // connSetReadHandler(c->conn, readQueryFromClient);
-        // iojob *job = ln->value;
-        // job->handler(job->data);
-        // zfree(job);
-        listDelNode(server.jobs, ln);
-        pthread_mutex_unlock(&iot->mutex);
-    }
-    // ln = listFirst(server.jobs);
-
-    pthread_mutex_unlock(&server.jobs_mutex);
+        listAddNodeTail(iot->read_jobs, job);
+    } 
+    if (write(iot->read_pipefd[1],"A",1) != 1) {
+        /* Ignore the error, this is best-effort. */
+    } 
+    pthread_mutex_unlock(&iot->read_mutex);
 }
 
 /* Resets the stats that we expose via INFO or other means that we want
@@ -2594,14 +2605,14 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
 void resetServerStats(void) {
     int j;
 
-    server.jobs = listCreate();
-    if (anetPipe(server.pipeexec, O_NONBLOCK, O_NONBLOCK) == -1) {
-        serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
-    }
-    if (aeCreateFileEvent(server.el, server.pipeexec[0], AE_READABLE, handleExecute, NULL) != AE_OK) {
-        serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
-        exit(1);
-    }
+    // server.jobs = listCreate();
+    // if (anetPipe(server.pipeexec, O_NONBLOCK, O_NONBLOCK) == -1) {
+    //     serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
+    // }
+    // if (aeCreateFileEvent(server.el, server.pipeexec[0], AE_READABLE, handleExecute, NULL) != AE_OK) {
+    //     serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
+    //     exit(1);
+    // }
     
     server.stat_numcommands = 0;
     server.stat_numconnections = 0;

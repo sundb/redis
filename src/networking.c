@@ -1447,15 +1447,15 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
 
     iothread *iot = io_threads[c->id % (server.io_threads_num - 1)];
     // printf("add client to iothread %d, %p\n", c->id % (server.io_threads_num - 1), iot);
-    pthread_mutex_lock(&iot->mutex);
+    pthread_mutex_lock(&iot->read_mutex);
     iojob *job = zmalloc(sizeof(*job));
     job->handler = handleBindClient;
     job->data = c;
-    listAddNodeTail(iot->jobs, job);
-   if (write(iot->pipefd[1],"A",1) != 1) {
+    listAddNodeTail(iot->read_jobs, job);
+   if (write(iot->read_pipefd[1],"A",1) != 1) {
         /* Ignore the error, this is best-effort. */
     } 
-    pthread_mutex_unlock(&iot->mutex);
+    pthread_mutex_unlock(&iot->read_mutex);
 }
 
 void freeClientOriginalArgv(client *c) {
@@ -2710,14 +2710,15 @@ int processInputBuffer(client *c) {
 
             CommandArgs *ca = zmalloc(sizeof(CommandArgs));
             ca->argc = c->argc;
-            c->argc = 0;
+            ca->argv_len_sum = c->argv_len_sum;
+            // ca->argv_len = c->argv_len;
             ca->argv = c->argv;
             // printf("%s\n", c->argv[0]->ptr);
-            c->argv = NULL;
-            ca->argv_len_sum = c->argv_len_sum;
 
+            c->argc = 0;
             c->argv_len_sum = 0;
             c->argv_len = 0;
+            c->argv = NULL;
             listAddNodeTail(c->argv_list, ca);
             // break;
 
@@ -2907,16 +2908,16 @@ done:
     }
     beforeNextClient(c);
 
-    if (listLength(c->argv_list)) {
+    if (!c->argv && listLength(c->argv_list)) {
+        iothread *iot = io_threads[c->id % (server.io_threads_num - 1)];
         // printf("c->argc: %d\n", c->argc);
-        pthread_mutex_lock(&server.jobs_mutex);
-        listAddNodeTail(server.jobs, c);
-        if (write(server.pipeexec[1],"A",1) != 1) {
+        pthread_mutex_lock(&iot->write_mutex);
+        listAddNodeTail(iot->write_jobs, c);
+        if (write(iot->write_pipefd[1],"A",1) != 1) {
             /* Ignore the error, this is best-effort. */
         } 
-        iothread *iot = io_threads[c->id % (server.io_threads_num - 1)];
         connSetReadHandler(iot->ae, conn, NULL);
-        pthread_mutex_unlock(&server.jobs_mutex);
+        pthread_mutex_unlock(&iot->write_mutex);
     }
 }
 
@@ -4434,18 +4435,20 @@ static void handleJobs(struct aeEventLoop *ae, int fd, void *ptr, int mask) {
         exit(1);
     }
 
-    pthread_mutex_lock(&iot->mutex);
-    while ((ln = listFirst(iot->jobs))) {
+    pthread_mutex_lock(&iot->read_mutex);
+    list *l = iot->read_jobs;
+    iot->read_jobs = listCreate();
+    pthread_mutex_unlock(&iot->read_mutex);
+    while ((ln = listFirst(l))) {
         iojob *job = ln->value;
         job->handler(iot, job->data);
         zfree(job);
-        listDelNode(iot->jobs, ln);
+        listDelNode(l, ln);
     }
     // ln = listFirst(iot->jobs);
     // client *c = ln->value;
     // connSetReadHandler(ae, c->conn, readQueryFromClient);
 
-    pthread_mutex_unlock(&iot->mutex);
 }
 
 /* Initialize the data structures needed for threaded I/O. */
@@ -4471,12 +4474,22 @@ void initThreadedIO(void) {
         iothread *iot = zmalloc(sizeof(*iot));
         iot->id = i;
         iot->ae = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
-        iot->jobs = listCreate();
-        pthread_mutex_init(&iot->mutex, NULL);
-        if (anetPipe(iot->pipefd, O_NONBLOCK, O_NONBLOCK) == -1) {
+        iot->read_jobs = listCreate();
+        pthread_mutex_init(&iot->read_mutex, NULL);
+        if (anetPipe(iot->read_pipefd, O_NONBLOCK, O_NONBLOCK) == -1) {
             serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
         }
-        if (aeCreateFileEvent(iot->ae, iot->pipefd[0], AE_READABLE, handleJobs, iot) != AE_OK) {
+        if (aeCreateFileEvent(iot->ae, iot->read_pipefd[0], AE_READABLE, handleJobs, iot) != AE_OK) {
+            serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
+            exit(1);
+        }
+
+        iot->write_jobs = listCreate();
+        pthread_mutex_init(&iot->write_mutex, NULL);
+        if (anetPipe(iot->write_pipefd, O_NONBLOCK, O_NONBLOCK) == -1) {
+            serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
+        }
+        if (aeCreateFileEvent(server.el, iot->write_pipefd[0], AE_READABLE, handleExecute, iot) != AE_OK) {
             serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
             exit(1);
         }
