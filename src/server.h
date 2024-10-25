@@ -425,7 +425,7 @@ typedef enum blocking_type {
                                     buffer configuration. Just the first
                                     three: normal, slave, pubsub. */
 
-typedef struct iothread {
+typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) iothread {
     long id;
     aeEventLoop *ae;
     pthread_t tid;

@@ -23,7 +23,8 @@
 #include <ctype.h>
 #include <sys/eventfd.h>
 
-iothread **io_threads;
+#define IO_THREADS_MAX_NUM 16
+static iothread io_threads[IO_THREADS_MAX_NUM];
 
 static void setProtocolError(const char *errstr, client *c);
 static void pauseClientsByClient(mstime_t end, int isPauseClientAll);
@@ -1447,7 +1448,7 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
         return;
     }
 
-    iothread *iot = io_threads[c->id % (server.io_threads_num - 1)];
+    iothread *iot = &io_threads[c->id % (server.io_threads_num - 1)];
     // printf("add client to iothread %d, %p\n", c->id % (server.io_threads_num - 1), iot);
     pthread_mutex_lock(&iot->read_mutex);
     iojob *job = zmalloc(sizeof(*job));
@@ -2767,7 +2768,7 @@ int processInputBuffer(client *c) {
 }
 
 iothread *getIOThreadByClient(client *c) {
-    return io_threads[c->id % (server.io_threads_num - 1)];
+    return &io_threads[c->id % (server.io_threads_num - 1)];
 }
 
 void readQueryFromClient(connection *conn) {
@@ -2910,7 +2911,7 @@ done:
     beforeNextClient(c);
 
     if (!c->argv && listLength(c->argv_list)) {
-        iothread *iot = io_threads[c->id % (server.io_threads_num - 1)];
+        iothread *iot = &io_threads[c->id % (server.io_threads_num - 1)];
         c->in_exec = 1;
         listAddNodeTail(iot->in_exec_clients, c);
         // printf("c->argc: %d\n", c->argc);
@@ -4382,7 +4383,6 @@ void processEventsWhileBlocked(void) {
  * Threaded I/O
  * ========================================================================== */
 
-#define IO_THREADS_MAX_NUM 128
 
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) threads_pending {
     redisAtomic unsigned long value;
@@ -4491,9 +4491,9 @@ void initThreadedIO(void) {
     }
 
     /* Spawn and initialize the I/O threads. */
-    io_threads = zmalloc(sizeof(*io_threads) * (server.io_threads_num - 1));
+    // io_threads = zmalloc(sizeof(*io_threads) * (server.io_threads_num - 1));
     for (int i = 0; i < server.io_threads_num - 1; i++) {
-        iothread *iot = zmalloc(sizeof(*iot));
+        iothread *iot = &io_threads[i];
         iot->id = i;
         iot->ae = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
         iot->read_jobs = listCreate();
@@ -4525,7 +4525,7 @@ void initThreadedIO(void) {
             exit(1);
         }
         // printf("%p\n", iot);
-        io_threads[i] = iot;
+        // io_threads[i] = iot;
     }
     // server.io_threads_num = 1;
 }
@@ -4533,15 +4533,15 @@ void initThreadedIO(void) {
 void killIOThreads(void) {
     int err, j;
     for (j = 0; j < server.io_threads_num; j++) {
-        if (io_threads[j]->tid == pthread_self()) continue;
-        if (io_threads[j]->tid && pthread_cancel(io_threads[j]->tid) == 0) {
-            if ((err = pthread_join(io_threads[j]->tid,NULL)) != 0) {
+        if (io_threads[j].tid == pthread_self()) continue;
+        if (io_threads[j].tid && pthread_cancel(io_threads[j].tid) == 0) {
+            if ((err = pthread_join(io_threads[j].tid,NULL)) != 0) {
                 serverLog(LL_WARNING,
                     "IO thread(tid:%lu) can not be joined: %s",
-                        (unsigned long)io_threads[j]->tid, strerror(err));
+                        (unsigned long)io_threads[j].tid, strerror(err));
             } else {
                 serverLog(LL_WARNING,
-                    "IO thread(tid:%lu) terminated",(unsigned long)io_threads[j]->tid);
+                    "IO thread(tid:%lu) terminated",(unsigned long)io_threads[j].tid);
             }
         }
     }
