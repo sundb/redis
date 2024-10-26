@@ -33,6 +33,29 @@ __thread sds thread_reusable_qb = NULL;
 __thread int thread_reusable_qb_used = 0; /* Avoid multiple clients using reusable query
                                          * buffer due to nested command execution. */
 
+/* I/O thread message actions, for messages in both directions. */
+#define IO_THREAD_ADD_CLIENT 1         /* Transfer a client to the I/O thread,
+                                        * which adds the client to its event
+                                        * loop. */
+#define IO_THREAD_REMOVE_CLIENT 2      /* Tell the I/O thread to remove the
+                                        * client from its event loop. The I/O
+                                        * thread replies with REMOVE_ACK. */
+#define IO_THREAD_REMOVE_ACK 4         /* From I/O to main thread. */
+#define IO_THREAD_PARSE_COMMAND 8      /* From main to I/O thread. */
+#define IO_THREAD_EXEC_COMMAND 16      /* From I/O to main thread. */
+#define IO_THREAD_SEND_REPLY 32        /* From main to I/O thread. */
+#define IO_THREAD_CLOSE_AFTER_REPLY 64 /* From main to I/O thread, together with
+                                        * SEND_REPLY. */
+#define IO_THREAD_CLOSED 128           /* From I/O to main thread. */
+
+/* I/O thread-local client flags, c->io_thread_flags */
+#define IO_THREAD_FLAG_PARSE_COMMAND 1 /* The I/O thread is allowed to parse a
+                                        * command. */
+#define IO_THREAD_FLAG_CLOSED 2        /* The socket is closed and the I/O
+                                        * thread has notified main. Ignore any
+                                        * messages except REMOVE_CLIENT. */
+#define IO_THREAD_FLAG_CLOSE_AFTER_REPLY 4 /* Close after sending reply. */
+
 /* Return the size consumed from the allocator, for the specified SDS string,
  * including internal fragmentation. This function is used in order to compute
  * the client output buffer size. */
@@ -4323,15 +4346,44 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) iothread {
     pthread_t tid;
     aeEventLoop *el;
 
-    /* Pipe to wake this thread from event loop sleep. */
-    int wakeup_efd;
+    /* Event to wake this thread from event loop sleep. */
     list *inbox;
+    pthread_mutex_t inbox_mutex;
+    int wakeup_inbox_efd;
+
+    /* Event to wake this main thread from event loop sleep. */
+    list *outbox;
+    pthread_mutex_t outbox_mutex;
+    int wakeup_outbox_efd; 
 } iothread;
 
+typedef struct {
+    client *client;
+    int action; /* Bits. */
+} io_thread_message;
+
 static iothread io_threads[IO_THREADS_MAX_NUM];
+static __thread list *pending_inbox;
 
 static inline void IOThreadHandleMessages(iothread *iot) {
+    pthread_mutex_lock(&iot->inbox_mutex);
+    listFuse(pending_inbox, iot->inbox, 1);
+    pthread_mutex_unlock(&iot->inbox_mutex);
 
+    listNode *ln;
+    listIter li;
+    io_thread_message *message;
+    while((ln = listNext(&li))) {
+        message = listNodeValue(ln);
+        client *c = message->client;
+
+        if (message->action & IO_THREAD_ADD_CLIENT) {
+            /* Add client to current I/O thread's event loop. */
+            connSetEventLoop(c->conn, iot->el);
+            connSetReadHandler(c->conn, readQueryFromClient);
+            /* Do we need to send any ADD ACK? */
+        }
+    }
 }
 
 /* Called when the main thread wakes up the IO thread. */
@@ -4342,20 +4394,38 @@ void IOThreadWakeupReadable(aeEventLoop *el, int fd, void *privdata, int mask) {
 
     /* Empty the pipe. */
     uint64_t x;
-    while (read(fd, &x, sizeof(uint64_t)) == sizeof(uint64_t));
+    if (read(fd, &x, sizeof(uint64_t)) == sizeof(uint64_t)) {}
 
     /* Handle messages from the main thread. */
     IOThreadHandleMessages(iot);
 }
 
-void *IOThreadMain(void *myid) {
+static inline void handleMessagesFromIOThreads(iothread *iot) {
+
+}
+
+/* Handler for readable events on the pipe used by I/O thread to notify the main
+ * thread that there are messages to handle. */
+void mainThreadWakeupReadable(aeEventLoop *el, int fd, void *privdata, int mask) {
+    UNUSED(el);
+    UNUSED(mask);
+    iothread *iot = privdata;
+
+    /* Empty the pipe. */
+    uint64_t x;
+    if (read(fd, &x, sizeof(uint64_t)) == sizeof(uint64_t)) {}
+
+    /* Handle messages. */
+    handleMessagesFromIOThreads(iot);
+}
+
+void *IOThreadMain(void *ptr) {
     /* The ID is the thread number (from 0 to server.io_threads_num-1), and is
      * used by the thread to just manipulate a single sub-array of clients. */
-    long id = (unsigned long)myid;
     char thdname[16];
-    iothread *iot = &io_threads[id];
+    iothread *iot = ptr;
 
-    snprintf(thdname, sizeof(thdname), "io_thd_%ld", id);
+    snprintf(thdname, sizeof(thdname), "io_thd_%d", iot->id);
     redis_set_thread_title(thdname);
     redisSetCpuAffinity(server.server_cpulist);
     makeThreadKillable();
@@ -4367,6 +4437,7 @@ void *IOThreadMain(void *myid) {
 /* Initialize the data structures needed for threaded I/O. */
 void initThreadedIO(void) {
     server.io_threads_active = 0; /* We start with threads not active. */
+    pending_inbox = listCreate();
 
     /* Don't spawn any thread if the user selected a single thread:
      * we'll handle I/O directly from the main thread. */
@@ -4383,9 +4454,21 @@ void initThreadedIO(void) {
         iothread *iot = &io_threads[i];
         iot->id = i;
         iot->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
+
+        /* inbox */
         iot->inbox = listCreate();
-        iot->wakeup_efd = eventfd(0, EFD_NONBLOCK);
-         if (aeCreateFileEvent(iot->el, iot->wakeup_efd, AE_READABLE, IOThreadWakeupReadable, iot) != AE_OK) {
+        pthread_mutex_init(&iot->inbox_mutex, NULL);
+        iot->wakeup_inbox_efd = eventfd(0, EFD_NONBLOCK);
+         if (aeCreateFileEvent(iot->el, iot->wakeup_inbox_efd, AE_READABLE, IOThreadWakeupReadable, iot) != AE_OK) {
+            serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
+            exit(1);
+        }
+
+        /* outbox */
+        iot->outbox = listCreate();
+        pthread_mutex_init(&iot->outbox_mutex, NULL);
+        iot->wakeup_outbox_efd = eventfd(0, EFD_NONBLOCK);
+         if (aeCreateFileEvent(iot->el, iot->wakeup_outbox_efd, AE_READABLE, mainThreadWakeupReadable, iot) != AE_OK) {
             serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
             exit(1);
         }

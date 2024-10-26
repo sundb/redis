@@ -945,6 +945,19 @@ static int connTLSSetReadHandler(connection *conn, ConnectionCallbackFunc func) 
     return C_OK;
 }
 
+static int connTLSSetEventLoop(connection *conn_, aeEventLoop *el) {
+    tls_connection *conn = (tls_connection *)conn_;
+    // serverAssert(!conn->c.read_handler && !conn->c.write_handler);
+    // aeEventLoop *old_el = conn->c.el;
+    // int has_pending = (old_el && conn->pending_list_node != NULL);
+    // if (has_pending) connTLSPendingListDel(conn);
+    // TODO
+    conn->c.el = el;
+    // if (el && !old_el) has_pending = SSL_pending(conn->ssl);
+    // if (has_pending) connTLSPendingListAdd(conn);
+    return C_OK;
+}
+
 static void setBlockingTimeout(tls_connection *conn, long long timeout) {
     anetBlock(NULL, conn->c.fd);
     anetSendTimeout(NULL, conn->c.fd, timeout);
@@ -1122,6 +1135,7 @@ static ConnectionType CT_TLS = {
     .writev = connTLSWritev,
     .set_write_handler = connTLSSetWriteHandler,
     .set_read_handler = connTLSSetReadHandler,
+    .set_event_loop = connTLSSetEventLoop,
     .get_last_error = connTLSGetLastError,
     .sync_write = connTLSSyncWrite,
     .sync_read = connTLSSyncRead,
