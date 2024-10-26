@@ -435,7 +435,7 @@ typedef struct tls_connection {
     listNode *pending_list_node;
 } tls_connection;
 
-static connection *createTLSConnection(int client_side) {
+static connection *createTLSConnection(struct aeEventLoop *el, int client_side) {
     SSL_CTX *ctx = redis_tls_ctx;
     if (client_side && redis_tls_client_ctx)
         ctx = redis_tls_client_ctx;
@@ -444,11 +444,12 @@ static connection *createTLSConnection(int client_side) {
     conn->c.fd = -1;
     conn->c.iovcnt = IOV_MAX;
     conn->ssl = SSL_new(ctx);
+    conn->el = el;
     return (connection *) conn;
 }
 
-static connection *connCreateTLS(void) {
-    return createTLSConnection(1);
+static connection *connCreateTLS(struct aeEventLoop *el) {
+    return createTLSConnection(el, 1);
 }
 
 /* Fetch the latest OpenSSL error and store it in the connection */
@@ -575,17 +576,17 @@ static int updateStateAfterSSLIO(tls_connection *conn, int ret_value, int update
 }
 
 static void registerSSLEvent(tls_connection *conn, WantIOType want) {
-    int mask = aeGetFileEvents(server.el, conn->c.fd);
+    int mask = aeGetFileEvents(conn->el, conn->c.fd);
 
     switch (want) {
         case WANT_READ:
-            if (mask & AE_WRITABLE) aeDeleteFileEvent(server.el, conn->c.fd, AE_WRITABLE);
-            if (!(mask & AE_READABLE)) aeCreateFileEvent(server.el, conn->c.fd, AE_READABLE,
+            if (mask & AE_WRITABLE) aeDeleteFileEvent(conn->el, conn->c.fd, AE_WRITABLE);
+            if (!(mask & AE_READABLE)) aeCreateFileEvent(conn->el, conn->c.fd, AE_READABLE,
                         tlsEventHandler, conn);
             break;
         case WANT_WRITE:
-            if (mask & AE_READABLE) aeDeleteFileEvent(server.el, conn->c.fd, AE_READABLE);
-            if (!(mask & AE_WRITABLE)) aeCreateFileEvent(server.el, conn->c.fd, AE_WRITABLE,
+            if (mask & AE_READABLE) aeDeleteFileEvent(conn->el, conn->c.fd, AE_READABLE);
+            if (!(mask & AE_WRITABLE)) aeCreateFileEvent(conn->el, conn->c.fd, AE_WRITABLE,
                         tlsEventHandler, conn);
             break;
         default:
@@ -595,19 +596,19 @@ static void registerSSLEvent(tls_connection *conn, WantIOType want) {
 }
 
 static void updateSSLEvent(tls_connection *conn) {
-    int mask = aeGetFileEvents(server.el, conn->c.fd);
+    int mask = aeGetFileEvents(conn->el, conn->c.fd);
     int need_read = conn->c.read_handler || (conn->flags & TLS_CONN_FLAG_WRITE_WANT_READ);
     int need_write = conn->c.write_handler || (conn->flags & TLS_CONN_FLAG_READ_WANT_WRITE);
 
     if (need_read && !(mask & AE_READABLE))
-        aeCreateFileEvent(server.el, conn->c.fd, AE_READABLE, tlsEventHandler, conn);
+        aeCreateFileEvent(conn->el, conn->c.fd, AE_READABLE, tlsEventHandler, conn);
     if (!need_read && (mask & AE_READABLE))
-        aeDeleteFileEvent(server.el, conn->c.fd, AE_READABLE);
+        aeDeleteFileEvent(conn->el, conn->c.fd, AE_READABLE);
 
     if (need_write && !(mask & AE_WRITABLE))
-        aeCreateFileEvent(server.el, conn->c.fd, AE_WRITABLE, tlsEventHandler, conn);
+        aeCreateFileEvent(conn->el, conn->c.fd, AE_WRITABLE, tlsEventHandler, conn);
     if (!need_write && (mask & AE_WRITABLE))
-        aeDeleteFileEvent(server.el, conn->c.fd, AE_WRITABLE);
+        aeDeleteFileEvent(conn->el, conn->c.fd, AE_WRITABLE);
 }
 
 static void tlsHandleEvent(tls_connection *conn, int mask) {

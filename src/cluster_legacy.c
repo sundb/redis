@@ -1262,7 +1262,7 @@ void clusterAcceptHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
             return;
         }
 
-        connection *conn = connCreateAccepted(connTypeOfCluster(), cfd, &require_auth);
+        connection *conn = connCreateAccepted(server.el, connTypeOfCluster(), cfd, &require_auth);
 
         /* Make sure connection is not in an error state */
         if (connGetState(conn) != CONN_STATE_ACCEPTING) {
@@ -4583,7 +4583,7 @@ static int clusterNodeCronHandleReconnect(clusterNode *node, mstime_t handshake_
 
     if (node->link == NULL) {
         clusterLink *link = createClusterLink(node);
-        link->conn = connCreate(connTypeOfCluster());
+        link->conn = connCreate(server.el, connTypeOfCluster());
         connSetPrivateData(link->conn, link);
         if (connConnect(link->conn, node->ip, node->cport, server.bind_source_addr,
                     clusterLinkConnectHandler) == C_ERR) {

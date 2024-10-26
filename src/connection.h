@@ -60,8 +60,8 @@ typedef struct ConnectionType {
     int (*listen)(connListener *listener);
 
     /* create/shutdown/close connection */
-    connection* (*conn_create)(void);
-    connection* (*conn_create_accepted)(int fd, void *priv);
+    connection* (*conn_create)(struct aeEventLoop *el);
+    connection* (*conn_create_accepted)(struct aeEventLoop *el, int fd, void *priv);
     void (*shutdown)(struct connection *conn);
     void (*close)(struct connection *conn);
 
@@ -98,6 +98,7 @@ struct connection {
     short int refs;
     unsigned short int iovcnt;
     void *private_data;
+    struct aeEventLoop *el;
     ConnectionCallbackFunc conn_handler;
     ConnectionCallbackFunc write_handler;
     ConnectionCallbackFunc read_handler;
@@ -379,14 +380,14 @@ ConnectionType *connectionTypeUnix(void);
 int connectionIndexByType(const char *typename);
 
 /* Create a connection of specified type */
-static inline connection *connCreate(ConnectionType *ct) {
-    return ct->conn_create();
+static inline connection *connCreate(struct aeEventLoop *el, ConnectionType *ct) {
+    return ct->conn_create(el);
 }
 
 /* Create an accepted connection of specified type.
  * priv is connection type specified argument */
-static inline connection *connCreateAccepted(ConnectionType *ct, int fd, void *priv) {
-    return ct->conn_create_accepted(fd, priv);
+static inline connection *connCreateAccepted(struct aeEventLoop *el, ConnectionType *ct, int fd, void *priv) {
+    return ct->conn_create_accepted(el, fd, priv);
 }
 
 /* Configure a connection type. A typical case is to configure TLS.

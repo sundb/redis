@@ -317,7 +317,7 @@ migrateCachedSocket* migrateGetSocket(client *c, robj *host, robj *port, long ti
     }
 
     /* Create the connection */
-    conn = connCreate(connTypeOfCluster());
+    conn = connCreate(server.el, connTypeOfCluster());
     if (connBlockingConnect(conn, host->ptr, atoi(port->ptr), timeout)
         != C_OK) {
         addReplyError(c,"-IOERR error or timeout connecting to the client");
