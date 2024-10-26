@@ -33,6 +33,8 @@ __thread sds thread_reusable_qb = NULL;
 __thread int thread_reusable_qb_used = 0; /* Avoid multiple clients using reusable query
                                          * buffer due to nested command execution. */
 
+void transferClientToIOThread(client *c);
+
 /* I/O thread message actions, for messages in both directions. */
 #define IO_THREAD_ADD_CLIENT 1         /* Transfer a client to the I/O thread,
                                         * which adds the client to its event
@@ -1376,6 +1378,11 @@ void clientAcceptHandler(connection *conn) {
     moduleFireServerEvent(REDISMODULE_EVENT_CLIENT_CHANGE,
                           REDISMODULE_SUBEVENT_CLIENT_CHANGE_CONNECTED,
                           c);
+
+    if (server.io_threads_num) {
+        transferClientToIOThread(c);
+    }
+    serverLog(LL_DEBUG, "Client id=%ld accepted", (long)c->id);
 }
 
 void acceptCommonHandler(connection *conn, int flags, char *ip) {
@@ -4366,13 +4373,15 @@ static iothread io_threads[IO_THREADS_MAX_NUM];
 static __thread list *pending_inbox;
 
 static inline void IOThreadHandleMessages(iothread *iot) {
+    listNode *ln;
+    listIter li;
+    io_thread_message *message;
+
     pthread_mutex_lock(&iot->inbox_mutex);
     listFuse(pending_inbox, iot->inbox, 1);
     pthread_mutex_unlock(&iot->inbox_mutex);
 
-    listNode *ln;
-    listIter li;
-    io_thread_message *message;
+    listRewind(pending_inbox, &li);
     while((ln = listNext(&li))) {
         message = listNodeValue(ln);
         client *c = message->client;
@@ -4383,7 +4392,9 @@ static inline void IOThreadHandleMessages(iothread *iot) {
             connSetReadHandler(c->conn, readQueryFromClient);
             /* Do we need to send any ADD ACK? */
         }
+        zfree(message);
     }
+    listEmpty(pending_inbox);
 }
 
 /* Called when the main thread wakes up the IO thread. */
@@ -4398,6 +4409,44 @@ void IOThreadWakeupReadable(aeEventLoop *el, int fd, void *privdata, int mask) {
 
     /* Handle messages from the main thread. */
     IOThreadHandleMessages(iot);
+}
+
+static inline void sendMessageToIOThread(client *c, int action) {
+    if (c->flags & CLIENT_CLOSE_ASAP) {
+        /* Don't send any more message after initiating freeing. */
+        return;
+    }
+
+    io_thread_message *message = zmalloc(sizeof(*message));
+    message->client = c;
+    message->action = action;
+    iothread *iot = &io_threads[c->id % (server.io_threads_num - 1)];
+    pthread_mutex_lock(&iot->inbox_mutex);
+    listAddNodeTail(iot->inbox, message);
+    pthread_mutex_unlock(&iot->inbox_mutex);
+    uint64_t u = 1;
+    if (write(iot->wakeup_inbox_efd, &u, sizeof(uint64_t))) {}
+}
+
+/* Called by main thread to transfer the client to an I/O thread. The target
+ * thread is chosen using round-robin. */
+void transferClientToIOThread(client *c) {
+    /* The client must have a connection. No fake clients allowed. */
+    serverAssert(c->conn);
+
+    /* Remove from main's event loop. */
+    connSetReadHandler(c->conn, NULL);
+    connSetWriteHandler(c->conn, NULL);
+    connSetEventLoop(c->conn, NULL);
+
+    /* Lazy initialization of I/O thread specific client data. */
+    // c->io_reply_list = listCreate();
+    // listSetFreeMethod(c->io_reply_list, freeClientReplyValue);
+    // listSetDupMethod(c->io_reply_list, dupClientReplyValue);
+
+    /* Transfer to thread and let the thread parse a command. */
+    int action = IO_THREAD_ADD_CLIENT | IO_THREAD_PARSE_COMMAND;
+    sendMessageToIOThread(c, action);
 }
 
 static inline void handleMessagesFromIOThreads(iothread *iot) {
@@ -4424,6 +4473,7 @@ void *IOThreadMain(void *ptr) {
      * used by the thread to just manipulate a single sub-array of clients. */
     char thdname[16];
     iothread *iot = ptr;
+    pending_inbox = listCreate();
 
     snprintf(thdname, sizeof(thdname), "io_thd_%d", iot->id);
     redis_set_thread_title(thdname);
@@ -4437,7 +4487,6 @@ void *IOThreadMain(void *ptr) {
 /* Initialize the data structures needed for threaded I/O. */
 void initThreadedIO(void) {
     server.io_threads_active = 0; /* We start with threads not active. */
-    pending_inbox = listCreate();
 
     /* Don't spawn any thread if the user selected a single thread:
      * we'll handle I/O directly from the main thread. */
