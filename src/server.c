@@ -1036,35 +1036,35 @@ void clientsCron(void) {
     ClientsPeakMemOutput[zeroidx] = 0;
 
 
-    while(listLength(server.clients) && iterations--) {
-        client *c;
-        listNode *head;
+    // while(listLength(server.clients) && iterations--) {
+    //     client *c;
+    //     listNode *head;
 
-        /* Take the current head, process, and then rotate the head to tail.
-         * This way we can fairly iterate all clients step by step. */
-        head = listFirst(server.clients);
-        c = listNodeValue(head);
-        listRotateHeadToTail(server.clients);
-        /* The following functions do different service checks on the client.
-         * The protocol is that they return non-zero if the client was
-         * terminated. */
-        if (clientsCronHandleTimeout(c,now)) continue;
-        if (clientsCronResizeQueryBuffer(c)) continue;
-        if (clientsCronResizeOutputBuffer(c,now)) continue;
+    //     /* Take the current head, process, and then rotate the head to tail.
+    //      * This way we can fairly iterate all clients step by step. */
+    //     head = listFirst(server.clients);
+    //     c = listNodeValue(head);
+    //     listRotateHeadToTail(server.clients);
+    //     /* The following functions do different service checks on the client.
+    //      * The protocol is that they return non-zero if the client was
+    //      * terminated. */
+    //     if (clientsCronHandleTimeout(c,now)) continue;
+    //     if (clientsCronResizeQueryBuffer(c)) continue;
+    //     if (clientsCronResizeOutputBuffer(c,now)) continue;
 
-        if (clientsCronTrackExpansiveClients(c, curr_peak_mem_usage_slot)) continue;
+    //     if (clientsCronTrackExpansiveClients(c, curr_peak_mem_usage_slot)) continue;
 
-        /* Iterating all the clients in getMemoryOverheadData() is too slow and
-         * in turn would make the INFO command too slow. So we perform this
-         * computation incrementally and track the (not instantaneous but updated
-         * to the second) total memory used by clients using clientsCron() in
-         * a more incremental way (depending on server.hz).
-         * If client eviction is enabled, update the bucket as well. */
-        if (!updateClientMemUsageAndBucket(c))
-            updateClientMemoryUsage(c);
+    //     /* Iterating all the clients in getMemoryOverheadData() is too slow and
+    //      * in turn would make the INFO command too slow. So we perform this
+    //      * computation incrementally and track the (not instantaneous but updated
+    //      * to the second) total memory used by clients using clientsCron() in
+    //      * a more incremental way (depending on server.hz).
+    //      * If client eviction is enabled, update the bucket as well. */
+    //     if (!updateClientMemUsageAndBucket(c))
+    //         updateClientMemoryUsage(c);
 
-        if (closeClientOnOutputBufferLimitReached(c, 0)) continue;
-    }
+    //     if (closeClientOnOutputBufferLimitReached(c, 0)) continue;
+    // }
 }
 
 /* This function handles 'background' operations we are required to do

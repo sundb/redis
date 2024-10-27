@@ -33,7 +33,9 @@ __thread sds thread_reusable_qb = NULL;
 __thread int thread_reusable_qb_used = 0; /* Avoid multiple clients using reusable query
                                          * buffer due to nested command execution. */
 
-void transferClientToIOThread(client *c);
+static inline void transferClientToIOThread(client *c);
+static inline int isClientHandledByIOThread(client *c);
+static inline void IOThreadMessageToMain(client *c, int action);
 
 /* I/O thread message actions, for messages in both directions. */
 #define IO_THREAD_ADD_CLIENT 1         /* Transfer a client to the I/O thread,
@@ -176,6 +178,7 @@ client *createClient(connection *conn) {
     c->qb_pos = 0;
     c->querybuf = NULL;
     c->querybuf_peak = 0;
+    c->io_thread_index = -1;
     c->reqtype = 0;
     c->argc = 0;
     c->argv = NULL;
@@ -2658,7 +2661,7 @@ int processInputBuffer(client *c) {
 
         /* Don't process more buffers from clients that have already pending
          * commands to execute in c->argv. */
-        if (c->flags & CLIENT_PENDING_COMMAND) break;
+        // if (c->flags & CLIENT_PENDING_COMMAND) break;
 
         /* Don't process input from the master while there is a busy script
          * condition on the slave. We want just to accumulate the replication
@@ -2697,9 +2700,15 @@ int processInputBuffer(client *c) {
             /* If we are in the context of an I/O thread, we can't really
              * execute the command here. All we can do is to flag the client
              * as one that needs to process the command. */
-            if (io_threads_op != IO_THREADS_OP_IDLE) {
-                serverAssert(io_threads_op == IO_THREADS_OP_READ);
+            if (isClientHandledByIOThread(c)) {
                 c->flags |= CLIENT_PENDING_COMMAND;
+                connSetReadHandler(c->conn, NULL);
+                IOThreadMessageToMain(c, IO_THREAD_EXEC_COMMAND);
+                /* For clients not handled by an I/O thread, resize query buffer is
+                 * done in clientsCron, but for I/O thread we don't have that (yet)
+                 * so we do it after parsing a full command. */
+                // todo
+                // clientsCronResizeQueryBuffer(c);
                 break;
             }
 
@@ -2740,8 +2749,8 @@ int processInputBuffer(client *c) {
     /* Update client memory usage after processing the query buffer, this is
      * important in case the query buffer is big and wasn't drained during
      * the above loop (because of partially sent big commands). */
-    if (io_threads_op == IO_THREADS_OP_IDLE)
-        updateClientMemUsageAndBucket(c);
+    // if (io_threads_op == IO_THREADS_OP_IDLE)
+    //     updateClientMemUsageAndBucket(c);
 
     return C_OK;
 }
@@ -4387,11 +4396,20 @@ static inline void IOThreadHandleMessages(iothread *iot) {
         client *c = message->client;
 
         if (message->action & IO_THREAD_ADD_CLIENT) {
+            // printf("IOThreadHandleMessages: IO_THREAD_ADD_CLIENT\n");
             /* Add client to current I/O thread's event loop. */
             connSetEventLoop(c->conn, iot->el);
             connSetReadHandler(c->conn, readQueryFromClient);
             /* Do we need to send any ADD ACK? */
         }
+
+        if (message->action & IO_THREAD_SEND_REPLY) {
+            // printf("IOThreadHandleMessages: IO_THREAD_SEND_REPLY\n");
+            /* Add client to current I/O thread's event loop. */
+            connSetReadHandler(c->conn, readQueryFromClient); 
+            connSetWriteHandler(c->conn, sendReplyToClient); 
+        }
+
         zfree(message);
     }
     listEmpty(pending_inbox);
@@ -4420,7 +4438,7 @@ static inline void sendMessageToIOThread(client *c, int action) {
     io_thread_message *message = zmalloc(sizeof(*message));
     message->client = c;
     message->action = action;
-    iothread *iot = &io_threads[c->id % (server.io_threads_num - 1)];
+    iothread *iot = &io_threads[c->io_thread_index];
     pthread_mutex_lock(&iot->inbox_mutex);
     listAddNodeTail(iot->inbox, message);
     pthread_mutex_unlock(&iot->inbox_mutex);
@@ -4428,9 +4446,28 @@ static inline void sendMessageToIOThread(client *c, int action) {
     if (write(iot->wakeup_inbox_efd, &u, sizeof(uint64_t))) {}
 }
 
+static inline void IOThreadMessageToMain(client *c, int action) {
+    // printf("IOThreadMessageToMain\n");
+    /* To prevent multiple I/O threads from writing to the SPSC queue at the
+     * same time, we use a mutex. TODO: Use an MPSC queue and no mutex. */
+    iothread *iot = &io_threads[c->io_thread_index];
+    io_thread_message *message = zmalloc(sizeof(*message));
+    message->client = c;
+    message->action = action;
+    pthread_mutex_lock(&iot->outbox_mutex);
+    listAddNodeTail(iot->outbox, message);
+    pthread_mutex_unlock(&iot->outbox_mutex);
+    uint64_t u = 1;
+    if (write(iot->wakeup_outbox_efd, &u, sizeof(uint64_t))) {}
+}
+
+static inline int isClientHandledByIOThread(client *c) {
+    return c->io_thread_index != -1;
+}
+
 /* Called by main thread to transfer the client to an I/O thread. The target
  * thread is chosen using round-robin. */
-void transferClientToIOThread(client *c) {
+static inline void transferClientToIOThread(client *c) {
     /* The client must have a connection. No fake clients allowed. */
     serverAssert(c->conn);
 
@@ -4446,11 +4483,35 @@ void transferClientToIOThread(client *c) {
 
     /* Transfer to thread and let the thread parse a command. */
     int action = IO_THREAD_ADD_CLIENT | IO_THREAD_PARSE_COMMAND;
+    c->io_thread_index = c->id % (server.io_threads_num - 1);
     sendMessageToIOThread(c, action);
 }
 
 static inline void handleMessagesFromIOThreads(iothread *iot) {
+    // printf("handleMessagesFromIOThreads\n");
+    listNode *ln;
+    listIter li;
+    io_thread_message *message;
 
+    pthread_mutex_lock(&iot->outbox_mutex);
+    listFuse(pending_inbox, iot->outbox, 1);
+    pthread_mutex_unlock(&iot->outbox_mutex);
+    // printf("handleMessagesFromIOThreads 11111111\n");
+
+    listRewind(pending_inbox, &li);
+    while((ln = listNext(&li))) {
+        message = listNodeValue(ln);
+        client *c = message->client;
+        // printf("handleMessagesFromIOThreads, action: %d\n", message->action);
+
+        if (message->action & IO_THREAD_EXEC_COMMAND) {
+            // printf("handleMessagesFromIOThreads, IO_THREAD_EXEC_COMMAND\n");
+            processCommandAndResetClient(c);
+            sendMessageToIOThread(c, IO_THREAD_SEND_REPLY);
+        }
+        zfree(message);
+    }
+    listEmpty(pending_inbox);
 }
 
 /* Handler for readable events on the pipe used by I/O thread to notify the main
@@ -4482,6 +4543,7 @@ void *IOThreadMain(void *ptr) {
 
     aeMain(iot->el);
     aeDeleteEventLoop(iot->el);
+    return NULL;
 }
 
 /* Initialize the data structures needed for threaded I/O. */
