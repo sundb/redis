@@ -2709,34 +2709,32 @@ int processInputBuffer(client *c) {
             //     break;
             // }
 
-            // printf("===============================\n");
-            // for (int i = 0; i < c->argc; i++) {
-            //     printf("%p, [%d]: %s\n", pthread_self(), i, c->argv[i]->ptr);
-            // }
-            // printf("===============================\n");
-
-
-            CommandArgs *ca = zmalloc(sizeof(CommandArgs));
-            ca->argc = c->argc;
-            ca->argv_len_sum = c->argv_len_sum;
-            // ca->argv_len = c->argv_len;
-            ca->argv = c->argv;
-            // printf("%s\n", c->argv[0]->ptr);
-
-            c->argc = 0;
-            c->argv_len_sum = 0;
-            c->argv_len = 0;
-            c->argv = NULL;
-            listAddNodeTail(c->argv_list, ca);
-            // break;
-
-            /* We are finally ready to execute the command. */
+            // /* We are finally ready to execute the command. */
             // if (processCommandAndResetClient(c) == C_ERR) {
             //     /* If the client is no longer valid, we avoid exiting this
             //      * loop and trimming the client buffer later. So we return
             //      * ASAP in that case. */
             //     return C_ERR;
             // }
+
+            iothread *iot = &io_threads[c->id % (server.io_threads_num - 1)];
+            c->in_exec = 1;
+            listAddNodeTail(iot->in_exec_clients, c);
+            pthread_mutex_lock(&iot->outbox_mutex);
+            listAddNodeTail(iot->outbox, c);
+            connSetReadHandler(c->conn, NULL);
+            pthread_mutex_unlock(&iot->outbox_mutex);
+
+            int sleeping;
+            atomicGetWithSync(server.sleeping, sleeping);
+            if (sleeping) {
+                /* Wake the thread using pipe. */
+                atomicSet(server.sleeping, 0);
+                uint64_t u = 1;
+                if (write(iot->outbox_efd, &u, sizeof(uint64_t))) {}
+            }
+
+            break;
         }
     }
 
@@ -2915,19 +2913,6 @@ done:
         resetReusableQueryBuf(c);
     }
     beforeNextClient(c);
-
-    if (!c->argv && listLength(c->argv_list)) {
-        iothread *iot = &io_threads[c->id % (server.io_threads_num - 1)];
-        c->in_exec = 1;
-        listAddNodeTail(iot->in_exec_clients, c);
-        // printf("c->argc: %d\n", c->argc);
-        pthread_mutex_lock(&iot->outbox_mutex);
-        listAddNodeTail(iot->outbox, c);
-        uint64_t u = 1;
-        if (write(iot->outbox_efd, &u, sizeof(uint64_t))) {}
-        connSetReadHandler(conn, NULL);
-        pthread_mutex_unlock(&iot->outbox_mutex);
-    }
 }
 
 
@@ -4414,10 +4399,7 @@ static inline void setIOPendingCount(int i, unsigned long count) {
     atomicSetWithSync(io_threads_pending[i].value, count);
 }
 
-void ioBeforeSlee(struct aeEventLoop *el) {
-    // printf("ioBeforeSlee\n");
-    iothread *iot = el->privdata;
-
+void IOThreadHandleMessages(iothread *iot) {
     listIter li;
     listNode *ln;
     listRewind(iot->in_exec_clients,&li);
@@ -4432,6 +4414,20 @@ void ioBeforeSlee(struct aeEventLoop *el) {
     }
 }
 
+void ioThreadBeforeSleep(struct aeEventLoop *el) {
+    iothread *iot = el->privdata;
+
+    IOThreadHandleMessages(iot);
+    atomicSetWithSync(iot->sleeping, 1);
+    IOThreadHandleMessages(iot);
+}
+
+void ioThreadAfterSleep(struct aeEventLoop *el) {
+    UNUSED(el);
+    iothread *t = el->privdata;
+    atomicSet(t->sleeping, 0);
+}
+
 void *IOThreadMain(void *ptr) {
     /* The ID is the thread number (from 0 to server.io_threads_num-1), and is
      * used by the thread to just manipulate a single sub-array of clients. */
@@ -4443,7 +4439,8 @@ void *IOThreadMain(void *ptr) {
     redisSetCpuAffinity(server.server_cpulist);
     makeThreadKillable();
     iot->el->privdata = iot;
-    aeSetBeforeSleepProc(iot->el, ioBeforeSlee);
+    aeSetBeforeSleepProc(iot->el, ioThreadBeforeSleep);
+    aeSetAfterSleepProc(iot->el, ioThreadAfterSleep);
     aeMain(iot->el);
     return NULL;
 }
@@ -4504,11 +4501,9 @@ void initThreadedIO(void) {
         iot->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
         iot->inbox = listCreate();
         iot->in_exec_clients = listCreate();
+        atomicSet(iot->sleeping, 0);
         pthread_mutex_init(&iot->inbox_mutex, NULL);
         iot->inbox_efd = eventfd(0, EFD_NONBLOCK);
-        // if (anetPipe(iot->read_pipefd, O_NONBLOCK, O_NONBLOCK) == -1) {
-        //     serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
-        // }
         if (aeCreateFileEvent(iot->el, iot->inbox_efd, AE_READABLE, handleJobs, iot) != AE_OK) {
             serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
             exit(1);
@@ -4517,9 +4512,6 @@ void initThreadedIO(void) {
         iot->outbox = listCreate();
         pthread_mutex_init(&iot->outbox_mutex, NULL);
         iot->outbox_efd = eventfd(0, EFD_NONBLOCK);
-        // if (anetPipe(iot->write_, O_NONBLOCK, O_NONBLOCK) == -1) {
-        //     serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
-        // }
         if (aeCreateFileEvent(server.el, iot->outbox_efd, AE_READABLE, handleExecute, iot) != AE_OK) {
             serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
             exit(1);
@@ -4530,10 +4522,7 @@ void initThreadedIO(void) {
             serverLog(LL_WARNING,"Fatal: Can't initialize IO thread.");
             exit(1);
         }
-        // printf("%p\n", iot);
-        // io_threads[i] = iot;
     }
-    // server.io_threads_num = 1;
 }
 
 void killIOThreads(void) {

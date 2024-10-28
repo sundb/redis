@@ -1789,6 +1789,18 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     /* Disconnect some clients if they are consuming too much memory. */
     evictClients();
 
+    if (server.io_threads_num) {
+        /* Empty the inbox from I/O threads. */
+        handleMessagesFromIOThreads();
+        atomicSetWithSync(server.sleeping, 1);
+        /* Handle any messages sent before we set the sleeping flag. */
+        handleMessagesFromIOThreads();
+        if (listLength(server.clients_pending_write) > 0) {
+            /* We need to send these after fsynching the AOF next time. */
+            dont_sleep = 1;
+        }
+    }
+
     /* Record cron time in beforeSleep. */
     monotime duration_after_write = getMonotonicUs() - cron_start_time_after_write;
 
@@ -1859,6 +1871,8 @@ void afterSleep(struct aeEventLoop *eventLoop) {
     if (!ProcessingEventsWhileBlocked) {
         server.cmd_time_snapshot = server.mstime;
     }
+
+    atomicSet(server.sleeping, 0);
 }
 
 /* =========================== Server initialization ======================== */
@@ -2555,20 +2569,19 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
     listRewind(l, &li);
     while ((ln = listNext(&li))) {
         client *c = listNodeValue(ln);;
-        while ((ln1 = listFirst(c->argv_list))) {
-            CommandArgs *ca = listNodeValue(ln1);
-            c->argc = ca->argc;
-            c->argv = ca->argv;
-            c->argv_len_sum = ca->argv_len_sum;
-            serverAssert(processCommandAndResetClient(c) == C_OK);
-            zfree(ca);
-            listDelNode(c->argv_list, ln1);
-        }
+        serverAssert(processCommandAndResetClient(c) == C_OK);
         c->in_exec = 0;
     }
+    listEmpty(l);
 
-    uint64_t u = 1;
-    if (write(iot->inbox_efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {}
+    int sleeping;
+    atomicGetWithSync(iot->sleeping, sleeping);
+    if (sleeping) {
+        /* Wake the thread using pipe. */
+        atomicSet(iot->sleeping, 0);
+        uint64_t u = 1;
+        if (write(iot->inbox_efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {}
+    }
 }
 
 /* Resets the stats that we expose via INFO or other means that we want
@@ -2726,6 +2739,7 @@ void initServer(void) {
             strerror(errno));
         exit(1);
     }
+    atomicSet(server.sleeping, 0);
     server.db = zmalloc(sizeof(redisDb)*server.dbnum);
 
     /* Create the Redis databases, and initialize other internal state. */

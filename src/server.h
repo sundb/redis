@@ -439,6 +439,7 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) iothread {
     int outbox_efd;
 
     list *in_exec_clients;
+    int sleeping;
 } iothread;
 
 /* IO jobs queue functions - Used to send jobs from the main-thread to the IO thread. */
@@ -447,8 +448,6 @@ typedef struct iojob {
     job_handler handler;
     void *data;
 } iojob;
-
-
 
 /* Slave replication state. Used in server.repl_state for slaves to remember
  * what to do next. */
@@ -1182,12 +1181,6 @@ typedef struct {
 } clientReqResInfo;
 #endif
 
-typedef struct CommandArgs {
-    int argc;               /* Num of arguments of current command. */
-    robj **argv;            /* Arguments of current command. */
-    size_t argv_len_sum;    /* Sum of lengths of objects in argv list. */
-} CommandArgs;
-
 typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
@@ -1599,6 +1592,7 @@ struct redisServer {
     dict *commands;             /* Command table */
     dict *orig_commands;        /* Command table before command renaming. */
     aeEventLoop *el;
+    redisAtomic int sleeping; /* Is set to 1 during event loop pull. */
     rax *errors;                /* Errors table */
     int errors_enabled;         /* If true, errorstats is enabled, and we will add new errors. */
     unsigned int lruclock; /* Clock for LRU eviction */
