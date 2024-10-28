@@ -1236,7 +1236,7 @@ static void clusterConnAcceptHandler(connection *conn) {
     connSetPrivateData(conn, link);
 
     /* Register read handler */
-    connSetReadHandler(server.el, conn, clusterReadHandler);
+    connSetReadHandler(conn, clusterReadHandler);
 }
 
 #define MAX_CLUSTER_ACCEPTS_PER_CALL 1000
@@ -1262,7 +1262,7 @@ void clusterAcceptHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
             return;
         }
 
-        connection *conn = connCreateAccepted(connTypeOfCluster(), cfd, &require_auth);
+        connection *conn = connCreateAccepted(server.el, connTypeOfCluster(), cfd, &require_auth);
 
         /* Make sure connection is not in an error state */
         if (connGetState(conn) != CONN_STATE_ACCEPTING) {
@@ -3309,7 +3309,7 @@ void clusterWriteHandler(connection *conn) {
     }
 
     if (listLength(link->send_msg_queue) == 0)
-        connSetWriteHandler(server.el, link->conn, NULL);
+        connSetWriteHandler(link->conn, NULL);
 }
 
 /* A connect handler that gets called when a connection to another node
@@ -3329,7 +3329,7 @@ void clusterLinkConnectHandler(connection *conn) {
     }
 
     /* Register a read handler from now on */
-    connSetReadHandler(server.el, conn, clusterReadHandler);
+    connSetReadHandler(conn, clusterReadHandler);
 
     /* Queue a PING in the new connection ASAP: this is crucial
      * to avoid false positives in failure detection.
@@ -3454,7 +3454,7 @@ void clusterSendMessage(clusterLink *link, clusterMsgSendBlock *msgblock) {
         return;
     }
     if (listLength(link->send_msg_queue) == 0 && msgblock->msg.totlen != 0)
-        connSetWriteHandlerWithBarrier(server.el, link->conn, clusterWriteHandler, 1);
+        connSetWriteHandlerWithBarrier(link->conn, clusterWriteHandler, 1);
 
     listAddNodeTail(link->send_msg_queue, msgblock);
     msgblock->refcount++;
@@ -4583,7 +4583,7 @@ static int clusterNodeCronHandleReconnect(clusterNode *node, mstime_t handshake_
 
     if (node->link == NULL) {
         clusterLink *link = createClusterLink(node);
-        link->conn = connCreate(connTypeOfCluster());
+        link->conn = connCreate(server.el, connTypeOfCluster());
         connSetPrivateData(link->conn, link);
         if (connConnect(link->conn, node->ip, node->cport, server.bind_source_addr,
                     clusterLinkConnectHandler) == C_ERR) {

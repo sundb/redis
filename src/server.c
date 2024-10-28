@@ -2595,8 +2595,8 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
     //     listAddNodeTail(iot->read_jobs, job);
     // } 
 
-    // uint64_t u = 1;
-    // if (write(iot->read_efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {}
+    uint64_t u = 1;
+    if (write(iot->read_efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {}
     // pthread_mutex_unlock(&iot->read_mutex);
 }
 

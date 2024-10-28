@@ -232,7 +232,7 @@ void installClientWriteHandler(client *c) {
     {
         ae_barrier = 1;
     }
-    if (connSetWriteHandlerWithBarrier(server.el, c->conn, sendReplyToClient, ae_barrier) == C_ERR) {
+    if (connSetWriteHandlerWithBarrier(c->conn, sendReplyToClient, ae_barrier) == C_ERR) {
         freeClientAsync(c);
     }
 }
@@ -1362,14 +1362,15 @@ void clientAcceptHandler(connection *conn) {
 
 void handleBindClient(iothread *iot, void *data) {
     client *c = data;
-    connSetReadHandler(iot->ae, c->conn, readQueryFromClient);
+    connSetEventLoop(c->conn, iot->el);
+    connSetReadHandler(c->conn, readQueryFromClient);
 }
 
 void handleWriteClient(iothread *iot, void *data) {
-    // printf("handleWriteClient\n");
+    printf("handleWriteClient\n");
     client *c = data;
-    connSetWriteHandler(iot->ae, c->conn, sendReplyToClient);
-    connSetReadHandler(iot->ae, c->conn, readQueryFromClient);
+    connSetWriteHandler(c->conn, sendReplyToClient);
+    connSetReadHandler(c->conn, readQueryFromClient);
 }
 
 void acceptCommonHandler(connection *conn, int flags, char *ip) {
@@ -1447,6 +1448,11 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
         freeClient(connGetPrivateData(conn));
         return;
     }
+
+    /* Remove from main's event loop. */
+    connSetReadHandler(c->conn, NULL);
+    connSetWriteHandler(c->conn, NULL);
+    connSetEventLoop(c->conn, NULL);
 
     iothread *iot = &io_threads[c->id % (server.io_threads_num - 1)];
     // printf("add client to iothread %d, %p\n", c->id % (server.io_threads_num - 1), iot);
@@ -2125,7 +2131,7 @@ int writeToClient(client *c, int handler_installed) {
          * so we are fine. */
         if (handler_installed) {
             serverAssert(io_threads_op == IO_THREADS_OP_IDLE);
-            connSetWriteHandler(server.el, c->conn, NULL);
+            connSetWriteHandler(c->conn, NULL);
         }
 
         /* Close connection after entire reply has been sent. */
@@ -2919,7 +2925,7 @@ done:
         listAddNodeTail(iot->write_jobs, c);
         uint64_t u = 1;
         if (write(iot->write_efd, &u, sizeof(uint64_t))) {}
-        connSetReadHandler(iot->ae, conn, NULL);
+        connSetReadHandler(conn, NULL);
         pthread_mutex_unlock(&iot->write_mutex);
     }
 }
@@ -4418,8 +4424,8 @@ void ioBeforeSlee(struct aeEventLoop *el) {
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
         if (!c->in_exec) {
-            connSetWriteHandler(iot->ae, c->conn, sendReplyToClient);
-            connSetReadHandler(iot->ae, c->conn, readQueryFromClient); 
+            connSetWriteHandler(c->conn, sendReplyToClient);
+            connSetReadHandler(c->conn, readQueryFromClient); 
             listDelNode(iot->in_exec_clients,ln);
             continue;
         }
@@ -4436,9 +4442,9 @@ void *IOThreadMain(void *ptr) {
     redis_set_thread_title(thdname);
     redisSetCpuAffinity(server.server_cpulist);
     makeThreadKillable();
-    iot->ae->privdata = iot;
-    aeSetBeforeSleepProc(iot->ae, ioBeforeSlee);
-    aeMain(iot->ae);
+    iot->el->privdata = iot;
+    aeSetBeforeSleepProc(iot->el, ioBeforeSlee);
+    aeMain(iot->el);
     return NULL;
 }
 
@@ -4495,7 +4501,7 @@ void initThreadedIO(void) {
     for (int i = 0; i < server.io_threads_num - 1; i++) {
         iothread *iot = &io_threads[i];
         iot->id = i;
-        iot->ae = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
+        iot->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
         iot->read_jobs = listCreate();
         iot->in_exec_clients = listCreate();
         pthread_mutex_init(&iot->read_mutex, NULL);
@@ -4503,7 +4509,7 @@ void initThreadedIO(void) {
         // if (anetPipe(iot->read_pipefd, O_NONBLOCK, O_NONBLOCK) == -1) {
         //     serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
         // }
-        if (aeCreateFileEvent(iot->ae, iot->read_efd, AE_READABLE, handleJobs, iot) != AE_OK) {
+        if (aeCreateFileEvent(iot->el, iot->read_efd, AE_READABLE, handleJobs, iot) != AE_OK) {
             serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
             exit(1);
         }

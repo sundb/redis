@@ -74,18 +74,19 @@ static int connUnixListen(connListener *listener) {
     return C_OK;
 }
 
-static connection *connCreateUnix(void) {
+static connection *connCreateUnix(struct aeEventLoop *el) {
     connection *conn = zcalloc(sizeof(connection));
     conn->type = &CT_Unix;
     conn->fd = -1;
     conn->iovcnt = IOV_MAX;
+    conn->el = el;
 
     return conn;
 }
 
-static connection *connCreateAcceptedUnix(int fd, void *priv) {
+static connection *connCreateAcceptedUnix(struct aeEventLoop *el, int fd, void *priv) {
     UNUSED(priv);
-    connection *conn = connCreateUnix();
+    connection *conn = connCreateUnix(el);
     conn->fd = fd;
     conn->state = CONN_STATE_ACCEPTING;
     return conn;
@@ -107,7 +108,7 @@ static void connUnixAcceptHandler(aeEventLoop *el, int fd, void *privdata, int m
             return;
         }
         serverLog(LL_VERBOSE,"Accepted connection to %s", server.unixsocket);
-        acceptCommonHandler(connCreateAcceptedUnix(cfd, NULL),CLIENT_UNIX_SOCKET,NULL);
+        acceptCommonHandler(connCreateAcceptedUnix(el, cfd, NULL),CLIENT_UNIX_SOCKET,NULL);
     }
 }
 
@@ -135,12 +136,16 @@ static int connUnixRead(connection *conn, void *buf, size_t buf_len) {
     return connectionTypeTcp()->read(conn, buf, buf_len);
 }
 
-static int connUnixSetWriteHandler(struct aeEventLoop *el, connection *conn, ConnectionCallbackFunc func, int barrier) {
-    return connectionTypeTcp()->set_write_handler(el, conn, func, barrier);
+static int connUnixSetWriteHandler(connection *conn, ConnectionCallbackFunc func, int barrier) {
+    return connectionTypeTcp()->set_write_handler(conn, func, barrier);
 }
 
-static int connUnixSetReadHandler(struct aeEventLoop *el, connection *conn, ConnectionCallbackFunc func) {
-    return connectionTypeTcp()->set_read_handler(el, conn, func);
+static int connUnixSetReadHandler(connection *conn, ConnectionCallbackFunc func) {
+    return connectionTypeTcp()->set_read_handler(conn, func);
+}
+
+static int connUnixSetEventLoop(connection *conn, aeEventLoop *el) {
+    return connectionTypeTcp()->set_event_loop(conn, el);
 }
 
 static const char *connUnixGetLastError(connection *conn) {
@@ -192,6 +197,7 @@ static ConnectionType CT_Unix = {
     .read = connUnixRead,
     .set_write_handler = connUnixSetWriteHandler,
     .set_read_handler = connUnixSetReadHandler,
+    .set_event_loop = connUnixSetEventLoop,
     .get_last_error = connUnixGetLastError,
     .sync_write = connUnixSyncWrite,
     .sync_read = connUnixSyncRead,

@@ -53,11 +53,12 @@ static ConnectionType CT_Socket;
  * be embedded in different structs, not just client.
  */
 
-static connection *connCreateSocket(void) {
+static connection *connCreateSocket(struct aeEventLoop *el) {
     connection *conn = zcalloc(sizeof(connection));
     conn->type = &CT_Socket;
     conn->fd = -1;
     conn->iovcnt = IOV_MAX;
+    conn->el = el;
 
     return conn;
 }
@@ -72,9 +73,9 @@ static connection *connCreateSocket(void) {
  * is not in an error state (which is not possible for a socket connection,
  * but could but possible with other protocols).
  */
-static connection *connCreateAcceptedSocket(int fd, void *priv) {
+static connection *connCreateAcceptedSocket(struct aeEventLoop *el, int fd, void *priv) {
     UNUSED(priv);
-    connection *conn = connCreateSocket();
+    connection *conn = connCreateSocket(el);
     conn->fd = fd;
     conn->state = CONN_STATE_ACCEPTING;
     return conn;
@@ -198,7 +199,7 @@ static int connSocketAccept(connection *conn, ConnectionCallbackFunc accept_hand
  * always called before and not after the read handler in a single event
  * loop.
  */
-static int connSocketSetWriteHandler(struct aeEventLoop *el, connection *conn, ConnectionCallbackFunc func, int barrier) {
+static int connSocketSetWriteHandler(connection *conn, ConnectionCallbackFunc func, int barrier) {
     if (func == conn->write_handler) return C_OK;
 
     conn->write_handler = func;
@@ -207,9 +208,9 @@ static int connSocketSetWriteHandler(struct aeEventLoop *el, connection *conn, C
     else
         conn->flags &= ~CONN_FLAG_WRITE_BARRIER;
     if (!conn->write_handler)
-        aeDeleteFileEvent(el,conn->fd,AE_WRITABLE);
+        aeDeleteFileEvent(conn->el,conn->fd,AE_WRITABLE);
     else
-        if (aeCreateFileEvent(el,conn->fd,AE_WRITABLE,
+        if (aeCreateFileEvent(conn->el,conn->fd,AE_WRITABLE,
                     conn->type->ae_handler,conn) == AE_ERR) return C_ERR;
     return C_OK;
 }
@@ -217,15 +218,22 @@ static int connSocketSetWriteHandler(struct aeEventLoop *el, connection *conn, C
 /* Register a read handler, to be called when the connection is readable.
  * If NULL, the existing handler is removed.
  */
-static int connSocketSetReadHandler(struct aeEventLoop *el, connection *conn, ConnectionCallbackFunc func) {
+static int connSocketSetReadHandler(connection *conn, ConnectionCallbackFunc func) {
     if (func == conn->read_handler) return C_OK;
 
     conn->read_handler = func;
     if (!conn->read_handler)
-        aeDeleteFileEvent(el,conn->fd,AE_READABLE);
+        aeDeleteFileEvent(conn->el,conn->fd,AE_READABLE);
     else
-        if (aeCreateFileEvent(el,conn->fd,
+        if (aeCreateFileEvent(conn->el,conn->fd,
                     AE_READABLE,conn->type->ae_handler,conn) == AE_ERR) return C_ERR;
+    return C_OK;
+}
+
+/* Set event loop. Requires that no AE handler is installed. */
+static int connSocketSetEventLoop(connection *conn, aeEventLoop *el) {
+    serverAssert(!conn->read_handler && !conn->write_handler);
+    conn->el = el;
     return C_OK;
 }
 
@@ -304,7 +312,7 @@ static void connSocketAcceptHandler(aeEventLoop *el, int fd, void *privdata, int
             return;
         }
         serverLog(LL_VERBOSE,"Accepted %s:%d", cip, cport);
-        acceptCommonHandler(connCreateAcceptedSocket(cfd, NULL),0,cip);
+        acceptCommonHandler(connCreateAcceptedSocket(el, cfd, NULL),0,cip);
     }
 }
 
@@ -403,6 +411,7 @@ static ConnectionType CT_Socket = {
     .read = connSocketRead,
     .set_write_handler = connSocketSetWriteHandler,
     .set_read_handler = connSocketSetReadHandler,
+    .set_event_loop = connSocketSetEventLoop,
     .get_last_error = connSocketGetLastError,
     .sync_write = connSocketSyncWrite,
     .sync_read = connSocketSyncRead,

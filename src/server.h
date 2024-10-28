@@ -427,7 +427,7 @@ typedef enum blocking_type {
 
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) iothread {
     long id;
-    aeEventLoop *ae;
+    aeEventLoop *el;
     pthread_t tid;
 
     list *read_jobs;

@@ -60,8 +60,8 @@ typedef struct ConnectionType {
     int (*listen)(connListener *listener);
 
     /* create/shutdown/close connection */
-    connection* (*conn_create)(void);
-    connection* (*conn_create_accepted)(int fd, void *priv);
+    connection* (*conn_create)(struct aeEventLoop *el);
+    connection* (*conn_create_accepted)(struct aeEventLoop *el, int fd, void *priv);
     void (*shutdown)(struct connection *conn);
     void (*close)(struct connection *conn);
 
@@ -74,8 +74,9 @@ typedef struct ConnectionType {
     int (*write)(struct connection *conn, const void *data, size_t data_len);
     int (*writev)(struct connection *conn, const struct iovec *iov, int iovcnt);
     int (*read)(struct connection *conn, void *buf, size_t buf_len);
-    int (*set_write_handler)(struct aeEventLoop *el, struct connection *conn, ConnectionCallbackFunc handler, int barrier);
-    int (*set_read_handler)(struct aeEventLoop *el, struct connection *conn, ConnectionCallbackFunc handler);
+    int (*set_write_handler)(struct connection *conn, ConnectionCallbackFunc handler, int barrier);
+    int (*set_read_handler)(struct connection *conn, ConnectionCallbackFunc handler);
+    int (*set_event_loop)(struct connection *conn, aeEventLoop *el);
     const char *(*get_last_error)(struct connection *conn);
     ssize_t (*sync_write)(struct connection *conn, char *ptr, ssize_t size, long long timeout);
     ssize_t (*sync_read)(struct connection *conn, char *ptr, ssize_t size, long long timeout);
@@ -98,6 +99,7 @@ struct connection {
     short int refs;
     unsigned short int iovcnt;
     void *private_data;
+    struct aeEventLoop *el;
     ConnectionCallbackFunc conn_handler;
     ConnectionCallbackFunc write_handler;
     ConnectionCallbackFunc read_handler;
@@ -201,15 +203,21 @@ static inline int connRead(connection *conn, void *buf, size_t buf_len) {
 /* Register a write handler, to be called when the connection is writable.
  * If NULL, the existing handler is removed.
  */
-static inline int connSetWriteHandler(struct aeEventLoop *el, connection *conn, ConnectionCallbackFunc func) {
-    return conn->type->set_write_handler(el, conn, func, 0);
+static inline int connSetWriteHandler(connection *conn, ConnectionCallbackFunc func) {
+    return conn->type->set_write_handler(conn, func, 0);
 }
 
 /* Register a read handler, to be called when the connection is readable.
  * If NULL, the existing handler is removed.
  */
-static inline int connSetReadHandler(struct aeEventLoop *el, connection *conn, ConnectionCallbackFunc func) {
-    return conn->type->set_read_handler(el, conn, func);
+static inline int connSetReadHandler(connection *conn, ConnectionCallbackFunc func) {
+    return conn->type->set_read_handler(conn, func);
+}
+
+/* Set another event loop. Requires that no AE handler is installed in the
+ * current event loop. */
+static inline int connSetEventLoop(connection *conn, aeEventLoop *el) {
+    return conn->type->set_event_loop(conn, el);
 }
 
 /* Set a write handler, and possibly enable a write barrier, this flag is
@@ -217,8 +225,8 @@ static inline int connSetReadHandler(struct aeEventLoop *el, connection *conn, C
  * With barrier enabled, we never fire the event if the read handler already
  * fired in the same event loop iteration. Useful when you want to persist
  * things to disk before sending replies, and want to do that in a group fashion. */
-static inline int connSetWriteHandlerWithBarrier(struct aeEventLoop *el, connection *conn, ConnectionCallbackFunc func, int barrier) {
-    return conn->type->set_write_handler(el, conn, func, barrier);
+static inline int connSetWriteHandlerWithBarrier(connection *conn, ConnectionCallbackFunc func, int barrier) {
+    return conn->type->set_write_handler(conn, func, barrier);
 }
 
 static inline void connShutdown(connection *conn) {
@@ -379,14 +387,14 @@ ConnectionType *connectionTypeUnix(void);
 int connectionIndexByType(const char *typename);
 
 /* Create a connection of specified type */
-static inline connection *connCreate(ConnectionType *ct) {
-    return ct->conn_create();
+static inline connection *connCreate(struct aeEventLoop *el, ConnectionType *ct) {
+    return ct->conn_create(el);
 }
 
 /* Create an accepted connection of specified type.
  * priv is connection type specified argument */
-static inline connection *connCreateAccepted(ConnectionType *ct, int fd, void *priv) {
-    return ct->conn_create_accepted(fd, priv);
+static inline connection *connCreateAccepted(struct aeEventLoop *el, ConnectionType *ct, int fd, void *priv) {
+    return ct->conn_create_accepted(el, fd, priv);
 }
 
 /* Configure a connection type. A typical case is to configure TLS.
