@@ -430,13 +430,13 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) iothread {
     aeEventLoop *el;
     pthread_t tid;
 
-    list *read_jobs;
-    pthread_mutex_t read_mutex;
-    int read_efd;
+    list *inbox;
+    pthread_mutex_t inbox_mutex;
+    int inbox_efd;
 
-    list *write_jobs;
-    pthread_mutex_t write_mutex;
-    int write_efd;
+    list *outbox;
+    pthread_mutex_t outbox_mutex;
+    int outbox_efd;
 
     list *in_exec_clients;
 } iothread;

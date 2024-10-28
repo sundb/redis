@@ -2548,11 +2548,10 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
         exit(1);
     }
 
-    // printf("handleExecute\n");
-    pthread_mutex_lock(&iot->write_mutex);
-    list *l = iot->write_jobs;
-    iot->write_jobs = listCreate();
-    pthread_mutex_unlock(&iot->write_mutex);
+    pthread_mutex_lock(&iot->outbox_mutex);
+    list *l = iot->outbox;
+    iot->outbox= listCreate();
+    pthread_mutex_unlock(&iot->outbox_mutex);
     listRewind(l, &li);
     while ((ln = listNext(&li))) {
         client *c = listNodeValue(ln);;
@@ -2566,38 +2565,10 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
             listDelNode(c->argv_list, ln1);
         }
         c->in_exec = 0;
-
-        // iojob *job = zmalloc(sizeof(*job));
-        // job->handler = handleWriteClient;
-        // job->data = c;
-        // listAddNodeTail(iot->read_jobs, job);
-        // if (write(iot->read_pipefd[1],"A",1) != 1) {
-        //     /* Ignore the error, this is best-effort. */
-        // } 
     }
 
-    //     listIter li;
-    // listNode *ln;
-
-    // listRewind(reference, &li);
-    // while((ln = listNext(&li))) {
-    //     sds pattern = listNodeValue(ln);
-    // }
-
-    
-    // pthread_mutex_lock(&iot->read_mutex);
-    // listRewind(l, &li);
-    // while((ln = listNext(&li))) {
-    //     client *c = listNodeValue(ln);;
-    //     iojob *job = zmalloc(sizeof(*job));
-    //     job->handler = handleWriteClient;
-    //     job->data = c;
-    //     listAddNodeTail(iot->read_jobs, job);
-    // } 
-
     uint64_t u = 1;
-    if (write(iot->read_efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {}
-    // pthread_mutex_unlock(&iot->read_mutex);
+    if (write(iot->inbox_efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {}
 }
 
 /* Resets the stats that we expose via INFO or other means that we want
