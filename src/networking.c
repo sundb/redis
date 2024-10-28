@@ -26,6 +26,11 @@
 #define IO_THREADS_MAX_NUM 16
 static iothread io_threads[IO_THREADS_MAX_NUM];
 
+static list *main_thread_inbox;
+static list *main_thread_inbox_temp;
+static pthread_mutex_t main_thread_inbox_mutex;
+static int main_thread_inbox_efd; /* io-threads write wake up main */
+
 static void setProtocolError(const char *errstr, client *c);
 static void pauseClientsByClient(mstime_t end, int isPauseClientAll);
 int postponeClientRead(client *c);
@@ -2651,6 +2656,55 @@ int processPendingCommandAndInputBuffer(client *c) {
     return C_OK;
 }
 
+
+static void IOThreadMessageToMain(client *c) {
+    iothread *iot = &io_threads[c->id % (server.io_threads_num - 1)];
+    c->in_exec = 1;
+    listAddNodeTail(iot->in_exec_clients, c);
+
+    /* To prevent multiple I/O threads from writing to the SPSC queue at the
+     * same time, we use a mutex. TODO: Use an MPSC queue and no mutex. */
+    pthread_mutex_lock(&main_thread_inbox_mutex);
+    listAddNodeTail(main_thread_inbox, c);
+    pthread_mutex_unlock(&main_thread_inbox_mutex);
+
+    int sleeping;
+    atomicGetWithSync(server.sleeping, sleeping);
+    if (sleeping) {
+        /* Wake the thread using pipe. */
+        atomicSet(server.sleeping, 0);
+        uint64_t u = 1;
+        if (write(main_thread_inbox_efd, &u, sizeof(uint64_t))) {}
+    }
+}
+
+void handleMessagesFromIOThreads() {
+    pthread_mutex_lock(&main_thread_inbox_mutex);
+    listFuse(main_thread_inbox_temp, main_thread_inbox, 1);
+    pthread_mutex_unlock(&main_thread_inbox_mutex);
+
+    listIter li;
+    listNode *ln;
+    listRewind(main_thread_inbox_temp, &li);
+    while ((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);;
+        serverAssert(processCommandAndResetClient(c) == C_OK);
+        c->in_exec = 0;
+
+        iothread *iot = &io_threads[c->id % (server.io_threads_num - 1)];
+        int sleeping;
+        atomicGetWithSync(iot->sleeping, sleeping);
+        if (sleeping) {
+            /* Wake the thread using pipe. */
+            atomicSet(iot->sleeping, 0);
+            uint64_t u = 1;
+            if (write(iot->inbox_efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {}
+        }
+    }
+    listEmpty(main_thread_inbox_temp);
+}
+
+
 /* This function is called every time, in the client structure 'c', there is
  * more query buffer to process, because we read more data from the socket
  * or because a client was blocked and later reactivated, so there could be
@@ -2700,39 +2754,42 @@ int processInputBuffer(client *c) {
         if (c->argc == 0) {
             resetClient(c);
         } else {
-            /* If we are in the context of an I/O thread, we can't really
-             * execute the command here. All we can do is to flag the client
-             * as one that needs to process the command. */
-            // if (io_threads_op != IO_THREADS_OP_IDLE) {
-            //     serverAssert(io_threads_op == IO_THREADS_OP_READ);
-            //     c->flags |= CLIENT_PENDING_COMMAND;
-            //     break;
-            // }
+            /* If we are in the context of an I/O thread, we inform the main thread
+            * that this client has a command ready to execute. We can't parse
+            * another command until the main thread is done executing it. */
+            if (server.io_threads_num) {
+                IOThreadMessageToMain(c);
+                /* For clients not handled by an I/O thread, resize query buffer is
+                * done in clientsCron, but for I/O thread we don't have that (yet)
+                * so we do it after parsing a full command. */
+                // clientsCronResizeQueryBuffer(c);
+                break;
+            }
 
             // /* We are finally ready to execute the command. */
-            // if (processCommandAndResetClient(c) == C_ERR) {
-            //     /* If the client is no longer valid, we avoid exiting this
-            //      * loop and trimming the client buffer later. So we return
-            //      * ASAP in that case. */
-            //     return C_ERR;
-            // }
-
-            iothread *iot = &io_threads[c->id % (server.io_threads_num - 1)];
-            c->in_exec = 1;
-            listAddNodeTail(iot->in_exec_clients, c);
-            pthread_mutex_lock(&iot->outbox_mutex);
-            listAddNodeTail(iot->outbox, c);
-            connSetReadHandler(c->conn, NULL);
-            pthread_mutex_unlock(&iot->outbox_mutex);
-
-            int sleeping;
-            atomicGetWithSync(server.sleeping, sleeping);
-            if (sleeping) {
-                /* Wake the thread using pipe. */
-                atomicSet(server.sleeping, 0);
-                uint64_t u = 1;
-                if (write(iot->outbox_efd, &u, sizeof(uint64_t))) {}
+            if (processCommandAndResetClient(c) == C_ERR) {
+                /* If the client is no longer valid, we avoid exiting this
+                 * loop and trimming the client buffer later. So we return
+                 * ASAP in that case. */
+                return C_ERR;
             }
+
+            // iothread *iot = &io_threads[c->id % (server.io_threads_num - 1)];
+            // c->in_exec = 1;
+            // listAddNodeTail(iot->in_exec_clients, c);
+            // pthread_mutex_lock(&iot->outbox_mutex);
+            // listAddNodeTail(iot->outbox, c);
+            // connSetReadHandler(c->conn, NULL);
+            // pthread_mutex_unlock(&iot->outbox_mutex);
+
+            // int sleeping;
+            // atomicGetWithSync(server.sleeping, sleeping);
+            // if (sleeping) {
+            //     /* Wake the thread using pipe. */
+            //     atomicSet(server.sleeping, 0);
+            //     uint64_t u = 1;
+            //     if (write(iot->outbox_efd, &u, sizeof(uint64_t))) {}
+            // }
 
             break;
         }
@@ -4493,6 +4550,15 @@ void initThreadedIO(void) {
         exit(1);
     }
 
+    main_thread_inbox = listCreate();
+    main_thread_inbox_temp = listCreate();
+    pthread_mutex_init(&main_thread_inbox_mutex, NULL);
+    main_thread_inbox_efd = eventfd(0, EFD_NONBLOCK);
+    if (aeCreateFileEvent(server.el, main_thread_inbox_efd, AE_READABLE, handleExecute, NULL) != AE_OK) {
+        serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
+        exit(1);
+    }
+
     /* Spawn and initialize the I/O threads. */
     // io_threads = zmalloc(sizeof(*io_threads) * (server.io_threads_num - 1));
     for (int i = 0; i < server.io_threads_num - 1; i++) {
@@ -4509,13 +4575,7 @@ void initThreadedIO(void) {
             exit(1);
         }
 
-        iot->outbox = listCreate();
-        pthread_mutex_init(&iot->outbox_mutex, NULL);
-        iot->outbox_efd = eventfd(0, EFD_NONBLOCK);
-        if (aeCreateFileEvent(server.el, iot->outbox_efd, AE_READABLE, handleExecute, iot) != AE_OK) {
-            serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
-            exit(1);
-        }
+
 
         /* Things we do only for the additional threads. */
         if (pthread_create(&iot->tid,NULL,IOThreadMain,(void*)iot) != 0) {

@@ -434,10 +434,6 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) iothread {
     pthread_mutex_t inbox_mutex;
     int inbox_efd;
 
-    list *outbox;
-    pthread_mutex_t outbox_mutex;
-    int outbox_efd;
-
     list *in_exec_clients;
     int sleeping;
 } iothread;
@@ -3959,6 +3955,8 @@ void killThreads(void);
 void makeThreadKillable(void);
 void swapMainDbWithTempDb(redisDb *tempDb);
 sds getVersion(void);
+
+void handleMessagesFromIOThreads(void);
 
 /* Use macro for checking log level to avoid evaluating arguments in cases log
  * should be ignored due to low level. */

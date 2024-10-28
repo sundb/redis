@@ -1639,6 +1639,7 @@ static void sendGetackToReplicas(void) {
 
 extern int ProcessingEventsWhileBlocked;
 
+
 /* This function gets called every time Redis is entering the
  * main loop of the event driven library, that is, before to sleep
  * for ready file descriptors.
@@ -2557,31 +2558,7 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
     iothread *iot = ptr;
     uint64_t x;
 
-    if (read(fd, &x, sizeof(uint64_t)) < 0) {
-        serverLog(LL_WARNING, "Failed reading from io threading cmd pipe: %s", strerror(errno));
-        exit(1);
-    }
-
-    pthread_mutex_lock(&iot->outbox_mutex);
-    list *l = iot->outbox;
-    iot->outbox= listCreate();
-    pthread_mutex_unlock(&iot->outbox_mutex);
-    listRewind(l, &li);
-    while ((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);;
-        serverAssert(processCommandAndResetClient(c) == C_OK);
-        c->in_exec = 0;
-    }
-    listEmpty(l);
-
-    int sleeping;
-    atomicGetWithSync(iot->sleeping, sleeping);
-    if (sleeping) {
-        /* Wake the thread using pipe. */
-        atomicSet(iot->sleeping, 0);
-        uint64_t u = 1;
-        if (write(iot->inbox_efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {}
-    }
+    if (read(fd, &x, sizeof(uint64_t)) == sizeof(uint64_t)) {}
 }
 
 /* Resets the stats that we expose via INFO or other means that we want
