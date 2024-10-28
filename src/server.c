@@ -1513,9 +1513,6 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         migrateCloseTimedoutSockets();
     }
 
-    /* Stop the I/O threads if we don't have enough pending work. */
-    stopThreadedIOIfNeeded();
-
     /* Resize tracking keys table if needed. This is also done at every
      * command execution, but we want to be sure that if the last command
      * executed changes the value via CONFIG SET, the server will perform
@@ -2553,9 +2550,6 @@ void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
     UNUSED(el);
     UNUSED(ptr);
     UNUSED(mask);
-    listNode *ln, *ln1;
-    listIter li;
-    iothread *iot = ptr;
     uint64_t x;
 
     if (read(fd, &x, sizeof(uint64_t)) == sizeof(uint64_t)) {}

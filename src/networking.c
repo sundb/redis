@@ -2159,40 +2159,6 @@ void sendReplyToClient(connection *conn) {
     writeToClient(c,1);
 }
 
-/* This function is called just before entering the event loop, in the hope
- * we can just write the replies to the client output buffer without any
- * need to use a syscall in order to install the writable event handler,
- * get it called, and so forth. */
-// int handleClientsWithPendingWrites(void) {
-//     listIter li;
-//     listNode *ln;
-//     int processed = listLength(server.clients_pending_write);
-
-//     listRewind(server.clients_pending_write,&li);
-//     while((ln = listNext(&li))) {
-//         client *c = listNodeValue(ln);
-//         c->flags &= ~CLIENT_PENDING_WRITE;
-//         listUnlinkNode(server.clients_pending_write,ln);
-
-//         /* If a client is protected, don't do anything,
-//          * that may trigger write error or recreate handler. */
-//         if (c->flags & CLIENT_PROTECTED) continue;
-
-//         /* Don't write to clients that are going to be closed anyway. */
-//         if (c->flags & CLIENT_CLOSE_ASAP) continue;
-
-//         /* Try to write buffers to the client socket. */
-//         if (writeToClient(c,0) == C_ERR) continue;
-
-//         /* If after the synchronous writes above we still have data to
-//          * output to the client, we need to install the writable handler. */
-//         if (clientHasPendingReplies(c)) {
-//             installClientWriteHandler(c);
-//         }
-//     }
-//     return processed;
-// }
-
 /* resetClient prepare the client to process the next command */
 void resetClient(client *c) {
     redisCommandProc *prevcmd = c->cmd ? c->cmd->proc : NULL;
@@ -2262,7 +2228,6 @@ void unprotectClient(client *c) {
     if (c->flags & CLIENT_PROTECTED) {
         c->flags &= ~CLIENT_PROTECTED;
         if (c->conn) {
-            // connSetReadHandler(c->conn,readQueryFromClient);
             if (clientHasPendingReplies(c)) putClientInPendingWriteQueue(c);
         }
     }
@@ -2287,7 +2252,6 @@ int processInlineBuffer(client *c) {
     /* Nothing to do without a \r\n */
     if (newline == NULL) {
         if (sdslen(c->querybuf)-c->qb_pos > PROTO_INLINE_MAX_SIZE) {
-            // c->read_flags |= READ_FLAGS_ERROR_BIG_INLINE_REQUEST;
             addReplyError(c,"Protocol error: too big inline request");
             setProtocolError("too big inline request",c);
         }
@@ -2954,8 +2918,6 @@ done:
     }
     beforeNextClient(c);
 }
-
-
 
 /* A Redis "Address String" is a colon separated ip:port pair.
  * For IPv4 it's in the form x.y.z.k:port, example: "127.0.0.1:1234".
@@ -4419,25 +4381,12 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) threads_pending {
     redisAtomic unsigned long value;
 } threads_pending;
 
-// pthread_t io_threads[IO_THREADS_MAX_NUM];
-pthread_mutex_t io_threads_mutex[IO_THREADS_MAX_NUM];
-threads_pending io_threads_pending[IO_THREADS_MAX_NUM];
 int io_threads_op;      /* IO_THREADS_OP_IDLE, IO_THREADS_OP_READ or IO_THREADS_OP_WRITE. */ // TODO: should access to this be atomic??!
 
 /* This is the list of clients each thread will serve when threaded I/O is
  * used. We spawn io_threads_num-1 threads, since one is the main thread
  * itself. */
 list *io_threads_list[IO_THREADS_MAX_NUM];
-
-static inline unsigned long getIOPendingCount(int i) {
-    unsigned long count = 0;
-    atomicGetWithSync(io_threads_pending[i].value, count);
-    return count;
-}
-
-static inline void setIOPendingCount(int i, unsigned long count) {
-    atomicSetWithSync(io_threads_pending[i].value, count);
-}
 
 void IOThreadHandleMessages(iothread *iot) {
     listIter li;
@@ -4578,46 +4527,6 @@ void killIOThreads(void) {
                     "IO thread(tid:%lu) terminated",(unsigned long)io_threads[j].tid);
             }
         }
-    }
-}
-
-void startThreadedIO(void) {
-    serverAssert(server.io_threads_active == 0);
-    for (int j = 1; j < server.io_threads_num; j++)
-        pthread_mutex_unlock(&io_threads_mutex[j]);
-    server.io_threads_active = 1;
-}
-
-void stopThreadedIO(void) {
-    /* We may have still clients with pending reads when this function
-     * is called: handle them before stopping the threads. */
-    // handleClientsWithPendingReadsUsingThreads();
-    serverAssert(server.io_threads_active == 1);
-    for (int j = 1; j < server.io_threads_num; j++)
-        pthread_mutex_lock(&io_threads_mutex[j]);
-    server.io_threads_active = 0;
-}
-
-/* This function checks if there are not enough pending clients to justify
- * taking the I/O threads active: in that case I/O threads are stopped if
- * currently active. We track the pending writes as a measure of clients
- * we need to handle in parallel, however the I/O threading is disabled
- * globally for reads as well if we have too little pending clients.
- *
- * The function returns 0 if the I/O threading should be used because there
- * are enough active threads, otherwise 1 is returned and the I/O threads
- * could be possibly stopped (if already active) as a side effect. */
-int stopThreadedIOIfNeeded(void) {
-    int pending = listLength(server.clients_pending_write);
-
-    /* Return ASAP if IO threads are disabled (single threaded mode). */
-    if (server.io_threads_num == 1) return 1;
-
-    if (pending < (server.io_threads_num*2)) {
-        if (server.io_threads_active) stopThreadedIO();
-        return 1;
-    } else {
-        return 0;
     }
 }
 
