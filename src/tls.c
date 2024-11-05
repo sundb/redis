@@ -471,7 +471,7 @@ static void updateTLSError(tls_connection *conn) {
  */
 static connection *connCreateAcceptedTLS(struct aeEventLoop *el, int fd, void *priv) {
     int require_auth = *(int *)priv;
-    tls_connection *conn = (tls_connection *) createTLSConnection(0);
+    tls_connection *conn = (tls_connection *) createTLSConnection(el, 0);
     conn->c.fd = fd;
     conn->c.el = el;
     conn->c.state = CONN_STATE_ACCEPTING;
@@ -866,8 +866,7 @@ static int connTLSConnect(connection *conn_, const char *addr, int port, const c
 
 static int connTLSRebindEventLoop(connection *conn_, aeEventLoop *el) {
     tls_connection *conn = (tls_connection *) conn_;
-    serverAssert(!conn->c->read_handler && !conn->c->write_handler &&
-                 !tlsHasPendingData());
+    serverAssert(!conn->c.read_handler && !conn->c.write_handler);
     conn->c.el = el;
     return C_OK;
 }
