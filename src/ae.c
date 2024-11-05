@@ -152,7 +152,7 @@ int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
      * descriptor exceeds the current number of events. */
     if (unlikely(fd >= eventLoop->nevents)) {
         int newnevents = eventLoop->nevents;
-        newnevents = (newnevents * 2 > fd) ? newnevents * 2 : fd;
+        newnevents = (newnevents * 2 > fd + 1) ? newnevents * 2 : fd + 1;
         newnevents = (newnevents > eventLoop->setsize) ? eventLoop->setsize : newnevents;
         eventLoop->events = zrealloc(eventLoop->events, sizeof(aeFileEvent) * newnevents);
         eventLoop->fired = zrealloc(eventLoop->fired, sizeof(aeFiredEvent) * newnevents);
