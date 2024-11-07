@@ -21,7 +21,93 @@
 #include <sys/uio.h>
 #include <math.h>
 #include <ctype.h>
+#ifdef __linux__
+#include <sys/eventfd.h>
+#endif
 
+int getReadEventFd(struct eventNotifier *en) {
+#ifdef __linux__
+    return en->efd;
+#else
+    return en->pipefd[0];
+#endif
+}
+
+int getWriteEventFd(struct eventNotifier *en) {
+#ifdef __linux__
+    return en->efd;
+#else
+    return en->pipefd[1];
+#endif
+}
+
+eventNotifier* createEventNotifier(void) {
+    eventNotifier *en = zmalloc(sizeof(eventNotifier));
+
+#ifdef __linux__
+    if ((en->efd = eventfd(0, EFD_NONBLOCK| EFD_CLOEXEC)) != -1) {
+        return en;
+    }
+#else
+    if (anetPipe(en->pipefd, O_CLOEXEC|O_NONBLOCK, O_CLOEXEC|O_NONBLOCK) != -1) {
+        return en;
+    }
+#endif
+
+    /* Clean up on error. */
+    zfree(en);
+    return NULL;
+}
+
+int trrigerEventNotifier(struct eventNotifier *en) {
+#ifdef __linux__
+    uint64_t u = 1;
+    if (write(en->efd, &u, sizeof(uint64_t)) == -1) {
+        return C_ERR;
+    }
+#else
+    char buf[1] = {'A'};
+    if (write(en->pipefd[1], buf, 1) == -1) {
+        return C_ERR;
+    }
+#endif
+    return C_OK;
+}
+
+int handleEventNotifier(struct eventNotifier *en) {
+#ifdef __linux__
+    uint64_t u;
+    if (read(en->efd, &u, sizeof(uint64_t)) == -1) {
+        return C_ERR;
+    }
+#else
+    char buf[1];
+    if (read(en->pipefd[0], buf, 1) == -1) {
+        return C_ERR;
+    }
+#endif
+    return C_OK;
+}
+
+void freeEventNotifier(struct eventNotifier *en) {
+#ifdef __linux__
+    close(en->efd);
+#else
+    close(en->pipefd[0]);
+    close(en->pipefd[1]);
+#endif
+    /* free memory */
+    zfree(en);
+}
+
+#define IO_THREADS_MAX_NUM 128
+static ioThread io_threads[IO_THREADS_MAX_NUM] __attribute__((aligned(CACHE_LINE_SIZE)));
+static list *io_thread_pending_clients[IO_THREADS_MAX_NUM] __attribute__((aligned(CACHE_LINE_SIZE)));
+static list *main_thread_pending_clients[IO_THREADS_MAX_NUM] __attribute__((aligned(CACHE_LINE_SIZE)));
+static pthread_mutex_t main_thread_pending_clients_mutexs[IO_THREADS_MAX_NUM] __attribute__((aligned(CACHE_LINE_SIZE)));
+static eventNotifier* main_thread_pending_clients_notifier[IO_THREADS_MAX_NUM] __attribute__((aligned(CACHE_LINE_SIZE)));
+
+static void putInIOThreadPendingClientForMainThread(client *c);
 static void setProtocolError(const char *errstr, client *c);
 static void pauseClientsByClient(mstime_t end, int isPauseClientAll);
 int postponeClientRead(client *c);
@@ -132,6 +218,9 @@ client *createClient(connection *conn) {
     uint64_t client_id;
     atomicGetIncr(server.next_client_id, client_id, 1);
     c->id = client_id;
+    c->tid = IOTHREAD_MAIN_THREAD_ID;
+    c->running_tid = IOTHREAD_MAIN_THREAD_ID;
+    atomicSetWithSync(c->closing, 0);
 #ifdef LOG_REQ_RES
     reqresReset(c, 0);
     c->resp = server.client_default_resp;
@@ -306,7 +395,7 @@ int prepareClientToWrite(client *c) {
      * not put the client in pending write queue. Instead, it will be
      * done by handleClientsWithPendingReadsUsingThreads() upon return.
      */
-    if (!clientHasPendingReplies(c) && io_threads_op == IO_THREADS_OP_IDLE)
+    if (!clientHasPendingReplies(c) && c->running_tid == IOTHREAD_MAIN_THREAD_ID)
         putClientInPendingWriteQueue(c);
 
     /* Authorize the caller to queue in the output buffer of this client. */
@@ -1428,6 +1517,19 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
         freeClient(connGetPrivateData(conn));
         return;
     }
+
+    /* Handle clients in io thread */
+    if (server.io_threads_num > 0) {
+        /* Select io thread */
+        c->tid = c->id % server.io_threads_num;
+        c->running_tid = c->tid;
+
+        /* Remove from main thread's event loop. */
+        connSetReadHandler(c->conn, NULL);
+        connSetWriteHandler(c->conn, NULL);
+
+        listAddNodeTail(io_thread_pending_clients[c->tid], c);
+    }
 }
 
 void freeClientOriginalArgv(client *c) {
@@ -1535,7 +1637,7 @@ void unlinkClient(client *c) {
     }
 
     /* Remove from the list of pending reads if needed. */
-    serverAssert(!c->conn || io_threads_op == IO_THREADS_OP_IDLE);
+    serverAssert(!c->conn || c->running_tid == IOTHREAD_MAIN_THREAD_ID);
     if (c->pending_read_list_node != NULL) {
         listDelNode(server.clients_pending_read,c->pending_read_list_node);
         c->pending_read_list_node = NULL;
@@ -1813,15 +1915,14 @@ void freeClientAsync(client *c) {
     /* Replicas that was marked as CLIENT_CLOSE_ASAP should not keep the
      * replication backlog from been trimmed. */
     if (c->flags & CLIENT_SLAVE) freeReplicaReferencedReplBuffer(c);
-    if (server.io_threads_num == 1) {
-        /* no need to bother with locking if there's just one thread (the main thread) */
+    if (c->running_tid == IOTHREAD_MAIN_THREAD_ID) {
         listAddNodeTail(server.clients_to_close,c);
         return;
     }
-    static pthread_mutex_t async_free_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
-    pthread_mutex_lock(&async_free_queue_mutex);
-    listAddNodeTail(server.clients_to_close,c);
-    pthread_mutex_unlock(&async_free_queue_mutex);
+
+    /* If the client is in an I/O thread, we need to schedule the client
+     * to be freed in the main thread. */
+    putInIOThreadPendingClientForMainThread(c);
 }
 
 /* Log errors for invalid use and free the client in async way.
@@ -1854,7 +1955,7 @@ int beforeNextClient(client *c) {
 
     /* Skip the client processing if we're in an IO thread, in that case we'll perform
        this operation later (this function is called again) in the fan-in stage of the threading mechanism */
-    if (io_threads_op != IO_THREADS_OP_IDLE)
+    if (c && c->running_tid != IOTHREAD_MAIN_THREAD_ID)
         return C_OK;
     /* Handle async frees */
     /* Note: this doesn't make the server.clients_to_close list redundant because of
@@ -2094,7 +2195,7 @@ int writeToClient(client *c, int handler_installed) {
          * is always called with handler_installed set to 0 from threads
          * so we are fine. */
         if (handler_installed) {
-            serverAssert(io_threads_op == IO_THREADS_OP_IDLE);
+            /* IO Thread also can do that now. */
             connSetWriteHandler(c->conn, NULL);
         }
 
@@ -2107,7 +2208,7 @@ int writeToClient(client *c, int handler_installed) {
     /* Update client's memory usage after writing.
      * Since this isn't thread safe we do this conditionally. In case of threaded writes this is done in
      * handleClientsWithPendingWritesUsingThreads(). */
-    if (io_threads_op == IO_THREADS_OP_IDLE)
+    if (c->running_tid == IOTHREAD_MAIN_THREAD_ID)
         updateClientMemUsageAndBucket(c);
     return C_OK;
 }
@@ -2614,6 +2715,15 @@ int processPendingCommandAndInputBuffer(client *c) {
     return C_OK;
 }
 
+void putInIOThreadPendingClientForMainThread(client *c) {
+    if (c->tid != IOTHREAD_MAIN_THREAD_ID) {
+        connSetReadHandler(c->conn, NULL);
+        connSetWriteHandler(c->conn, NULL);
+        ioThread *t = &io_threads[c->tid];
+        listAddNodeTail(t->main_thread_pending_clients, c);
+    }
+}
+
 /* This function is called every time, in the client structure 'c', there is
  * more query buffer to process, because we read more data from the socket
  * or because a client was blocked and later reactivated, so there could be
@@ -2652,9 +2762,15 @@ int processInputBuffer(client *c) {
         }
 
         if (c->reqtype == PROTO_REQ_INLINE) {
-            if (processInlineBuffer(c) != C_OK) break;
+            if (processInlineBuffer(c) != C_OK) {
+                putInIOThreadPendingClientForMainThread(c);
+                break;
+            }
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
-            if (processMultibulkBuffer(c) != C_OK) break;
+            if (processMultibulkBuffer(c) != C_OK) {
+                putInIOThreadPendingClientForMainThread(c);
+                break;
+            }
         } else {
             serverPanic("Unknown request type");
         }
@@ -2666,9 +2782,9 @@ int processInputBuffer(client *c) {
             /* If we are in the context of an I/O thread, we can't really
              * execute the command here. All we can do is to flag the client
              * as one that needs to process the command. */
-            if (io_threads_op != IO_THREADS_OP_IDLE) {
-                serverAssert(io_threads_op == IO_THREADS_OP_READ);
+            if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
                 c->flags |= CLIENT_PENDING_COMMAND;
+                putInIOThreadPendingClientForMainThread(c);
                 break;
             }
 
@@ -2709,7 +2825,7 @@ int processInputBuffer(client *c) {
     /* Update client memory usage after processing the query buffer, this is
      * important in case the query buffer is big and wasn't drained during
      * the above loop (because of partially sent big commands). */
-    if (io_threads_op == IO_THREADS_OP_IDLE)
+    if (c->running_tid == IOTHREAD_MAIN_THREAD_ID)
         updateClientMemUsageAndBucket(c);
 
     return C_OK;
@@ -4312,88 +4428,207 @@ void processEventsWhileBlocked(void) {
  * Threaded I/O
  * ========================================================================== */
 
-#define IO_THREADS_MAX_NUM 128
-
-typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) threads_pending {
-    redisAtomic unsigned long value;
-} threads_pending;
-
-pthread_t io_threads[IO_THREADS_MAX_NUM];
-pthread_mutex_t io_threads_mutex[IO_THREADS_MAX_NUM];
-threads_pending io_threads_pending[IO_THREADS_MAX_NUM];
-int io_threads_op;      /* IO_THREADS_OP_IDLE, IO_THREADS_OP_READ or IO_THREADS_OP_WRITE. */ // TODO: should access to this be atomic??!
-
-/* This is the list of clients each thread will serve when threaded I/O is
- * used. We spawn io_threads_num-1 threads, since one is the main thread
- * itself. */
-list *io_threads_list[IO_THREADS_MAX_NUM];
-
-static inline unsigned long getIOPendingCount(int i) {
-    unsigned long count = 0;
-    atomicGetWithSync(io_threads_pending[i].value, count);
-    return count;
+void ioThreadBeforeSleep(struct aeEventLoop *el) {
+    ioThread *t = el->privdata;
+    if (listLength(t->main_thread_pending_clients) > 0) {
+        pthread_mutex_lock(&main_thread_pending_clients_mutexs[t->id]);
+        listJoin(main_thread_pending_clients[t->id], t->main_thread_pending_clients);
+        pthread_mutex_unlock(&main_thread_pending_clients_mutexs[t->id]);
+        trrigerEventNotifier(main_thread_pending_clients_notifier[t->id]);
+    }
 }
 
-static inline void setIOPendingCount(int i, unsigned long count) {
-    atomicSetWithSync(io_threads_pending[i].value, count);
+void ioThreadAfterSleep(struct aeEventLoop *el) {
+    UNUSED(el);
 }
 
-void *IOThreadMain(void *myid) {
-    /* The ID is the thread number (from 0 to server.io_threads_num-1), and is
-     * used by the thread to just manipulate a single sub-array of clients. */
-    long id = (unsigned long)myid;
+
+void *ioThreadMain(void *ptr) {
+    ioThread *t = ptr;
     char thdname[16];
-
-    snprintf(thdname, sizeof(thdname), "io_thd_%ld", id);
+    snprintf(thdname, sizeof(thdname), "io_thd_%ld", t->id);
+    setupSignalHandlers();
     redis_set_thread_title(thdname);
     redisSetCpuAffinity(server.server_cpulist);
     makeThreadKillable();
+    t->el->privdata = t;
+    aeSetBeforeSleepProc(t->el, ioThreadBeforeSleep);
+    aeSetAfterSleepProc(t->el, ioThreadAfterSleep);
+    aeMain(t->el);
+    return NULL;
+}
 
-    while(1) {
-        /* Wait for start */
-        for (int j = 0; j < 1000000; j++) {
-            if (getIOPendingCount(id) != 0) break;
-        }
+void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int mask) {
+    UNUSED(el);
+    UNUSED(mask);
 
-        /* Give the main thread a chance to stop this thread. */
-        if (getIOPendingCount(id) == 0) {
-            pthread_mutex_lock(&io_threads_mutex[id]);
-            pthread_mutex_unlock(&io_threads_mutex[id]);
+    ioThread *t = ptr;
+
+    /* Handle fd first. */
+    serverAssert(fd == getReadEventFd(main_thread_pending_clients_notifier[t->id]));
+    handleEventNotifier(main_thread_pending_clients_notifier[t->id]);
+
+    list *clients = listCreate();
+    pthread_mutex_lock(&main_thread_pending_clients_mutexs[t->id]);
+    listJoin(clients, main_thread_pending_clients[t->id]);
+    pthread_mutex_unlock(&main_thread_pending_clients_mutexs[t->id]);
+    if (listLength(clients) == 0) {
+        listRelease(clients);
+        return;
+    }
+
+    listIter li;
+    listNode *ln;
+    listRewind(clients, &li);
+    while ((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);
+        serverAssert(!(c->flags & CLIENT_BLOCKED));
+        serverAssert(!c->conn->write_handler && !c->conn->read_handler);
+
+        /* Let main thread to run it. */
+        c->running_tid = IOTHREAD_MAIN_THREAD_ID;
+
+        /* The client from IO thread and mark it as CLIENT_CLOSE_ASAP, it is not
+         * not in server.clients_to_close, we should clear the flag and free it. */
+        if (c->flags & CLIENT_CLOSE_ASAP) {
+            c->flags &= ~CLIENT_CLOSE_ASAP;
+            freeClient(c);
             continue;
         }
 
-        serverAssert(getIOPendingCount(id) != 0);
+        /* Update the client in the mem usage */
+        updateClientMemUsageAndBucket(c);
 
-        /* Process: note that the main thread will never touch our list
-         * before we drop the pending count to 0. */
-        listIter li;
-        listNode *ln;
-        listRewind(io_threads_list[id],&li);
-        while((ln = listNext(&li))) {
-            client *c = listNodeValue(ln);
-            if (io_threads_op == IO_THREADS_OP_WRITE) {
-                writeToClient(c,0);
-            } else if (io_threads_op == IO_THREADS_OP_READ) {
-                readQueryFromClient(c->conn);
-            } else {
-                serverPanic("io_threads_op value is unknown");
+        if (processPendingCommandAndInputBuffer(c) == C_ERR) {
+            /* If the client is no longer valid, we avoid
+             * processing the client later. So we just go
+             * to the next. */
+            continue;
+        }
+
+        /* We may have pending replies if a thread readQueryFromClient() produced
+         * replies and did not put the client in pending write queue (it can't). */
+        if (!(c->flags & CLIENT_CLOSE_ASAP) & !(c->flags & CLIENT_PENDING_WRITE) &&
+            clientHasPendingReplies(c)) 
+        {
+            putClientInPendingWriteQueue(c);
+        }
+
+        /* If the client is still valid, let main thread handle it. */
+        if (c->flags & CLIENT_PUBSUB ||
+            c->flags & CLIENT_BLOCKED ||
+            c->flags & CLIENT_SLAVE)
+        {
+            c->tid = IOTHREAD_MAIN_THREAD_ID;
+            // TODO: main thread owns the client, rebind the event loop,
+            // and set the read/write handler
+        }
+
+        /* If the client is still valid, let io threads handle its writing. */
+        if (c->flags & CLIENT_PENDING_WRITE) {
+            listUnlinkNode(server.clients_pending_write, &c->clients_pending_write_node);
+            c->running_tid = c->tid;
+            //serverLog(LL_DEBUG, "Client %ld is handled by io thread %d", c->id, c->tid);
+            listAddNodeHead(io_thread_pending_clients[t->id], c);
+            continue;
+        }
+
+        // TODO: remained clients are handled by main thread, what's the client status?
+    }
+
+    /* Update processed count on server */
+    server.stat_io_reads_processed += listLength(clients);
+    listRelease(clients);
+
+    /* Trigger the io thread to handle the clients. */
+    pthread_mutex_lock(&(t->pending_clients_mutex));
+    listJoin(t->pending_clients, io_thread_pending_clients[t->id]);
+    pthread_mutex_unlock(&(t->pending_clients_mutex));
+    trrigerEventNotifier(t->pending_clients_notifier);
+}
+
+void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int mask) {
+    UNUSED(ae);
+    UNUSED(mask);
+
+    ioThread *t = ptr;
+
+    /* Handle fd first. */
+    serverAssert(fd == getReadEventFd(t->pending_clients_notifier));
+    handleEventNotifier(t->pending_clients_notifier);
+
+    list *clients = listCreate();
+    pthread_mutex_lock(&t->pending_clients_mutex);
+    listJoin(clients, t->pending_clients);
+    pthread_mutex_unlock(&t->pending_clients_mutex);
+    if (listLength(clients) == 0) {
+        listRelease(clients);
+        return;
+    }
+
+    listIter li;
+    listNode *ln;
+    listRewind(clients, &li);
+    while((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);
+        serverAssert(!c->conn->write_handler && !c->conn->read_handler);
+
+        /* Handle read/write */
+        connRebindEventLoop(c->conn, t->el);  /* TODO: Need to improve, do it only if needed */
+        if (c->flags & CLIENT_PENDING_WRITE) {
+            c->flags &= ~CLIENT_PENDING_WRITE;
+            writeToClient(c, 0);
+            if (clientHasPendingReplies(c)) {
+                connSetWriteHandler(c->conn, sendReplyToClient);
             }
         }
-        listEmpty(io_threads_list[id]);
-        setIOPendingCount(id, 0);
+        connSetReadHandler(c->conn, readQueryFromClient);
+
+        /* TODO: Update the client in the mem usage after we're done processing it in the io-threads */
+        // updateClientMemUsageAndBucket(c);
     }
+    /* Update processed count on server */
+    server.stat_io_writes_processed += listLength(clients);
+    listRelease(clients);
+}
+
+void handleJobFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int mask) {
+    UNUSED(ae);
+    UNUSED(mask);
+
+    ioThread *t = ptr;
+
+    /* Handle fd first. */
+    serverAssert(fd == getReadEventFd(t->job_notifier));
+    handleEventNotifier(t->job_notifier);
+
+    /* Process jobs. */
+    list* jobs = listCreate();
+    pthread_mutex_lock(&t->job_queue_mutext);
+    listJoin(jobs, t->job_queue);
+    pthread_mutex_unlock(&t->job_queue_mutext);
+
+    listIter li;
+    listNode *ln;
+    listRewind(jobs, &li);
+    while ((ln = listNext(&li))) {
+        ioThreadJob *job = listNodeValue(ln);
+        if (job->type == IOTHREAD_JOB_HANDLE_CLIENT) {
+            client *c = job->data;
+            connRebindEventLoop(c->conn, t->el);
+            connSetReadHandler(c->conn, readQueryFromClient);
+        } else {
+            serverPanic("io thread job type is unknown");
+        }
+    }
+    listRelease(jobs);
 }
 
 /* Initialize the data structures needed for threaded I/O. */
 void initThreadedIO(void) {
-    server.io_threads_active = 0; /* We start with threads not active. */
+    if (server.io_threads_num == 0) return;
 
-    /* Indicate that io-threads are currently idle */
-    io_threads_op = IO_THREADS_OP_IDLE;
-
-    /* Don't spawn any thread if the user selected a single thread:
-     * we'll handle I/O directly from the main thread. */
-    if (server.io_threads_num == 1) return;
+    server.io_threads_active = 1;
 
     if (server.io_threads_num > IO_THREADS_MAX_NUM) {
         serverLog(LL_WARNING,"Fatal: too many I/O threads configured. "
@@ -4403,55 +4638,73 @@ void initThreadedIO(void) {
 
     /* Spawn and initialize the I/O threads. */
     for (int i = 0; i < server.io_threads_num; i++) {
-        /* Things we do for all the threads including the main thread. */
-        io_threads_list[i] = listCreate();
-        if (i == 0) continue; /* Thread 0 is the main thread. */
+        pthread_mutexattr_t *attr = NULL;
+        ioThread *t = &io_threads[i];
+        t->id = i;
+        t->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
+        t->job_queue = listCreate();
+        t->job_notifier = createEventNotifier();
+        t->pending_clients = listCreate();
+        t->pending_clients_notifier = createEventNotifier();
+        t->main_thread_pending_clients = listCreate();
 
+        #ifdef __linux__
+        attr = zmalloc(sizeof(pthread_mutexattr_t));
+        pthread_mutexattr_settype(attr, PTHREAD_MUTEX_ADAPTIVE_NP);
+        #endif
+
+        pthread_mutex_init(&t->job_queue_mutext, attr);
+        pthread_mutex_init(&t->pending_clients_mutex, attr);
+        t->job_notifier = createEventNotifier();
+        if (aeCreateFileEvent(t->el, getReadEventFd(t->job_notifier),
+                              AE_READABLE, handleJobFromMainThread, t) != AE_OK)
+        {
+            serverLog(LL_WARNING, "Fatal: Can't register file event for io thread notifications.");
+            exit(1);
+        }
+
+        t->pending_clients_notifier = createEventNotifier();
+        if (aeCreateFileEvent(t->el, getReadEventFd(t->pending_clients_notifier),
+                              AE_READABLE, handleClientsFromMainThread, t) != AE_OK)
+        {
+            serverLog(LL_WARNING, "Fatal: Can't register file event for io thread notifications.");
+            exit(1);
+        }
         /* Things we do only for the additional threads. */
-        pthread_t tid;
-        pthread_mutex_init(&io_threads_mutex[i],NULL);
-        setIOPendingCount(i, 0);
-        pthread_mutex_lock(&io_threads_mutex[i]); /* Thread will be stopped. */
-        if (pthread_create(&tid,NULL,IOThreadMain,(void*)(long)i) != 0) {
+        if (pthread_create(&t->tid, NULL, ioThreadMain, (void*)t) != 0) {
             serverLog(LL_WARNING,"Fatal: Can't initialize IO thread.");
             exit(1);
         }
-        io_threads[i] = tid;
+
+        // Main thread
+        io_thread_pending_clients[i] = listCreate();
+        main_thread_pending_clients[i] = listCreate();
+        pthread_mutex_init(&main_thread_pending_clients_mutexs[i], attr);
+        main_thread_pending_clients_notifier[i] = createEventNotifier();
+        if (aeCreateFileEvent(server.el, getReadEventFd(main_thread_pending_clients_notifier[i]),
+                              AE_READABLE, handleClientsFromIOThreads, t) != AE_OK)
+        {
+            serverLog(LL_WARNING, "Fatal: Can't register file event for main thread notifications.");
+            exit(1);
+        }
     }
 }
 
 void killIOThreads(void) {
     int err, j;
     for (j = 0; j < server.io_threads_num; j++) {
-        if (io_threads[j] == pthread_self()) continue;
-        if (io_threads[j] && pthread_cancel(io_threads[j]) == 0) {
-            if ((err = pthread_join(io_threads[j],NULL)) != 0) {
+        if (io_threads[j].tid == pthread_self()) continue;
+        if (io_threads[j].tid && pthread_cancel(io_threads[j].tid) == 0) {
+            if ((err = pthread_join(io_threads[j].tid,NULL)) != 0) {
                 serverLog(LL_WARNING,
                     "IO thread(tid:%lu) can not be joined: %s",
-                        (unsigned long)io_threads[j], strerror(err));
+                        (unsigned long)io_threads[j].tid, strerror(err));
             } else {
                 serverLog(LL_WARNING,
-                    "IO thread(tid:%lu) terminated",(unsigned long)io_threads[j]);
+                    "IO thread(tid:%lu) terminated",(unsigned long)io_threads[j].tid);
             }
         }
     }
-}
-
-void startThreadedIO(void) {
-    serverAssert(server.io_threads_active == 0);
-    for (int j = 1; j < server.io_threads_num; j++)
-        pthread_mutex_unlock(&io_threads_mutex[j]);
-    server.io_threads_active = 1;
-}
-
-void stopThreadedIO(void) {
-    /* We may have still clients with pending reads when this function
-     * is called: handle them before stopping the threads. */
-    handleClientsWithPendingReadsUsingThreads();
-    serverAssert(server.io_threads_active == 1);
-    for (int j = 1; j < server.io_threads_num; j++)
-        pthread_mutex_lock(&io_threads_mutex[j]);
-    server.io_threads_active = 0;
 }
 
 /* This function checks if there are not enough pending clients to justify
@@ -4464,17 +4717,7 @@ void stopThreadedIO(void) {
  * are enough active threads, otherwise 1 is returned and the I/O threads
  * could be possibly stopped (if already active) as a side effect. */
 int stopThreadedIOIfNeeded(void) {
-    int pending = listLength(server.clients_pending_write);
-
-    /* Return ASAP if IO threads are disabled (single threaded mode). */
-    if (server.io_threads_num == 1) return 1;
-
-    if (pending < (server.io_threads_num*2)) {
-        if (server.io_threads_active) stopThreadedIO();
-        return 1;
-    } else {
-        return 0;
-    }
+    return 0;
 }
 
 /* This function achieves thread safety using a fan-out -> fan-in paradigm:
@@ -4484,96 +4727,19 @@ int stopThreadedIOIfNeeded(void) {
  * it can safely perform post-processing and return to normal synchronous
  * work. */
 int handleClientsWithPendingWritesUsingThreads(void) {
-    int processed = listLength(server.clients_pending_write);
-    if (processed == 0) return 0; /* Return ASAP if there are no clients. */
+    /* Main thread hanles */
+    int processed = handleClientsWithPendingWrites();
 
-    /* If I/O threads are disabled or we have few clients to serve, don't
-     * use I/O threads, but the boring synchronous code. */
-    if (server.io_threads_num == 1 || stopThreadedIOIfNeeded()) {
-        return handleClientsWithPendingWrites();
-    }
-
-    /* Start threads if needed. */
-    if (!server.io_threads_active) startThreadedIO();
-
-    /* Distribute the clients across N different lists. */
-    listIter li;
-    listNode *ln;
-    listRewind(server.clients_pending_write,&li);
-    int item_id = 0;
-    while((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);
-        c->flags &= ~CLIENT_PENDING_WRITE;
-
-        /* Remove clients from the list of pending writes since
-         * they are going to be closed ASAP. */
-        if (c->flags & CLIENT_CLOSE_ASAP) {
-            listUnlinkNode(server.clients_pending_write, ln);
-            continue;
-        }
-
-        /* Since all replicas and replication backlog use global replication
-         * buffer, to guarantee data accessing thread safe, we must put all
-         * replicas client into io_threads_list[0] i.e. main thread handles
-         * sending the output buffer of all replicas. */
-        if (unlikely(clientTypeIsSlave(c))) {
-            listAddNodeTail(io_threads_list[0],c);
-            continue;
-        }
-
-        int target_id = item_id % server.io_threads_num;
-        listAddNodeTail(io_threads_list[target_id],c);
-        item_id++;
-    }
-
-    /* Give the start condition to the waiting threads, by setting the
-     * start condition atomic var. */
-    io_threads_op = IO_THREADS_OP_WRITE;
-    for (int j = 1; j < server.io_threads_num; j++) {
-        int count = listLength(io_threads_list[j]);
-        setIOPendingCount(j, count);
-    }
-
-    /* Also use the main thread to process a slice of clients. */
-    listRewind(io_threads_list[0],&li);
-    while((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);
-        writeToClient(c,0);
-    }
-    listEmpty(io_threads_list[0]);
-
-    /* Wait for all the other threads to end their work. */
-    while(1) {
-        unsigned long pending = 0;
-        for (int j = 1; j < server.io_threads_num; j++)
-            pending += getIOPendingCount(j);
-        if (pending == 0) break;
-    }
-
-    io_threads_op = IO_THREADS_OP_IDLE;
-
-    /* Run the list of clients again to install the write handler where
-     * needed. */
-    listRewind(server.clients_pending_write,&li);
-    while((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);
-
-        /* Update the client in the mem usage after we're done processing it in the io-threads */
-        updateClientMemUsageAndBucket(c);
-
-        /* Install the write handler if there are pending writes in some
-         * of the clients. */
-        if (clientHasPendingReplies(c)) {
-            installClientWriteHandler(c);
+    /* IO threads handle */
+    for (int i = 0; i < server.io_threads_num; i++) {
+        if (listLength(io_thread_pending_clients[i]) > 0) {
+            ioThread *t = &io_threads[i];
+            pthread_mutex_lock(&t->pending_clients_mutex);
+            listJoin(t->pending_clients, io_thread_pending_clients[i]);
+            pthread_mutex_unlock(&t->pending_clients_mutex);
+            trrigerEventNotifier(t->pending_clients_notifier);
         }
     }
-    while(listLength(server.clients_pending_write) > 0) {
-        listUnlinkNode(server.clients_pending_write, server.clients_pending_write->head);
-    }
-
-    /* Update processed count on server */
-    server.stat_io_writes_processed += processed;
-
     return processed;
 }
 
@@ -4582,18 +4748,8 @@ int handleClientsWithPendingWritesUsingThreads(void) {
  * As a side effect of calling this function the client is put in the
  * pending read clients and flagged as such. */
 int postponeClientRead(client *c) {
-    if (server.io_threads_active &&
-        server.io_threads_do_reads &&
-        !ProcessingEventsWhileBlocked &&
-        !(c->flags & (CLIENT_MASTER|CLIENT_SLAVE|CLIENT_BLOCKED)) &&
-        io_threads_op == IO_THREADS_OP_IDLE)
-    {
-        listAddNodeHead(server.clients_pending_read,c);
-        c->pending_read_list_node = listFirst(server.clients_pending_read);
-        return 1;
-    } else {
-        return 0;
-    }
+    UNUSED(c);
+    return 0;
 }
 
 /* When threaded I/O is also enabled for the reading + parsing side, the
@@ -4609,85 +4765,7 @@ int postponeClientRead(client *c) {
  * it can safely perform post-processing and return to normal synchronous
  * work. */
 int handleClientsWithPendingReadsUsingThreads(void) {
-    if (!server.io_threads_active || !server.io_threads_do_reads) return 0;
-    int processed = listLength(server.clients_pending_read);
-    if (processed == 0) return 0;
-
-    /* Distribute the clients across N different lists. */
-    listIter li;
-    listNode *ln;
-    listRewind(server.clients_pending_read,&li);
-    int item_id = 0;
-    while((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);
-        int target_id = item_id % server.io_threads_num;
-        listAddNodeTail(io_threads_list[target_id],c);
-        item_id++;
-    }
-
-    /* Give the start condition to the waiting threads, by setting the
-     * start condition atomic var. */
-    io_threads_op = IO_THREADS_OP_READ;
-    for (int j = 1; j < server.io_threads_num; j++) {
-        int count = listLength(io_threads_list[j]);
-        setIOPendingCount(j, count);
-    }
-
-    /* Also use the main thread to process a slice of clients. */
-    listRewind(io_threads_list[0],&li);
-    while((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);
-        readQueryFromClient(c->conn);
-    }
-    listEmpty(io_threads_list[0]);
-
-    /* Wait for all the other threads to end their work. */
-    while(1) {
-        unsigned long pending = 0;
-        for (int j = 1; j < server.io_threads_num; j++)
-            pending += getIOPendingCount(j);
-        if (pending == 0) break;
-    }
-
-    io_threads_op = IO_THREADS_OP_IDLE;
-
-    /* Run the list of clients again to process the new buffers. */
-    while(listLength(server.clients_pending_read)) {
-        ln = listFirst(server.clients_pending_read);
-        client *c = listNodeValue(ln);
-        listDelNode(server.clients_pending_read,ln);
-        c->pending_read_list_node = NULL;
-
-        serverAssert(!(c->flags & CLIENT_BLOCKED));
-
-        if (beforeNextClient(c) == C_ERR) {
-            /* If the client is no longer valid, we avoid
-             * processing the client later. So we just go
-             * to the next. */
-            continue;
-        }
-
-        /* Once io-threads are idle we can update the client in the mem usage */
-        updateClientMemUsageAndBucket(c);
-
-        if (processPendingCommandAndInputBuffer(c) == C_ERR) {
-            /* If the client is no longer valid, we avoid
-             * processing the client later. So we just go
-             * to the next. */
-            continue;
-        }
-
-        /* We may have pending replies if a thread readQueryFromClient() produced
-         * replies and did not put the client in pending write queue (it can't).
-         */
-        if (!(c->flags & CLIENT_PENDING_WRITE) && clientHasPendingReplies(c))
-            putClientInPendingWriteQueue(c);
-    }
-
-    /* Update processed count on server */
-    server.stat_io_reads_processed += processed;
-
-    return processed;
+    return 0;
 }
 
 /* Returns the actual client eviction limit based on current configuration or

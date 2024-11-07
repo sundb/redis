@@ -1158,6 +1158,9 @@ typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
     connection *conn;
+    int tid;                /* Thread ID this client is bound to. */
+    int running_tid;        /* Thread ID this client is running on. */
+    redisAtomic int closing;/* This client is in the process of being closed. */
     int resp;               /* RESP protocol version. Can be 2 or 3. */
     redisDb *db;            /* Pointer to currently SELECTed DB. */
     robj *name;             /* As set by CLIENT SETNAME. */
@@ -1278,6 +1281,39 @@ typedef struct client {
     clientReqResInfo reqres;
 #endif
 } client;
+
+#define IOTHREAD_MAIN_THREAD_ID -1
+
+typedef struct eventNotifier {
+#ifdef __linux__
+    int efd;
+#else
+    int pipefd[2];
+#endif
+} eventNotifier;
+
+typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
+    long id;                                    /* The unique ID assigned. */
+    pthread_t tid;                              /* Thread ID */
+    aeEventLoop *el;                            /* Main event loop of io thread. */
+
+    list *job_queue;                           /* List of jobs to execute. */
+    eventNotifier *job_notifier;                         /* Used to wake up the loop when a job is added. */
+    pthread_mutex_t job_queue_mutext;          /* Mutex for job queue */
+
+    list *pending_clients;                /* List of clients with pending writes. */
+    eventNotifier *pending_clients_notifier;                /* Used to wake up the loop when write should be performed. */
+    pthread_mutex_t pending_clients_mutex;        /* Mutex for pending write list */
+
+    list *main_thread_pending_clients;              /* Clients that are waiting for a command to be executed. */
+} ioThread;
+
+#define IOTHREAD_JOB_HANDLE_CLIENT 1
+
+typedef struct ioThreadJob {
+    int type;
+    void *data;
+} ioThreadJob;
 
 /* ACL information */
 typedef struct aclInfo {
@@ -2462,7 +2498,7 @@ typedef struct {
 #define IO_THREADS_OP_IDLE 0
 #define IO_THREADS_OP_READ 1
 #define IO_THREADS_OP_WRITE 2
-extern int io_threads_op;
+// extern int io_threads_op;
 
 /* Hash-field data type (of t_hash.c) */
 typedef mstr hfield;
