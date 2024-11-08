@@ -2768,7 +2768,10 @@ int processInputBuffer(client *c) {
             }
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
             if (processMultibulkBuffer(c) != C_OK) {
-                putInIOThreadPendingClientForMainThread(c);
+                /* If the command is not ready but no error happens, we will
+                 * wait next read, don't send it to main thread to process. */
+                if (clientHasPendingReplies(c))
+                    putInIOThreadPendingClientForMainThread(c);
                 break;
             }
         } else {
@@ -4526,14 +4529,12 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
              * to the next. */
             continue;
         }
+        if (c->flags & CLIENT_CLOSE_ASAP) continue;
 
         /* We may have pending replies if a thread readQueryFromClient() produced
          * replies and did not put the client in pending write queue (it can't). */
-        if (!(c->flags & CLIENT_CLOSE_ASAP) & !(c->flags & CLIENT_PENDING_WRITE) &&
-            clientHasPendingReplies(c)) 
-        {
+        if (!(c->flags & CLIENT_PENDING_WRITE) && clientHasPendingReplies(c))
             putClientInPendingWriteQueue(c);
-        }
 
         /* If the client is still valid, let main thread handle it. */
         if (c->flags & CLIENT_PUBSUB ||
