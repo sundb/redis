@@ -3237,6 +3237,21 @@ void quitCommand(client *c) {
     c->flags |= CLIENT_CLOSE_AFTER_REPLY;
 }
 
+void killClient(client *c) {
+    if (c->running_tid == IOTHREAD_MAIN_THREAD_ID) {
+        freeClient(c);
+    } else {
+        atomicSetWithSync(c->closing,1);
+        connShutdown(c->conn);
+    }
+}
+
+int isClientClosing(client *c) {
+    int closing = 0;
+    atomicGetWithSync(c->closing, closing);
+    return closing;
+}
+
 void clientCommand(client *c) {
     listNode *ln;
     listIter li;
@@ -3471,7 +3486,7 @@ NULL
             if (c == client) {
                 close_this_client = 1;
             } else {
-                freeClient(client);
+                killClient(client);
             }
             killed++;
         }
@@ -4496,6 +4511,12 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
             continue;
         }
 
+        /* The client is asked to close. */
+        if (isClientClosing(c)) {
+            freeClient(c);
+            continue;
+        }
+
         /* Update the client in the mem usage */
         updateClientMemUsageAndBucket(c);
 
@@ -4572,6 +4593,12 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
         serverAssert(!c->conn->write_handler && !c->conn->read_handler);
+
+        /* The client is asked to close. we just let main thread handle */
+        if (isClientClosing(c)) {
+            listAddNodeTail(t->main_thread_pending_clients, c);
+            continue;
+        }
 
         /* Handle read/write */
         connRebindEventLoop(c->conn, t->el);  /* TODO: Need to improve, do it only if needed */
