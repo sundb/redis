@@ -185,6 +185,9 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 /* Hash table parameters */
 #define HASHTABLE_MAX_LOAD_FACTOR 1.618   /* Maximum hash table load factor. */
 
+/* Main thread id when enabling io thread. */
+#define IOTHREAD_MAIN_THREAD_ID -1
+
 /* Command flags. Please check the definition of struct redisCommand in this file
  * for more information about the meaning of every flag. */
 #define CMD_WRITE (1ULL<<0)
@@ -1282,8 +1285,6 @@ typedef struct client {
     clientReqResInfo reqres;
 #endif
 } client;
-
-#define IOTHREAD_MAIN_THREAD_ID -1
 
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     long id;                                    /* The unique ID assigned. */
