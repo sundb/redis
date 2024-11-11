@@ -61,6 +61,7 @@ typedef long long ustime_t; /* microsecond time type. */
                            N-elements flat arrays */
 #include "rax.h"     /* Radix tree */
 #include "connection.h" /* Connection abstraction */
+#include "eventnotifier.h" /* Event notification */
 
 #define REDISMODULE_CORE 1
 typedef struct redisObject robj;
@@ -1284,14 +1285,6 @@ typedef struct client {
 
 #define IOTHREAD_MAIN_THREAD_ID -1
 
-typedef struct eventNotifier {
-#ifdef __linux__
-    int efd;
-#else
-    int pipefd[2];
-#endif
-} eventNotifier;
-
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     long id;                                    /* The unique ID assigned. */
     pthread_t tid;                              /* Thread ID */
@@ -1305,7 +1298,7 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     eventNotifier *pending_clients_notifier;                /* Used to wake up the loop when write should be performed. */
     pthread_mutex_t pending_clients_mutex;        /* Mutex for pending write list */
 
-    list *main_thread_pending_clients;              /* Clients that are waiting for a command to be executed. */
+    list *pending_clients_for_main_thread;     /* Clients that are waiting to be executed by the main thread. */
 } ioThread;
 
 #define IOTHREAD_JOB_HANDLE_CLIENT 1
@@ -2714,9 +2707,7 @@ void whileBlockedCron(void);
 void blockingOperationStarts(void);
 void blockingOperationEnds(void);
 int handleClientsWithPendingWrites(void);
-int handleClientsWithPendingWritesUsingThreads(void);
-int handleClientsWithPendingReadsUsingThreads(void);
-int stopThreadedIOIfNeeded(void);
+void sendPendingClientsToIOThreads(void);
 int clientHasPendingReplies(client *c);
 int updateClientMemUsageAndBucket(client *c);
 void removeClientFromMemUsageBucket(client *c, int allow_eviction);
