@@ -4594,6 +4594,7 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
         serverAssert(!c->conn->write_handler && !c->conn->read_handler);
+        serverAssert(!(c->flags & CLIENT_CLOSE_ASAP));
 
         /* The client is asked to close. we just let main thread handle */
         if (isClientClosing(c)) {
@@ -4603,6 +4604,11 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
 
         /* Handle read/write */
         connRebindEventLoop(c->conn, t->el);  /* TODO: Need to improve, do it only if needed */
+
+        /* We should install read handler first since writeToClient may free client. */
+        if (!(c->flags & CLIENT_CLOSE_AFTER_REPLY))
+            connSetReadHandler(c->conn, readQueryFromClient);
+
         if (c->flags & CLIENT_PENDING_WRITE) {
             c->flags &= ~CLIENT_PENDING_WRITE;
             writeToClient(c, 0);
@@ -4610,7 +4616,6 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
                 connSetWriteHandler(c->conn, sendReplyToClient);
             }
         }
-        connSetReadHandler(c->conn, readQueryFromClient);
 
         /* TODO: Update the client in the mem usage after we're done processing it in the io-threads */
         // updateClientMemUsageAndBucket(c);
