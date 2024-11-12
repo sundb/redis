@@ -1232,6 +1232,7 @@ typedef struct client {
     sds peerid;             /* Cached peer ID. */
     sds sockname;           /* Cached connection target address. */
     listNode *client_list_node; /* list node in client list */
+    listNode *io_thread_client_list_node; /* list node in io thread client list */
     listNode *postponed_list_node; /* list node within the postponed list */
     listNode *pending_read_list_node; /* list node in clients pending read list */
     void *module_blocked_client; /* Pointer to the RedisModuleBlockedClient associated with this
@@ -1300,6 +1301,7 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     pthread_mutex_t pending_clients_mutex;        /* Mutex for pending write list */
 
     list *pending_clients_for_main_thread;     /* Clients that are waiting to be executed by the main thread. */
+    list *clients;                          /* IO thread managed clients. */
 } ioThread;
 
 #define IOTHREAD_JOB_HANDLE_CLIENT 1

@@ -199,6 +199,7 @@ client *createClient(connection *conn) {
     c->peerid = NULL;
     c->sockname = NULL;
     c->client_list_node = NULL;
+    c->io_thread_client_list_node = NULL;
     c->postponed_list_node = NULL;
     c->pending_read_list_node = NULL;
     c->client_tracking_redirection = 0;
@@ -1661,6 +1662,7 @@ void freeClient(client *c) {
 
     if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
         freeClientAsync(c);
+        return;
     }
 
     /* For connected clients, call the disconnection event of modules hooks. */
@@ -1821,13 +1823,14 @@ void freeClient(client *c) {
  * should be valid for the continuation of the flow of the program. */
 void freeClientAsync(client *c) {
     if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-        atomicSetWithSync(c->closing,1);
-        /* In the IO thread */
-        if (!pthread_equal(pthread_self(), server.main_thread_id)) {
-            putInPendingClienstForMainThread(c);
+        /* If called in the IO thread, let main thread handle it. If called
+         * in the main thread, just set 'closing' flag, and IO thread will
+         * schedule it to be freed by main thread. */
+        atomicSetWithSync(c->closing, 1);
+        if (pthread_equal(pthread_self(), server.main_thread_id)) {
+            connShutdown(c->conn); /* Trigger event for io threads. TODO:safe? */
         } else {
-            /* In the main thread, trigger event let io thread know. */
-            connShutdown(c->conn);
+            putInPendingClienstForMainThread(c);
         }
         return;
     }
@@ -4346,6 +4349,11 @@ static pthread_mutex_t main_thread_pending_clients_mutexs[IO_THREADS_MAX_NUM] __
 static eventNotifier* main_thread_pending_clients_notifier[IO_THREADS_MAX_NUM] __attribute__((aligned(CACHE_LINE_SIZE)));
 
 void putInPendingClienstForMainThread(client *c) {
+    /* The IO thread no longer manage it. */
+    if (c->io_thread_client_list_node) {
+        listDelNode(io_threads[c->tid].clients, c->io_thread_client_list_node);
+        c->io_thread_client_list_node = NULL;
+    }
     connSetReadHandler(c->conn, NULL);
     connSetWriteHandler(c->conn, NULL);
     listAddNodeTail(io_threads[c->tid].pending_clients_for_main_thread, c);
@@ -4369,6 +4377,33 @@ void ioThreadBeforeSleep(struct aeEventLoop *el) {
 
 void ioThreadAfterSleep(struct aeEventLoop *el) {
     UNUSED(el);
+}
+
+#define IO_THREAD_CRON_CLIENTS_ITERATIONS 10
+int ioThreadCron(struct aeEventLoop *eventLoop, long long id, void *ptr) {
+    UNUSED(eventLoop);
+    UNUSED(id);
+
+    ioThread *t = ptr;
+
+    /* Clients cron in io thread. */
+    int iterations = IO_THREAD_CRON_CLIENTS_ITERATIONS;
+    while (listLength(t->clients) && iterations--) {
+        listNode *head = listFirst(t->clients);
+        client *c = listNodeValue(head);
+        listRotateHeadToTail(t->clients);
+
+        serverAssert(c->tid == t->id);
+        serverAssert(c->conn->write_handler || c->conn->read_handler);
+
+        /* The client is asked to close, let main thread to free finally. */
+        if (isClientClosing(c)) {
+            putInPendingClienstForMainThread(c);
+            continue;
+        }
+    }
+
+    return 100; /* Run once per 100 millisecond */
 }
 
 void *ioThreadMain(void *ptr) {
@@ -4503,12 +4538,16 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
             continue;
         }
 
-        /* IO threads start to handle this client */
-        connRebindEventLoop(c->conn, t->el); /* TODO: Need to improve, do it only if needed */
+        /* IO threads start to manage this client */
+        listAddNodeTail(t->clients, c);
+        c->io_thread_client_list_node = listLast(t->clients);
 
-        /* We should install read handler first since writeToClient may free client. */
-        if (!(c->flags & CLIENT_CLOSE_AFTER_REPLY))
-            connSetReadHandler(c->conn, readQueryFromClient);
+        /* TODO: Need to improve, do it only if needed */
+        connRebindEventLoop(c->conn, t->el);
+
+        /* We should install read handler first since writeToClient may free client,
+         * otherwise we will rebind read handler after freeing client. */
+        connSetReadHandler(c->conn, readQueryFromClient);
 
         if (c->flags & CLIENT_PENDING_WRITE) {
             c->flags &= ~CLIENT_PENDING_WRITE;
@@ -4555,6 +4594,7 @@ void initThreadedIO(void) {
         t->pending_clients = listCreate();
         t->pending_clients_notifier = createEventNotifier();
         t->pending_clients_for_main_thread = listCreate();
+        t->clients = listCreate();
 
         pthread_mutexattr_t *attr = NULL;
         #ifdef __linux__
@@ -4568,7 +4608,7 @@ void initThreadedIO(void) {
         if (aeCreateFileEvent(t->el, getReadEventFd(t->job_notifier),
                               AE_READABLE, handleJobsFromMainThread, t) != AE_OK)
         {
-            serverLog(LL_WARNING, "Fatal: Can't register file event for io thread notifications.");
+            serverPanic("Fatal: Can't register file event for io thread notifications.");
             exit(1);
         }
 
@@ -4576,7 +4616,12 @@ void initThreadedIO(void) {
         if (aeCreateFileEvent(t->el, getReadEventFd(t->pending_clients_notifier),
                               AE_READABLE, handleClientsFromMainThread, t) != AE_OK)
         {
-            serverLog(LL_WARNING, "Fatal: Can't register file event for io thread notifications.");
+            serverPanic("Fatal: Can't register file event for io thread notifications.");
+            exit(1);
+        }
+
+        if (aeCreateTimeEvent(t->el, 1, ioThreadCron, t, NULL) != AE_OK) {
+            serverPanic("Can't create event loop timers.");
             exit(1);
         }
         /* Things we do only for the additional threads. */
