@@ -4493,16 +4493,18 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
         serverAssert(!c->conn->write_handler && !c->conn->read_handler);
+        /* Main thread must handle clients with CLIENT_CLOSE_ASAP flag, since
+         * we only set 'closing' state when clients in io thread are freed ASAP. */
+        serverAssert(!(c->flags & CLIENT_CLOSE_ASAP));
 
         /* The client is asked to close. we just let main thread handle */
-        if (isClientClosing(c) || c->flags & CLIENT_CLOSE_ASAP) {
-            atomicSetWithSync(c->closing, 1);
-            putInPendingClienstForMainThread(c);
+        if (isClientClosing(c)) {
+            listAddNodeTail(t->pending_clients_for_main_thread, c);
             continue;
         }
 
-        /* TODO: Need to improve, do it only if needed */
-        connRebindEventLoop(c->conn, t->el);
+        /* IO threads start to handle this client */
+        connRebindEventLoop(c->conn, t->el); /* TODO: Need to improve, do it only if needed */
 
         /* We should install read handler first since writeToClient may free client. */
         if (!(c->flags & CLIENT_CLOSE_AFTER_REPLY))
@@ -4519,7 +4521,7 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
         /* TODO: Update the client in the mem usage after we're done processing it in the io-threads */
         // updateClientMemUsageAndBucket(c);
     }
-    /* Update processed count on server */
+    /* TODO: Update processed count on server */
     server.stat_io_writes_processed += listLength(clients);
     listRelease(clients);
 }
@@ -4614,7 +4616,7 @@ void killIOThreads(void) {
     }
 }
 
-/* Add the pending clients to the list of IO threads, and trriger an event to
+/* Add the pending clients to the list of IO threads, and trigger an event to
  * notify io threads to handle. */
 void sendPendingClientsToIOThreads(void) {
     for (int i = 0; i < server.io_threads_num; i++) {
