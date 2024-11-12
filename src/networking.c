@@ -4814,7 +4814,7 @@ int stopThreadedIOIfNeeded(void) {
  * it can safely perform post-processing and return to normal synchronous
  * work. */
 int handleClientsWithPendingWritesUsingThreads(void) {
-    /* Main thread hanles */
+    /* Main thread handles */
     int processed = handleClientsWithPendingWrites();
 
     /* IO threads handle */
