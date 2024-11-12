@@ -389,6 +389,19 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 /* Any flag that does not let optimize FLUSH SYNC to run it in bg as blocking client ASYNC */
 #define CLIENT_AVOID_BLOCKING_ASYNC_FLUSH (CLIENT_DENY_BLOCKING|CLIENT_MULTI|CLIENT_LUA_DEBUG|CLIENT_LUA_DEBUG_SYNC|CLIENT_MODULE)
 
+/* */
+#define CLIENT_READ_ERROR 1
+#define CLIENT_READ_TOO_BIG_INLINE_REQUEST 2
+#define CLIENT_READ_UNBALANCED_QUOTES 3
+#define CLIENT_READ_MASTER_USING_INLINE_PROTOCAL 4
+#define CLIENT_READ_TOO_BIG_MBULK_COUNT_STRING 5
+#define CLIENT_READ_TOO_BIG_BUCK_COUNT_STRING 6
+#define CLIENT_READ_EXPECTED_DOLLAR 7
+#define CLIENT_READ_INVALID_BUCK_LENGTH 8
+#define CLIENT_READ_UNAUTH_BUCK_LENGTH 9
+#define CLIENT_READ_INVALID_MULTIBUCK_LENGTH 10
+#define CLIENT_READ_UNAUTH_MBUCK_COUNT 11
+
 /* Client block type (btype field in client structure)
  * if CLIENT_BLOCKED flag is set. */
 typedef enum blocking_type {
@@ -1157,6 +1170,7 @@ typedef struct {
 typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
+    uint64_t read_flags;    /* Client flags: CLIENT_READ_* macros. */
     connection *conn;
     int tid;                /* Thread ID this client is bound to. */
     int running_tid;        /* Thread ID this client is running on. */
