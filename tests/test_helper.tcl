@@ -34,6 +34,7 @@ foreach test_dir $test_dirs {
         lappend ::all_tests $test_dir/[file root [file tail $file]]
     }
 }
+puts $::all_tests
 # Index to the next test to run in the ::all_tests list.
 set ::next_test 0
 
