@@ -949,7 +949,7 @@ void removeClientFromMemUsageBucket(client *c, int allow_eviction) {
  * returns 1 if client eviction for this client is allowed, 0 otherwise.
  */
 int updateClientMemUsageAndBucket(client *c) {
-    serverAssert(io_threads_op == IO_THREADS_OP_IDLE && c->conn);
+    serverAssert(c->running_tid == IOTHREAD_MAIN_THREAD_ID && c->conn);
     int allow_eviction = clientEvictionAllowed(c);
     removeClientFromMemUsageBucket(c, allow_eviction);
 
@@ -1003,6 +1003,9 @@ void getExpansiveClientsInfo(size_t *in_usage, size_t *out_usage) {
  */
 #define CLIENTS_CRON_MIN_ITERATIONS 5
 void clientsCron(void) {
+    /* TODO: for io thread v2 */
+    if (server.io_threads_num > 0) return;
+    
     /* Try to process at least numclients/server.hz of clients
      * per call. Since normally (if there are no big latency events) this
      * function is called server.hz times per second, in the average case we
@@ -1513,9 +1516,6 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         migrateCloseTimedoutSockets();
     }
 
-    /* Stop the I/O threads if we don't have enough pending work. */
-    stopThreadedIOIfNeeded();
-
     /* Resize tracking keys table if needed. This is also done at every
      * command execution, but we want to be sure that if the last command
      * executed changes the value via CONFIG SET, the server will perform
@@ -1667,7 +1667,6 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * events to handle. */
     if (ProcessingEventsWhileBlocked) {
         uint64_t processed = 0;
-        processed += handleClientsWithPendingReadsUsingThreads();
         processed += connTypeProcessPendingData();
         if (server.aof_state == AOF_ON || server.aof_state == AOF_WAIT_REWRITE)
             flushAppendOnlyFile(0);
@@ -1676,9 +1675,6 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
         server.events_processed_while_blocked += processed;
         return;
     }
-
-    /* We should handle pending reads clients ASAP after event loop. */
-    handleClientsWithPendingReadsUsingThreads();
 
     /* Handle pending data(typical TLS). (must be done before flushAppendOnlyFile) */
     connTypeProcessPendingData();
@@ -1750,7 +1746,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     long long prev_fsynced_reploff = server.fsynced_reploff;
 
     /* Write the AOF buffer on disk,
-     * must be done before handleClientsWithPendingWritesUsingThreads,
+     * must be done before handleClientsWithPendingWrites,
      * in case of appendfsync=always. */
     if (server.aof_state == AOF_ON || server.aof_state == AOF_WAIT_REWRITE)
         flushAppendOnlyFile(0);
@@ -1773,7 +1769,10 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     }
 
     /* Handle writes with pending output buffers. */
-    handleClientsWithPendingWritesUsingThreads();
+    handleClientsWithPendingWrites();
+
+    /* Let io thread to handle its pending clients. */
+    sendPendingClientsToIOThreads();
 
     /* Record cron time in beforeSleep. This does not include the time consumed by AOF writing and IO writing above. */
     monotime cron_start_time_after_write = getMonotonicUs();

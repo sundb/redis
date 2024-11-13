@@ -61,6 +61,7 @@ aeEventLoop *aeCreateEventLoop(int setsize) {
     eventLoop->beforesleep = NULL;
     eventLoop->aftersleep = NULL;
     eventLoop->flags = 0;
+    eventLoop->privdata = NULL;
     if (aeApiCreate(eventLoop) == -1) goto err;
     /* Events with mask == AE_NONE are not set. So let's initialize the
      * vector with it. */
@@ -378,6 +379,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
         /* Call the multiplexing API, will return only on timeout or when
          * some event fires. */
         numevents = aeApiPoll(eventLoop, tvp);
+        eventLoop->numevents = numevents;
 
         /* Don't process file events if not requested. */
         if (!(flags & AE_FILE_EVENTS)) {

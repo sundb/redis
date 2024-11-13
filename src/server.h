@@ -61,6 +61,7 @@ typedef long long ustime_t; /* microsecond time type. */
                            N-elements flat arrays */
 #include "rax.h"     /* Radix tree */
 #include "connection.h" /* Connection abstraction */
+#include "eventnotifier.h" /* Event notification */
 
 #define REDISMODULE_CORE 1
 typedef struct redisObject robj;
@@ -183,6 +184,9 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 
 /* Hash table parameters */
 #define HASHTABLE_MAX_LOAD_FACTOR 1.618   /* Maximum hash table load factor. */
+
+/* Main thread id when enabling io thread. */
+#define IOTHREAD_MAIN_THREAD_ID -1
 
 /* Command flags. Please check the definition of struct redisCommand in this file
  * for more information about the meaning of every flag. */
@@ -1158,6 +1162,9 @@ typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
     connection *conn;
+    int tid;                /* Thread ID this client is bound to. */
+    int running_tid;        /* Thread ID this client is running on. */
+    redisAtomic int closing;/* This client is in the process of being closed. */
     int resp;               /* RESP protocol version. Can be 2 or 3. */
     redisDb *db;            /* Pointer to currently SELECTed DB. */
     robj *name;             /* As set by CLIENT SETNAME. */
@@ -1225,6 +1232,7 @@ typedef struct client {
     sds peerid;             /* Cached peer ID. */
     sds sockname;           /* Cached connection target address. */
     listNode *client_list_node; /* list node in client list */
+    listNode *io_thread_client_list_node; /* list node in io thread client list */
     listNode *postponed_list_node; /* list node within the postponed list */
     listNode *pending_read_list_node; /* list node in clients pending read list */
     void *module_blocked_client; /* Pointer to the RedisModuleBlockedClient associated with this
@@ -1277,7 +1285,33 @@ typedef struct client {
 #ifdef LOG_REQ_RES
     clientReqResInfo reqres;
 #endif
+    redisAtomic size_t output_buffer_len;
+    redisAtomic size_t output_buffer_mem;
 } client;
+
+typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
+    long id;                                    /* The unique ID assigned. */
+    pthread_t tid;                              /* Thread ID */
+    aeEventLoop *el;                            /* Main event loop of io thread. */
+
+    list *job_queue;                           /* List of jobs to execute. */
+    eventNotifier *job_notifier;                         /* Used to wake up the loop when a job is added. */
+    pthread_mutex_t job_queue_mutext;          /* Mutex for job queue */
+
+    list *pending_clients;                /* List of clients with pending writes. */
+    eventNotifier *pending_clients_notifier;                /* Used to wake up the loop when write should be performed. */
+    pthread_mutex_t pending_clients_mutex;        /* Mutex for pending write list */
+
+    list *pending_clients_for_main_thread;     /* Clients that are waiting to be executed by the main thread. */
+    list *clients;                          /* IO thread managed clients. */
+} ioThread;
+
+#define IOTHREAD_JOB_HANDLE_CLIENT 1
+
+typedef struct ioThreadJob {
+    int type;
+    void *data;
+} ioThreadJob;
 
 /* ACL information */
 typedef struct aclInfo {
@@ -2462,7 +2496,7 @@ typedef struct {
 #define IO_THREADS_OP_IDLE 0
 #define IO_THREADS_OP_READ 1
 #define IO_THREADS_OP_WRITE 2
-extern int io_threads_op;
+// extern int io_threads_op;
 
 /* Hash-field data type (of t_hash.c) */
 typedef mstr hfield;
@@ -2678,9 +2712,7 @@ void whileBlockedCron(void);
 void blockingOperationStarts(void);
 void blockingOperationEnds(void);
 int handleClientsWithPendingWrites(void);
-int handleClientsWithPendingWritesUsingThreads(void);
-int handleClientsWithPendingReadsUsingThreads(void);
-int stopThreadedIOIfNeeded(void);
+void sendPendingClientsToIOThreads(void);
 int clientHasPendingReplies(client *c);
 int updateClientMemUsageAndBucket(client *c);
 void removeClientFromMemUsageBucket(client *c, int allow_eviction);
