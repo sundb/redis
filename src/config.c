@@ -2556,6 +2556,7 @@ static int updateMaxclients(const char **err) {
             *err = "The event loop API used by Redis is not able to handle the specified number of clients";
             return 0;
         }
+        resizeIOThreadsEventLoop(server.maxclients + CONFIG_FDSET_INCR);
     }
     return 1;
 }

@@ -2934,6 +2934,11 @@ char *getClientSockname(client *c) {
 sds catClientInfoString(sds s, client *client) {
     char flags[17], events[3], conninfo[CONN_INFO_LEN], *p;
 
+    /* Note: must resume io thread when exiting this function */
+    if (client->running_tid != IOTHREAD_MAIN_THREAD_ID) {
+        pauseIOThread(client->tid);
+    }
+
     p = flags;
     if (client->flags & CLIENT_SLAVE) {
         if (client->flags & CLIENT_MONITOR)
@@ -3008,6 +3013,10 @@ sds catClientInfoString(sds s, client *client) {
         " resp=%i", client->resp,
         " lib-name=%s", client->lib_name ? (char*)client->lib_name->ptr : "",
         " lib-ver=%s", client->lib_ver ? (char*)client->lib_ver->ptr : ""));
+    
+    if (client->running_tid != IOTHREAD_MAIN_THREAD_ID) {
+        resumeIOThread(client->tid);
+    }
     return ret;
 }
 
@@ -3017,6 +3026,15 @@ sds getAllClientsInfoString(int type) {
     client *client;
     sds o = sdsnewlen(SDS_NOINIT,200*listLength(server.clients));
     sdsclear(o);
+
+    /* pause all io threads if there are enough clients to call 'catClientInfoString',
+     * since catClientInfoString also can pause client if needed. */
+    int allpaused = 0;
+    if (server.io_threads_num > 1 && listLength(server.clients) > (size_t)server.io_threads_num*2) {
+        allpaused = 1;
+        pauseAllIOThreads();
+    }
+
     listRewind(server.clients,&li);
     while ((ln = listNext(&li)) != NULL) {
         client = listNodeValue(ln);
@@ -3024,6 +3042,8 @@ sds getAllClientsInfoString(int type) {
         o = catClientInfoString(o,client);
         o = sdscatlen(o,"\n",1);
     }
+
+    if (allpaused) resumeAllIOThreads();
     return o;
 }
 

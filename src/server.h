@@ -581,6 +581,14 @@ typedef enum {
 #define SHUTDOWN_NOW 4          /* Don't wait for replicas to catch up. */
 #define SHUTDOWN_FORCE 8        /* Don't let errors prevent shutdown. */
 
+/* IO thread pause status */
+#define IO_THREAD_UNPAUSED 0
+#define IO_THREAD_PAUSING  1
+#define IO_THREAD_PAUSED   2
+
+/* IO thread job type */
+#define IO_THREAD_JOB_RESIZE_EVENT_LOOP 1
+
 /* Command call flags, see call() function */
 #define CMD_CALL_NONE 0
 #define CMD_CALL_PROPAGATE_AOF (1<<0)
@@ -1304,6 +1312,8 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
 
     list *pending_clients_for_main_thread;     /* Clients that are waiting to be executed by the main thread. */
     list *clients;                          /* IO thread managed clients. */
+
+    redisAtomic int pause;                  /* Pause status for the io thread. */
 } ioThread;
 
 typedef struct ioThreadJob {
@@ -2722,7 +2732,12 @@ void putClientInPendingWriteQueue(client *c);
 /* iothread.c - the threaded io implementation */
 void initThreadedIO(void);
 void killIOThreads(void);
+void pauseIOThread(int id);
+void resumeIOThread(int id);
+void pauseAllIOThreads(void);
+void resumeAllIOThreads(void);
 int isClientClosing(client *c);
+void resizeIOThreadsEventLoop(unsigned int newsize);
 void sendPendingClientsToIOThreads(void);
 void putInPendingClienstForMainThread(client *c);
 void putInPendingClienstForIOThreads(client *c);

@@ -41,6 +41,48 @@ int isClientClosing(client *c) {
     return closing;
 }
 
+/* Only the main thread can call these function. */
+void pauseIOThread(int id) {
+    if (!pthread_equal(pthread_self(), server.main_thread_id)) {
+        return;
+        // TODO: panic after we move somethings to main thread.
+        // serverPanic("pauseIOThread() must be called in the main thread.");
+    }
+    int pause;
+    atomicGetWithSync(io_threads[id].pause, pause);
+    if (pause != IO_THREAD_UNPAUSED) {
+        serverAssert(pause == IO_THREAD_PAUSED);
+        return;
+    }
+    atomicSetWithSync(io_threads[id].pause, IO_THREAD_PAUSING);
+    /* Just notify io thread, no actual job, since io threads
+     * check pause status in beforesleep, so just try to notify. */
+    triggerEventNotifier(io_threads[id].job_notifier);
+
+    while (pause != IO_THREAD_PAUSED) {
+        atomicGetWithSync(io_threads[id].pause, pause);
+        for (int i = 1; i < 1000; i++) {
+            /* just wait a moment */
+        }
+    }
+}
+
+void resumeIOThread(int id) {
+    atomicSetWithSync(io_threads[id].pause, IO_THREAD_UNPAUSED);
+}
+
+void pauseAllIOThreads(void) {
+    for (int i = 1; i < server.io_threads_num; i++) {
+        pauseIOThread(i);
+    }
+}
+
+void resumeAllIOThreads(void) {
+    for (int i = 1; i < server.io_threads_num; i++) {
+        resumeIOThread(i);
+    }
+}
+
 void updateIOThreadClientOutputBufferMemoryUsage(client *c) {
     serverAssert(c->running_tid != IOTHREAD_MAIN_THREAD_ID);
     size_t list_item_size = sizeof(listNode) + sizeof(clientReplyBlock);
@@ -64,6 +106,21 @@ size_t getIOThreadClientMemoryUsage(client *c, size_t *output_buffer_mem_usage) 
 
 void ioThreadBeforeSleep(struct aeEventLoop *el) {
     ioThread *t = el->privdata;
+
+    /* Check if i am pausing */
+    int pause;
+    atomicGetWithSync(t->pause, pause);
+    if (pause == IO_THREAD_PAUSING) {
+        atomicSetWithSync(t->pause, IO_THREAD_PAUSED);
+        /* Wait for unpause */
+        while (pause == IO_THREAD_UNPAUSED) {
+            atomicGetWithSync(t->pause, pause);
+            for (int i = 1; i < 1000; i++) {
+                /* just wait a moment */
+            }
+        }
+    }
+
     if (listLength(t->pending_clients_for_main_thread) > 0) {
         pthread_mutex_lock(&main_thread_pending_clients_mutexs[t->id]);
         listJoin(main_thread_pending_clients[t->id], t->pending_clients_for_main_thread);
@@ -82,6 +139,8 @@ int ioThreadCron(struct aeEventLoop *eventLoop, long long id, void *ptr) {
     UNUSED(id);
 
     ioThread *t = ptr;
+
+    serverLog(LL_DEBUG, "io thead %ld, event loop size: %d", t->id, aeGetSetSize(t->el));
 
     /* Clients cron in io thread. */
     int iterations = IO_THREAD_CRON_CLIENTS_ITERATIONS;
@@ -265,8 +324,58 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
 void handleJobsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int mask) {
     UNUSED(ae);
     UNUSED(fd);
-    UNUSED(ptr);
     UNUSED(mask);
+
+    ioThread *t = ptr;
+
+    /* Handle fd first. */
+    handleEventNotifier(t->job_notifier);
+    
+    list *jobs = listCreate();
+    pthread_mutex_lock(&t->job_queue_mutext);
+    listJoin(jobs, t->job_queue);
+    pthread_mutex_unlock(&t->job_queue_mutext);
+    if (listLength(jobs) == 0) {
+        listRelease(jobs);
+        return;
+    }
+
+    listIter li;
+    listNode *ln;
+    listRewind(jobs, &li);
+    while ((ln = listNext(&li))) {
+        ioThreadJob *job = listNodeValue(ln);
+        switch (job->type) {
+            case IO_THREAD_JOB_RESIZE_EVENT_LOOP: {
+                unsigned int newsize = (long)job->data;
+                if (aeResizeSetSize(t->el, newsize) == AE_ERR) {
+                    /* How to handle failure*/
+                    serverLog(LL_WARNING, "Failed to resize event loop.");
+                }
+                break;
+            }
+            default: {
+                serverPanic("Unknown io thread job type");
+                break;
+            }
+        }
+    }
+    listRelease(jobs);
+}
+
+void resizeIOThreadsEventLoop(unsigned int newsize) {
+    if (server.io_threads_num <= 1) return;
+
+    for (int i = 1; i < server.io_threads_num; i++) {
+        ioThread *t = &io_threads[i];
+        ioThreadJob *job = zmalloc(sizeof(*job));
+        job->type = IO_THREAD_JOB_RESIZE_EVENT_LOOP;
+        job->data = (void*)(long)newsize;
+        pthread_mutex_lock(&t->job_queue_mutext);
+        listAddNodeTail(t->job_queue, job);
+        pthread_mutex_unlock(&t->job_queue_mutext);
+        triggerEventNotifier(t->job_notifier);
+    }
 }
 
 /* Initialize the data structures needed for threaded I/O. */
@@ -287,11 +396,12 @@ void initThreadedIO(void) {
         t->id = i;
         t->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
         t->job_queue = listCreate();
-        t->job_notifier = createEventNotifier();
+        listSetFreeMethod(t->job_queue, zfree);
         t->pending_clients = listCreate();
-        t->pending_clients_notifier = createEventNotifier();
         t->pending_clients_for_main_thread = listCreate();
         t->clients = listCreate();
+        t->job_notifier = createEventNotifier();
+        t->pending_clients_notifier = createEventNotifier();
 
         pthread_mutexattr_t *attr = NULL;
         #ifdef __linux__
@@ -301,7 +411,6 @@ void initThreadedIO(void) {
         pthread_mutex_init(&t->job_queue_mutext, attr);
         pthread_mutex_init(&t->pending_clients_mutex, attr);
 
-        t->job_notifier = createEventNotifier();
         if (aeCreateFileEvent(t->el, getReadEventFd(t->job_notifier),
                               AE_READABLE, handleJobsFromMainThread, t) != AE_OK)
         {
@@ -309,7 +418,6 @@ void initThreadedIO(void) {
             exit(1);
         }
 
-        t->pending_clients_notifier = createEventNotifier();
         if (aeCreateFileEvent(t->el, getReadEventFd(t->pending_clients_notifier),
                               AE_READABLE, handleClientsFromMainThread, t) != AE_OK)
         {
