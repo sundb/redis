@@ -1004,7 +1004,7 @@ void getExpansiveClientsInfo(size_t *in_usage, size_t *out_usage) {
 #define CLIENTS_CRON_MIN_ITERATIONS 5
 void clientsCron(void) {
     /* TODO: for io thread v2 */
-    if (server.io_threads_num > 0) return;
+    if (server.io_threads_num > 1) return;
     
     /* Try to process at least numclients/server.hz of clients
      * per call. Since normally (if there are no big latency events) this

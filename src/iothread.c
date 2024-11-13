@@ -271,7 +271,7 @@ void handleJobsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int mas
 
 /* Initialize the data structures needed for threaded I/O. */
 void initThreadedIO(void) {
-    if (server.io_threads_num == 0) return;
+    if (server.io_threads_num <= 1) return;
 
     server.io_threads_active = 1;
 
@@ -342,6 +342,8 @@ void initThreadedIO(void) {
 }
 
 void killIOThreads(void) {
+    if (server.io_threads_num <= 1) return;
+
     int err, j;
     for (j = 0; j < server.io_threads_num; j++) {
         if (io_threads[j].tid == pthread_self()) continue;

@@ -1433,7 +1433,7 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
     }
 
     /* Handle clients in io thread */
-    if (server.io_threads_num > 0) {
+    if (server.io_threads_num > 1) {
         /* Select io thread */
         c->tid = c->id % server.io_threads_num;
         c->running_tid = c->tid;
