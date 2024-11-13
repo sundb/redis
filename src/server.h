@@ -1285,6 +1285,8 @@ typedef struct client {
 #ifdef LOG_REQ_RES
     clientReqResInfo reqres;
 #endif
+    redisAtomic size_t output_buffer_len;
+    redisAtomic size_t output_buffer_mem;
 } client;
 
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {

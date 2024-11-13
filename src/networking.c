@@ -24,6 +24,7 @@
 
 static void putInPendingClienstForMainThread(client *c);
 static void putInPendingClienstForIOThreads(client *c);
+void updateIOThreadClientOutputBufferMemoryUsage(client *c);
 static void setProtocolError(const char *errstr, client *c);
 static void pauseClientsByClient(mstime_t end, int isPauseClientAll);
 char *getClientSockname(client *c);
@@ -1817,12 +1818,19 @@ void freeClient(client *c) {
     zfree(c);
 }
 
+int isClientClosing(client *c) {
+    int closing = 0;
+    atomicGetWithSync(c->closing, closing);
+    return closing;
+}
+
 /* Schedule a client to free it at a safe time in the beforeSleep() function.
  * This function is useful when we need to terminate a client but we are in
  * a context where calling freeClient() is not possible, because the client
  * should be valid for the continuation of the flow of the program. */
 void freeClientAsync(client *c) {
     if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
+        if (isClientClosing(c)) return;
         /* If called in the IO thread, let main thread handle it. If called
          * in the main thread, just set 'closing' flag, and IO thread will
          * schedule it to be freed by main thread. */
@@ -2125,8 +2133,11 @@ int writeToClient(client *c, int handler_installed) {
     }
     /* Update client's memory usage after writing.
      * Since this isn't thread safe we do this conditionally. */
-    if (c->running_tid == IOTHREAD_MAIN_THREAD_ID)
+    if (c->running_tid == IOTHREAD_MAIN_THREAD_ID) {
         updateClientMemUsageAndBucket(c);
+    } else {
+        updateIOThreadClientOutputBufferMemoryUsage(c);
+    }
     return C_OK;
 }
 
@@ -3143,12 +3154,6 @@ void quitCommand(client *c) {
     c->flags |= CLIENT_CLOSE_AFTER_REPLY;
 }
 
-int isClientClosing(client *c) {
-    int closing = 0;
-    atomicGetWithSync(c->closing, closing);
-    return closing;
-}
-
 void clientCommand(client *c) {
     listNode *ln;
     listIter li;
@@ -3972,10 +3977,36 @@ size_t getClientOutputBufferMemoryUsage(client *c) {
     }
 }
 
+void updateIOThreadClientOutputBufferMemoryUsage(client *c) {
+    serverAssert(c->running_tid != IOTHREAD_MAIN_THREAD_ID);
+    size_t list_item_size = sizeof(listNode) + sizeof(clientReplyBlock);
+    size_t mem = c->reply_bytes + (list_item_size*listLength(c->reply));
+    atomicSet(c->output_buffer_mem, mem);
+    atomicSet(c->output_buffer_len, listLength(c->reply));
+}
+
+size_t getIOThreadClientMemoryUsage(client *c, size_t *output_buffer_mem_usage) {
+    serverAssert(c->running_tid != IOTHREAD_MAIN_THREAD_ID);
+    size_t mem;
+    atomicGet(c->output_buffer_mem, mem);
+    if (output_buffer_mem_usage != NULL)
+        *output_buffer_mem_usage = mem;
+    mem += 0; //TODO: c->querybuf ? sdsZmallocSize(c->querybuf) : 0;
+    mem += zmalloc_size(c);
+    mem += c->buf_usable_size;
+    /* subscribe, multi, tracking clients are managed by main thread. */
+    return mem;
+}
+
 /* Returns the total client's memory usage.
  * Optionally, if output_buffer_mem_usage is not NULL, it fills it with
  * the client output buffer memory usage portion of the total. */
 size_t getClientMemoryUsage(client *c, size_t *output_buffer_mem_usage) {
+    if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
+        size_t mem = getIOThreadClientMemoryUsage(c, output_buffer_mem_usage);
+        return mem;
+    }
+
     size_t mem = getClientOutputBufferMemoryUsage(c);
 
     if (output_buffer_mem_usage != NULL)
@@ -4601,9 +4632,9 @@ void initThreadedIO(void) {
         attr = zmalloc(sizeof(pthread_mutexattr_t));
         pthread_mutexattr_settype(attr, PTHREAD_MUTEX_ADAPTIVE_NP);
         #endif
-
         pthread_mutex_init(&t->job_queue_mutext, attr);
         pthread_mutex_init(&t->pending_clients_mutex, attr);
+
         t->job_notifier = createEventNotifier();
         if (aeCreateFileEvent(t->el, getReadEventFd(t->job_notifier),
                               AE_READABLE, handleJobsFromMainThread, t) != AE_OK)
