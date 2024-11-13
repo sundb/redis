@@ -2709,6 +2709,7 @@ void putInIOThreadPendingClientForMainThread(client *c) {
         connSetWriteHandler(c->conn, NULL);
         ioThread *t = &io_threads[c->tid];
         listAddNodeTail(t->main_thread_pending_clients, c);
+        aeSetDontWait(t->el, 1);
     }
 }
 
