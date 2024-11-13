@@ -2705,7 +2705,6 @@ void whileBlockedCron(void);
 void blockingOperationStarts(void);
 void blockingOperationEnds(void);
 int handleClientsWithPendingWrites(void);
-void sendPendingClientsToIOThreads(void);
 int clientHasPendingReplies(client *c);
 int updateClientMemUsageAndBucket(client *c);
 void removeClientFromMemUsageBucket(client *c, int allow_eviction);
@@ -2714,12 +2713,21 @@ int writeToClient(client *c, int handler_installed);
 void linkClient(client *c);
 void protectClient(client *c);
 void unprotectClient(client *c);
-void initThreadedIO(void);
 client *lookupClientByID(uint64_t id);
 int authRequired(client *c);
 void putClientInPendingWriteQueue(client *c);
 /* reply macros */
 #define ADD_REPLY_BULK_CBUFFER_STRING_CONSTANT(c, str) addReplyBulkCBuffer(c, str, strlen(str))
+
+/* iothread.c - the threaded io implementation */
+void initThreadedIO(void);
+void killIOThreads(void);
+int isClientClosing(client *c);
+void sendPendingClientsToIOThreads(void);
+void putInPendingClienstForMainThread(client *c);
+void putInPendingClienstForIOThreads(client *c);
+void updateIOThreadClientOutputBufferMemoryUsage(client *c);
+size_t getIOThreadClientMemoryUsage(client *c, size_t *output_buffer_mem_usage);
 
 /* logreqres.c - logging of requests and responses */
 void reqresReset(client *c, int free_buf);
@@ -3922,7 +3930,6 @@ void xorDigest(unsigned char *digest, const void *ptr, size_t len);
 sds catSubCommandFullname(const char *parent_name, const char *sub_name);
 void commandAddSubcommand(struct redisCommand *parent, struct redisCommand *subcommand, const char *declared_name);
 void debugDelay(int usec);
-void killIOThreads(void);
 void killThreads(void);
 void makeThreadKillable(void);
 void swapMainDbWithTempDb(redisDb *tempDb);
