@@ -841,6 +841,9 @@ int flushCommandCommon(client *c, int type, int flags, SlotsFlush *sflush) {
         blocking_async = 1;
     }
 
+    // TODO: Add support for FLUSHALL ASYNC
+    blocking_async = 0;
+
     if (type == FLUSH_TYPE_ALL)
         flushAllDataAndResetRDB(flags | EMPTYDB_NOFUNCTIONS);
     else
