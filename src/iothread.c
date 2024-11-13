@@ -282,7 +282,7 @@ void initThreadedIO(void) {
     }
 
     /* Spawn and initialize the I/O threads. */
-    for (int i = 0; i < server.io_threads_num; i++) {
+    for (int i = 1; i < server.io_threads_num; i++) {
         ioThread *t = &io_threads[i];
         t->id = i;
         t->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
@@ -345,7 +345,7 @@ void killIOThreads(void) {
     if (server.io_threads_num <= 1) return;
 
     int err, j;
-    for (j = 0; j < server.io_threads_num; j++) {
+    for (j = 1; j < server.io_threads_num; j++) {
         if (io_threads[j].tid == pthread_self()) continue;
         if (io_threads[j].tid && pthread_cancel(io_threads[j].tid) == 0) {
             if ((err = pthread_join(io_threads[j].tid,NULL)) != 0) {
@@ -363,7 +363,8 @@ void killIOThreads(void) {
 /* Add the pending clients to the list of IO threads, and trigger an event to
  * notify io threads to handle. */
 void sendPendingClientsToIOThreads(void) {
-    for (int i = 0; i < server.io_threads_num; i++) {
+    if (server.io_threads_num <= 1) return;
+    for (int i = 1; i < server.io_threads_num; i++) {
         if (listLength(pending_clients_for_io_threads[i]) > 0) {
             ioThread *t = &io_threads[i];
             pthread_mutex_lock(&t->pending_clients_mutex);
