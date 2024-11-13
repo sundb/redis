@@ -2803,14 +2803,16 @@ int processInputBuffer(client *c) {
 
         if (c->reqtype == PROTO_REQ_INLINE) {
             if (processInlineBuffer(c) != C_OK) {
-                putInIOThreadPendingClientForMainThread(c);
+                /* no need to send to main thread when no protocol error */
+                if (c->read_flags)
+                    putInIOThreadPendingClientForMainThread(c);
                 break;
             }
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
             if (processMultibulkBuffer(c) != C_OK) {
                 /* If the command is not ready but no error happens, we will
                  * wait next read, don't send it to main thread to process. */
-                if (clientHasPendingReplies(c))
+                if (clientHasPendingReplies(c) || c->read_flags)
                     putInIOThreadPendingClientForMainThread(c);
                 break;
             }
@@ -2843,6 +2845,7 @@ int processInputBuffer(client *c) {
 
     if (c->running_tid == IOTHREAD_MAIN_THREAD_ID && c->read_flags) {
         handleClientRead(c);
+        c->read_flags = 0;
     }
 
     if (c->flags & CLIENT_MASTER) {
@@ -4557,7 +4560,7 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
             handleClientRead(c);
             c->running_tid = c->tid;
             listAddNodeHead(io_thread_pending_clients[t->id], c);
-            goto end;
+            continue;
         }
 
         /* The client from IO thread and mark it as CLIENT_CLOSE_ASAP, it is not
@@ -4598,6 +4601,8 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
             c->tid = IOTHREAD_MAIN_THREAD_ID;
             // TODO: main thread owns the client, rebind the event loop,
             // and set the read/write handler
+            connRebindEventLoop(c->conn, server.el);
+            continue;
         }
 
         /* If the client is still valid, let io threads handle its writing. */
@@ -4616,7 +4621,6 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
     server.stat_io_reads_processed += listLength(clients);
     listRelease(clients);
 
-end:
     /* Trigger the io thread to handle the clients. */
     pthread_mutex_lock(&(t->pending_clients_mutex));
     listJoin(t->pending_clients, io_thread_pending_clients[t->id]);
