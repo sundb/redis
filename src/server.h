@@ -1306,8 +1306,6 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     list *clients;                          /* IO thread managed clients. */
 } ioThread;
 
-#define IOTHREAD_JOB_HANDLE_CLIENT 1
-
 typedef struct ioThreadJob {
     int type;
     void *data;
@@ -2492,11 +2490,6 @@ typedef struct {
 
 #define OBJ_HASH_KEY 1
 #define OBJ_HASH_VALUE 2
-
-#define IO_THREADS_OP_IDLE 0
-#define IO_THREADS_OP_READ 1
-#define IO_THREADS_OP_WRITE 2
-// extern int io_threads_op;
 
 /* Hash-field data type (of t_hash.c) */
 typedef mstr hfield;

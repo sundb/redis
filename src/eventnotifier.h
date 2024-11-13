@@ -1,4 +1,4 @@
-/* eventnotifier.h
+/* eventnotifier.h -- An event notifier based on eventfd or pipe.
  *
  * Copyright (c) 2024-Present, Redis Ltd.
  * All rights reserved.
