@@ -1827,7 +1827,10 @@ void freeClientAsync(client *c) {
          * schedule it to be freed by main thread. */
         atomicSetWithSync(c->closing, 1);
         if (pthread_equal(pthread_self(), server.main_thread_id)) {
-            connShutdown(c->conn); /* Trigger event for io threads. TODO:safe? */
+            /* Trigger event for io threads if it is not active, and
+             * shutdown can make sure the client can not be used anymore.
+             * TODO:is it safe? */
+            connShutdown(c->conn);
         } else {
             putInPendingClienstForMainThread(c);
         }
@@ -2129,8 +2132,6 @@ int writeToClient(client *c, int handler_installed) {
      * Since this isn't thread safe we do this conditionally. */
     if (c->running_tid == IOTHREAD_MAIN_THREAD_ID) {
         updateClientMemUsageAndBucket(c);
-    } else {
-        updateIOThreadClientOutputBufferMemoryUsage(c);
     }
     return C_OK;
 }

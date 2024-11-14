@@ -20,14 +20,15 @@ static pthread_mutex_t main_thread_pending_clients_mutexs[IO_THREADS_MAX_NUM] __
 static eventNotifier* main_thread_pending_clients_notifier[IO_THREADS_MAX_NUM] __attribute__((aligned(CACHE_LINE_SIZE)));
 
 void putInPendingClienstForMainThread(client *c) {
-    /* The IO thread no longer manage it. */
+    /* The IO thread no longer manage it, just skip if it already is handled.
+     * The read and write events happen at the same time. */
     if (c->io_thread_client_list_node) {
         listDelNode(io_threads[c->tid].clients, c->io_thread_client_list_node);
         c->io_thread_client_list_node = NULL;
+        connSetReadHandler(c->conn, NULL);
+        connSetWriteHandler(c->conn, NULL);
+        listAddNodeTail(io_threads[c->tid].pending_clients_for_main_thread, c);
     }
-    // connSetReadHandler(c->conn, NULL);
-    // connSetWriteHandler(c->conn, NULL);
-    listAddNodeTail(io_threads[c->tid].pending_clients_for_main_thread, c);
 }
 
 void putInPendingClienstForIOThreads(client *c) {
@@ -92,7 +93,7 @@ void pauseAllIOThreads(void) {
         serverAssert(paused == IO_THREAD_UNPAUSED);
         atomicSetWithSync(io_threads[i].paused, IO_THREAD_PAUSING);
         /* Just notify io thread, no actual job, since io threads
-        * check paused status in beforesleep, so just try to notify. */
+         * check paused status in beforesleep, so just try to notify. */
         triggerEventNotifier(io_threads[i].job_notifier);
     }
     /* Wait for all io threads paused */
@@ -123,19 +124,6 @@ void updateIOThreadClientOutputBufferMemoryUsage(client *c) {
     atomicSet(c->output_buffer_len, listLength(c->reply));
 }
 
-size_t getIOThreadClientMemoryUsage(client *c, size_t *output_buffer_mem_usage) {
-    serverAssert(c->running_tid != IOTHREAD_MAIN_THREAD_ID);
-    size_t mem;
-    atomicGet(c->output_buffer_mem, mem);
-    if (output_buffer_mem_usage != NULL)
-        *output_buffer_mem_usage = mem;
-    mem += 0; //TODO: c->querybuf ? sdsZmallocSize(c->querybuf) : 0;
-    mem += zmalloc_size(c);
-    mem += c->buf_usable_size;
-    /* subscribe, multi, tracking clients are managed by main thread. */
-    return mem;
-}
-
 void ioThreadBeforeSleep(struct aeEventLoop *el) {
     ioThread *t = el->privdata;
 
@@ -152,18 +140,6 @@ void ioThreadBeforeSleep(struct aeEventLoop *el) {
     }
 
     if (listLength(t->pending_clients_for_main_thread) > 0) {
-        listIter li;
-        listNode *ln;
-        listRewind(t->pending_clients_for_main_thread, &li);
-        while ((ln = listNext(&li))) {
-            client *c = listNodeValue(ln);
-            // if (connHasReadHandler(c->conn) || connHasWriteHandler(c->conn)) {
-            //     serverLog(LL_WARNING, "IO thread %ld, client %ld has read/write handler before sleep.",
-            //                            t->id, c->id);
-            // }
-            connSetReadHandler(c->conn, NULL);
-            connSetWriteHandler(c->conn, NULL);
-        }
         pthread_mutex_lock(&main_thread_pending_clients_mutexs[t->id]);
         listJoin(main_thread_pending_clients[t->id], t->pending_clients_for_main_thread);
         pthread_mutex_unlock(&main_thread_pending_clients_mutexs[t->id]);
@@ -263,6 +239,7 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
              * to the next. */
             continue;
         }
+        /* The main thread will free this client. */
         if (c->flags & CLIENT_CLOSE_ASAP) continue;
 
         /* We may have pending replies if a thread readQueryFromClient() produced
@@ -271,13 +248,24 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
         if (!(c->flags & CLIENT_PENDING_WRITE) && clientHasPendingReplies(c))
             putClientInPendingWriteQueue(c);
 
-        /* If the client is still valid, let main thread handle it. */
-        if (c->flags & CLIENT_PUBSUB ||
-            c->flags & CLIENT_BLOCKED ||
-            c->flags & CLIENT_SLAVE)
+        /* If the client only can be processed in the main thread, otherwise,
+         * there will be data race. */
+        if (c->flags & CLIENT_SLAVE ||
+            c->flags & CLIENT_MONITOR ||
+            c->flags & CLIENT_MULTI ||
+            c->flags & CLIENT_PUBSUB ||
+            c->flags & CLIENT_TRACKING ||
+            c->flags & CLIENT_PUSHING ||
+            (c->lastcmd && (c->lastcmd->proc == watchCommand ||
+                            c->lastcmd->proc == flushallCommand ||
+                            c->lastcmd->proc == flushdbCommand ||
+                            c->lastcmd->proc == sflushCommand)))
         {
-            // TODO: main thread owns the client, rebind the event loop,
-            // and set the read/write handler
+            /* Main thread owns the client, rebind the event loop,
+             * and set the read/write handler */
+            connRebindEventLoop(c->conn, server.el);
+            connSetReadHandler(c->conn, readQueryFromClient);
+            c->tid = IOTHREAD_MAIN_THREAD_ID;
         }
 
         /* If the client is still valid, let io threads handle its writing. */
@@ -288,15 +276,21 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
             continue;
         }
 
-        // TODO: remained clients are handled by main thread, what's the client status?
+        /* TODO: remaining clients are handled by main thread, what's the client status?
+         * it should not reach here? */
     }
     listRelease(clients);
 
-    /* Trigger the io thread to handle the clients. */
-    pthread_mutex_lock(&(t->pending_clients_mutex));
-    listJoin(t->pending_clients, pending_clients_for_io_threads[t->id]);
-    pthread_mutex_unlock(&(t->pending_clients_mutex));
-    triggerEventNotifier(t->pending_clients_notifier);
+    /* Trigger the io thread to handle these clients ASAP to make them processed in parallel. */
+    if (server.aof_fsync != AOF_FSYNC_ALWAYS) {
+        /* If AOF fsync policy is always, we should not let io thread handle these clients
+         * now since we don't flush AOF buffer to file and sync yet. So these clients will
+         * be delayed to send io threads in beforeSleep after flushAppendOnlyFile. */
+        pthread_mutex_lock(&(t->pending_clients_mutex));
+        listJoin(t->pending_clients, pending_clients_for_io_threads[t->id]);
+        pthread_mutex_unlock(&(t->pending_clients_mutex));
+        triggerEventNotifier(t->pending_clients_notifier);
+    }
 }
 
 void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int mask) {
@@ -348,7 +342,7 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
         if (c->flags & CLIENT_PENDING_WRITE) {
             c->flags &= ~CLIENT_PENDING_WRITE;
             writeToClient(c, 0);
-            if (clientHasPendingReplies(c)) {
+            if (!isClientClosing(c) && clientHasPendingReplies(c)) {
                 connSetWriteHandler(c->conn, sendReplyToClient);
             }
         }

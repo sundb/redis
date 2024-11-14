@@ -2745,7 +2745,6 @@ void sendPendingClientsToIOThreads(void);
 void putInPendingClienstForMainThread(client *c);
 void putInPendingClienstForIOThreads(client *c);
 void updateIOThreadClientOutputBufferMemoryUsage(client *c);
-size_t getIOThreadClientMemoryUsage(client *c, size_t *output_buffer_mem_usage);
 
 /* logreqres.c - logging of requests and responses */
 void reqresReset(client *c, int free_buf);
