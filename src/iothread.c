@@ -251,9 +251,6 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
 
         // TODO: remained clients are handled by main thread, what's the client status?
     }
-
-    /* Update processed count on server */
-    server.stat_io_reads_processed += listLength(clients);
     listRelease(clients);
 
     /* Trigger the io thread to handle the clients. */
@@ -316,12 +313,7 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
                 connSetWriteHandler(c->conn, sendReplyToClient);
             }
         }
-
-        /* TODO: Update the client in the mem usage after we're done processing it in the io-threads */
-        // updateClientMemUsageAndBucket(c);
     }
-    /* TODO: Update processed count on server */
-    server.stat_io_writes_processed += listLength(clients);
     listRelease(clients);
 }
 
@@ -439,7 +431,7 @@ void initThreadedIO(void) {
             exit(1);
         }
 
-        // Main thread
+        /* For main thread */
         pending_clients_for_io_threads[i] = listCreate();
         main_thread_pending_clients[i] = listCreate();
         pthread_mutex_init(&main_thread_pending_clients_mutexs[i], attr);

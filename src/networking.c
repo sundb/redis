@@ -2059,6 +2059,9 @@ int _writeToClient(client *c, ssize_t *nwritten) {
 int writeToClient(client *c, int handler_installed) {
     /* Update total number of writes on server */
     atomicIncr(server.stat_total_writes_processed, 1);
+    if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
+        atomicIncr(server.stat_io_writes_processed, 1);
+    }
 
     ssize_t nwritten = 0, totwritten = 0;
 
@@ -2750,6 +2753,9 @@ void readQueryFromClient(connection *conn) {
 
     /* Update total number of reads on server */
     atomicIncr(server.stat_total_reads_processed, 1);
+    if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
+        atomicIncr(server.stat_io_reads_processed, 1);
+    }
 
     readlen = PROTO_IOBUF_LEN;
     /* If this is a multi bulk request, and we are processing a bulk reply

@@ -2568,9 +2568,9 @@ void resetServerStats(void) {
     server.stat_sync_full = 0;
     server.stat_sync_partial_ok = 0;
     server.stat_sync_partial_err = 0;
-    server.stat_io_reads_processed = 0;
+    atomicSet(server.stat_io_reads_processed, 0);
     atomicSet(server.stat_total_reads_processed, 0);
-    server.stat_io_writes_processed = 0;
+    atomicSet(server.stat_io_writes_processed, 0);
     atomicSet(server.stat_total_writes_processed, 0);
     atomicSet(server.stat_client_qbuf_limit_disconnections, 0);
     server.stat_client_outbuf_limit_disconnections = 0;
@@ -5871,6 +5871,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
         long long current_active_defrag_time = server.stat_last_active_defrag_time ?
             (long long) elapsedUs(server.stat_last_active_defrag_time): 0;
         long long stat_client_qbuf_limit_disconnections;
+        long long stat_io_reads_processed, stat_io_writes_processed;
         atomicGet(server.stat_total_reads_processed, stat_total_reads_processed);
         atomicGet(server.stat_total_writes_processed, stat_total_writes_processed);
         atomicGet(server.stat_net_input_bytes, stat_net_input_bytes);
@@ -5878,6 +5879,8 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
         atomicGet(server.stat_net_repl_input_bytes, stat_net_repl_input_bytes);
         atomicGet(server.stat_net_repl_output_bytes, stat_net_repl_output_bytes);
         atomicGet(server.stat_client_qbuf_limit_disconnections, stat_client_qbuf_limit_disconnections);
+        atomicGet(server.stat_io_reads_processed, stat_io_reads_processed);
+        atomicGet(server.stat_io_writes_processed, stat_io_writes_processed);
 
         if (sections++) info = sdscat(info,"\r\n");
         info = sdscatprintf(info, "# Stats\r\n" FMTARGS(
@@ -5929,8 +5932,8 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "dump_payload_sanitizations:%lld\r\n", server.stat_dump_payload_sanitizations,
             "total_reads_processed:%lld\r\n", stat_total_reads_processed,
             "total_writes_processed:%lld\r\n", stat_total_writes_processed,
-            "io_threaded_reads_processed:%lld\r\n", server.stat_io_reads_processed,
-            "io_threaded_writes_processed:%lld\r\n", server.stat_io_writes_processed,
+            "io_threaded_reads_processed:%lld\r\n", stat_io_reads_processed,
+            "io_threaded_writes_processed:%lld\r\n", stat_io_writes_processed,
             "client_query_buffer_limit_disconnections:%lld\r\n", stat_client_qbuf_limit_disconnections,
             "client_output_buffer_limit_disconnections:%lld\r\n", server.stat_client_outbuf_limit_disconnections,
             "reply_buffer_shrinks:%lld\r\n", server.stat_reply_buffer_shrinks,
