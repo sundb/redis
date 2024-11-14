@@ -1313,7 +1313,7 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     list *pending_clients_for_main_thread;     /* Clients that are waiting to be executed by the main thread. */
     list *clients;                          /* IO thread managed clients. */
 
-    redisAtomic int pause;                  /* Pause status for the io thread. */
+    redisAtomic int paused;                  /* Paused status for the io thread. */
 } ioThread;
 
 typedef struct ioThreadJob {
@@ -1608,6 +1608,7 @@ struct redisServer {
     int errors_enabled;         /* If true, errorstats is enabled, and we will add new errors. */
     unsigned int lruclock; /* Clock for LRU eviction */
     volatile sig_atomic_t shutdown_asap; /* Shutdown ordered by signal handler. */
+    volatile sig_atomic_t crashing;      /* Server is crashing report. */
     mstime_t shutdown_mstime;   /* Timestamp to limit graceful shutdown. */
     int last_sig_received;      /* Indicates the last SIGNAL received, if any (e.g., SIGINT or SIGTERM). */
     int shutdown_flags;         /* Flags passed to prepareForShutdown(). */

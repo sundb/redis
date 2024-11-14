@@ -48,19 +48,17 @@ void pauseIOThread(int id) {
         // TODO: panic after we move somethings to main thread.
         // serverPanic("pauseIOThread() must be called in the main thread.");
     }
-    int pause;
-    atomicGetWithSync(io_threads[id].pause, pause);
-    if (pause != IO_THREAD_UNPAUSED) {
-        serverAssert(pause == IO_THREAD_PAUSED);
-        return;
-    }
-    atomicSetWithSync(io_threads[id].pause, IO_THREAD_PAUSING);
+    int paused;
+    atomicGetWithSync(io_threads[id].paused, paused);
+    /* Don't support to call reentrant */
+    serverAssert(paused == IO_THREAD_UNPAUSED);
+    atomicSetWithSync(io_threads[id].paused, IO_THREAD_PAUSING);
     /* Just notify io thread, no actual job, since io threads
-     * check pause status in beforesleep, so just try to notify. */
+     * check paused status in beforesleep, so just try to notify. */
     triggerEventNotifier(io_threads[id].job_notifier);
-
-    while (pause != IO_THREAD_PAUSED) {
-        atomicGetWithSync(io_threads[id].pause, pause);
+    /* Wait for paused */
+    while (paused != IO_THREAD_PAUSED) {
+        atomicGetWithSync(io_threads[id].paused, paused);
         for (int i = 1; i < 1000; i++) {
             /* just wait a moment */
         }
@@ -68,7 +66,13 @@ void pauseIOThread(int id) {
 }
 
 void resumeIOThread(int id) {
-    atomicSetWithSync(io_threads[id].pause, IO_THREAD_UNPAUSED);
+    /* Check if it is pause, since we must call 'pauseIOThread'
+     * and resumeIOThread in pairs */
+    int paused;
+    atomicGetWithSync(io_threads[id].paused, paused);
+    serverAssert(paused == IO_THREAD_PAUSED);
+    /* Resume */
+    atomicSetWithSync(io_threads[id].paused, IO_THREAD_UNPAUSED);
 }
 
 void pauseAllIOThreads(void) {
@@ -108,13 +112,13 @@ void ioThreadBeforeSleep(struct aeEventLoop *el) {
     ioThread *t = el->privdata;
 
     /* Check if i am pausing */
-    int pause;
-    atomicGetWithSync(t->pause, pause);
-    if (pause == IO_THREAD_PAUSING) {
-        atomicSetWithSync(t->pause, IO_THREAD_PAUSED);
-        /* Wait for unpause */
-        while (pause == IO_THREAD_UNPAUSED) {
-            atomicGetWithSync(t->pause, pause);
+    int paused;
+    atomicGetWithSync(t->paused, paused);
+    if (paused == IO_THREAD_PAUSING) {
+        atomicSetWithSync(t->paused, IO_THREAD_PAUSED);
+        /* Wait for unpaused */
+        while (paused == IO_THREAD_UNPAUSED) {
+            atomicGetWithSync(t->paused, paused);
             for (int i = 1; i < 1000; i++) {
                 /* just wait a moment */
             }
