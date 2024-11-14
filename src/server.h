@@ -61,6 +61,7 @@ typedef long long ustime_t; /* microsecond time type. */
                            N-elements flat arrays */
 #include "rax.h"     /* Radix tree */
 #include "connection.h" /* Connection abstraction */
+#include "eventnotifier.h" /* Event notification */
 
 #define REDISMODULE_CORE 1
 typedef struct redisObject robj;
@@ -183,6 +184,9 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 
 /* Hash table parameters */
 #define HASHTABLE_MAX_LOAD_FACTOR 1.618   /* Maximum hash table load factor. */
+
+/* Main thread id when enabling io thread. */
+#define IOTHREAD_MAIN_THREAD_ID -1
 
 /* Command flags. Please check the definition of struct redisCommand in this file
  * for more information about the meaning of every flag. */
@@ -1242,6 +1246,7 @@ typedef struct client {
     sds peerid;             /* Cached peer ID. */
     sds sockname;           /* Cached connection target address. */
     listNode *client_list_node; /* list node in client list */
+    listNode *io_thread_client_list_node; /* list node in io thread client list */
     listNode *postponed_list_node; /* list node within the postponed list */
     listNode *pending_read_list_node; /* list node in clients pending read list */
     void *module_blocked_client; /* Pointer to the RedisModuleBlockedClient associated with this
@@ -1296,16 +1301,6 @@ typedef struct client {
 #endif
 } client;
 
-#define IOTHREAD_MAIN_THREAD_ID -1
-
-typedef struct eventNotifier {
-#ifdef __linux__
-    int efd;
-#else
-    int pipefd[2];
-#endif
-} eventNotifier;
-
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     long id;                                    /* The unique ID assigned. */
     pthread_t tid;                              /* Thread ID */
@@ -1319,7 +1314,8 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     eventNotifier *pending_clients_notifier;                /* Used to wake up the loop when write should be performed. */
     pthread_mutex_t pending_clients_mutex;        /* Mutex for pending write list */
 
-    list *main_thread_pending_clients;              /* Clients that are waiting for a command to be executed. */
+    list *pending_clients_for_main_thread;     /* Clients that are waiting to be executed by the main thread. */
+    list *clients;                          /* IO thread managed clients. */
 } ioThread;
 
 #define IOTHREAD_JOB_HANDLE_CLIENT 1
@@ -2728,9 +2724,7 @@ void whileBlockedCron(void);
 void blockingOperationStarts(void);
 void blockingOperationEnds(void);
 int handleClientsWithPendingWrites(void);
-int handleClientsWithPendingWritesUsingThreads(void);
-int handleClientsWithPendingReadsUsingThreads(void);
-int stopThreadedIOIfNeeded(void);
+void sendPendingClientsToIOThreads(void);
 int clientHasPendingReplies(client *c);
 int updateClientMemUsageAndBucket(client *c);
 void removeClientFromMemUsageBucket(client *c, int allow_eviction);

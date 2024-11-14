@@ -47,6 +47,7 @@
 #define HAVE_PROC_SMAPS 1
 #define HAVE_PROC_SOMAXCONN 1
 #define HAVE_PROC_OOM_SCORE_ADJ 1
+#define HAVE_EVENT_FD 1
 #endif
 
 /* Test for task_info() */
