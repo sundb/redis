@@ -582,9 +582,11 @@ typedef enum {
 #define SHUTDOWN_FORCE 8        /* Don't let errors prevent shutdown. */
 
 /* IO thread pause status */
-#define IO_THREAD_UNPAUSED 0
-#define IO_THREAD_PAUSING  1
-#define IO_THREAD_PAUSED   2
+#define IO_THREAD_UNPAUSED      0
+#define IO_THREAD_PAUSING       1
+#define IO_THREAD_PAUSED        2
+#define IO_THREAD_UNPAUSING     3
+
 
 /* IO thread job type */
 #define IO_THREAD_JOB_RESIZE_EVENT_LOOP 1
