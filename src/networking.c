@@ -2943,7 +2943,10 @@ sds catClientInfoString(sds s, client *client) {
 
     /* NOTE: must resume io thread before exiting this function. */
     int paused = 0;
-    if (client->running_tid != IOTHREAD_MAIN_THREAD_ID && !server.crashing) {
+    if (client->running_tid != IOTHREAD_MAIN_THREAD_ID &&
+        pthread_equal(server.main_thread_id, pthread_self()) &&
+        !server.crashing)
+    {
         paused = 1;
         pauseIOThread(client->tid);
     }
@@ -3039,6 +3042,7 @@ sds getAllClientsInfoString(int type) {
     int allpaused = 0;
     if (server.io_threads_num > 1 && !server.crashing &&
         (type == CLIENT_TYPE_NORMAL || type == -1) &&
+        pthread_equal(server.main_thread_id, pthread_self()) &&
         listLength(server.clients) > (size_t)server.io_threads_num * 2)
     {
         allpaused = 1;

@@ -1035,7 +1035,11 @@ void clientsCron(void) {
     ClientsPeakMemInput[zeroidx] = 0;
     ClientsPeakMemOutput[zeroidx] = 0;
 
-    if (server.io_threads_num >= 1) pauseAllIOThreads();
+    int allpaused = 0;
+    if (server.io_threads_num >= 1 && listLength(server.clients) > 0) {
+        allpaused = 1;
+        pauseAllIOThreads();
+    }
 
     while(listLength(server.clients) && iterations--) {
         client *c;
@@ -1066,7 +1070,7 @@ void clientsCron(void) {
 
         if (closeClientOnOutputBufferLimitReached(c, 0)) continue;
     }
-    if (server.io_threads_num >= 1) resumeAllIOThreads();
+    if (allpaused) resumeAllIOThreads();
 }
 
 /* This function handles 'background' operations we are required to do

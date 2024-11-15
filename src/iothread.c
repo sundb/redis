@@ -158,7 +158,7 @@ int ioThreadCron(struct aeEventLoop *eventLoop, long long id, void *ptr) {
 
     ioThread *t = ptr;
 
-    serverLog(LL_DEBUG, "io thead %ld, event loop size: %d", t->id, aeGetSetSize(t->el));
+    // serverLog(LL_DEBUG, "io thead %ld, event loop size: %d", t->id, aeGetSetSize(t->el));
 
     /* Clients cron in io thread. */
     int iterations = IO_THREAD_CRON_CLIENTS_ITERATIONS;
@@ -250,13 +250,15 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
 
         /* If the client only can be processed in the main thread, otherwise,
          * there will be data race. */
-        if (c->flags & CLIENT_SLAVE ||
-            c->flags & CLIENT_MONITOR ||
+        if (getClientType(c) != CLIENT_TYPE_NORMAL ||
             c->flags & CLIENT_MULTI ||
-            c->flags & CLIENT_PUBSUB ||
+            c->flags & CLIENT_LUA_DEBUG ||
+            c->flags & CLIENT_LUA_DEBUG_SYNC ||
             c->flags & CLIENT_TRACKING ||
             c->flags & CLIENT_PUSHING ||
+            c->flags & CLIENT_PROTECTED ||
             (c->lastcmd && (c->lastcmd->proc == watchCommand ||
+                            c->lastcmd->proc == debugCommand ||
                             c->lastcmd->proc == flushallCommand ||
                             c->lastcmd->proc == flushdbCommand ||
                             c->lastcmd->proc == sflushCommand)))
@@ -266,13 +268,14 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
             connRebindEventLoop(c->conn, server.el);
             connSetReadHandler(c->conn, readQueryFromClient);
             c->tid = IOTHREAD_MAIN_THREAD_ID;
+            continue;
         }
 
         /* If the client is still valid, let io threads handle its writing. */
         if (c->flags & CLIENT_PENDING_WRITE) {
             listUnlinkNode(server.clients_pending_write, &c->clients_pending_write_node);
             c->running_tid = c->tid;
-            listAddNodeHead(pending_clients_for_io_threads[t->id], c);
+            listAddNodeTail(pending_clients_for_io_threads[t->id], c);
             continue;
         }
 
@@ -282,7 +285,7 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
     listRelease(clients);
 
     /* Trigger the io thread to handle these clients ASAP to make them processed in parallel. */
-    if (server.aof_fsync != AOF_FSYNC_ALWAYS) {
+    if (server.aof_fsync != AOF_FSYNC_ALWAYS && listLength(pending_clients_for_io_threads[t->id])) {
         /* If AOF fsync policy is always, we should not let io thread handle these clients
          * now since we don't flush AOF buffer to file and sync yet. So these clients will
          * be delayed to send io threads in beforeSleep after flushAppendOnlyFile. */
