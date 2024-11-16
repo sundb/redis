@@ -1834,7 +1834,10 @@ void freeClientAsync(client *c) {
          * schedule it to be freed by main thread. */
         atomicSetWithSync(c->closing, 1);
         if (pthread_equal(pthread_self(), server.main_thread_id)) {
-            connShutdown(c->conn); /* Trigger event for io threads. TODO:safe? */
+            /* Trigger event for io threads if it is not active, and
+             * shutdown can make sure the client can not be used anymore.
+             * TODO:is it safe? */
+            connShutdown(c->conn);
         } else {
             putInPendingClienstForMainThread(c);
         }
@@ -2136,8 +2139,6 @@ int writeToClient(client *c, int handler_installed) {
      * Since this isn't thread safe we do this conditionally. */
     if (c->running_tid == IOTHREAD_MAIN_THREAD_ID) {
         updateClientMemUsageAndBucket(c);
-    } else {
-        updateIOThreadClientOutputBufferMemoryUsage(c);
     }
     return C_OK;
 }
@@ -2994,8 +2995,18 @@ char *getClientSockname(client *c) {
 
 /* Concatenate a string representing the state of a client in a human
  * readable format, into the sds string 's'. */
-sds catClientInfoStringRaw(sds s, client *client) {
+sds catClientInfoString(sds s, client *client) {
     char flags[17], events[3], conninfo[CONN_INFO_LEN], *p;
+
+    /* NOTE: must resume io thread before exiting this function. */
+    int paused = 0;
+    if (client->running_tid != IOTHREAD_MAIN_THREAD_ID &&
+        pthread_equal(server.main_thread_id, pthread_self()) &&
+        !server.crashing)
+    {
+        paused = 1;
+        pauseIOThread(client->tid);
+    }
 
     p = flags;
     if (client->flags & CLIENT_SLAVE) {
@@ -3071,17 +3082,6 @@ sds catClientInfoStringRaw(sds s, client *client) {
         " resp=%i", client->resp,
         " lib-name=%s", client->lib_name ? (char*)client->lib_name->ptr : "",
         " lib-ver=%s", client->lib_ver ? (char*)client->lib_ver->ptr : ""));
-    return ret;
-}
-
-sds catClientInfoString(sds s, client *client) {
-    int paused = 0;
-    if (client->running_tid != IOTHREAD_MAIN_THREAD_ID && !server.crashing) {
-        paused = 1;
-        pauseIOThread(client->tid);
-    }
-
-    sds ret = catClientInfoStringRaw(s, client);
 
     if (paused) resumeIOThread(client->tid);
     return ret;
@@ -3094,11 +3094,12 @@ sds getAllClientsInfoString(int type) {
     sds o = sdsnewlen(SDS_NOINIT,200*listLength(server.clients));
     sdsclear(o);
 
-    /* Pause all io threads if there are enough clients to call 'catClientInfoString',
-     * since catClientInfoString also can pause client if needed. */
+    /* Pause all io threads if there are enough clients, since
+     * catClientInfoString also can pause client if needed. */
     int allpaused = 0;
     if (server.io_threads_num > 1 && !server.crashing &&
         (type == CLIENT_TYPE_NORMAL || type == -1) &&
+        pthread_equal(server.main_thread_id, pthread_self()) &&
         listLength(server.clients) > (size_t)server.io_threads_num * 2)
     {
         allpaused = 1;
@@ -3109,7 +3110,7 @@ sds getAllClientsInfoString(int type) {
     while ((ln = listNext(&li)) != NULL) {
         client = listNodeValue(ln);
         if (type != -1 && getClientType(client) != type) continue;
-        o = allpaused ? catClientInfoStringRaw(o,client) : catClientInfoString(o,client);
+        o = catClientInfoString(o,client);
         o = sdscatlen(o,"\n",1);
     }
 
@@ -4062,11 +4063,6 @@ size_t getClientOutputBufferMemoryUsage(client *c) {
  * Optionally, if output_buffer_mem_usage is not NULL, it fills it with
  * the client output buffer memory usage portion of the total. */
 size_t getClientMemoryUsage(client *c, size_t *output_buffer_mem_usage) {
-    if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-        size_t mem = getIOThreadClientMemoryUsage(c, output_buffer_mem_usage);
-        return mem;
-    }
-
     size_t mem = getClientOutputBufferMemoryUsage(c);
 
     if (output_buffer_mem_usage != NULL)

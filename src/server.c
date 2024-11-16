@@ -962,7 +962,7 @@ void removeClientFromMemUsageBucket(client *c, int allow_eviction) {
  * returns 1 if client eviction for this client is allowed, 0 otherwise.
  */
 int updateClientMemUsageAndBucket(client *c) {
-    serverAssert(c->running_tid == IOTHREAD_MAIN_THREAD_ID && c->conn);
+    serverAssert(pthread_equal(pthread_self(), server.main_thread_id) && c->conn);
     int allow_eviction = clientEvictionAllowed(c);
     removeClientFromMemUsageBucket(c, allow_eviction);
 
@@ -1016,9 +1016,6 @@ void getExpansiveClientsInfo(size_t *in_usage, size_t *out_usage) {
  */
 #define CLIENTS_CRON_MIN_ITERATIONS 5
 void clientsCron(void) {
-    /* TODO: for io thread v2 */
-    if (server.io_threads_num > 1) return;
-    
     /* Try to process at least numclients/server.hz of clients
      * per call. Since normally (if there are no big latency events) this
      * function is called server.hz times per second, in the average case we
@@ -1051,6 +1048,11 @@ void clientsCron(void) {
     ClientsPeakMemInput[zeroidx] = 0;
     ClientsPeakMemOutput[zeroidx] = 0;
 
+    int allpaused = 0;
+    if (server.io_threads_num >= 1 && listLength(server.clients) > 0) {
+        allpaused = 1;
+        pauseAllIOThreads();
+    }
 
     while(listLength(server.clients) && iterations--) {
         client *c;
@@ -1082,6 +1084,7 @@ void clientsCron(void) {
 
         if (closeClientOnOutputBufferLimitReached(c, 0)) continue;
     }
+    if (allpaused) resumeAllIOThreads();
 }
 
 /* This function handles 'background' operations we are required to do
@@ -1760,8 +1763,8 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     long long prev_fsynced_reploff = server.fsynced_reploff;
 
     /* Write the AOF buffer on disk,
-     * must be done before handleClientsWithPendingWrites,
-     * in case of appendfsync=always. */
+     * must be done before handleClientsWithPendingWrites and
+     * sendPendingClientsToIOThreads, in case of appendfsync=always. */
     if (server.aof_state == AOF_ON || server.aof_state == AOF_WAIT_REWRITE)
         flushAppendOnlyFile(0);
 
