@@ -405,6 +405,9 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_READ_UNAUTH_BUCK_LENGTH 8
 #define CLIENT_READ_INVALID_MULTIBUCK_LENGTH 9
 #define CLIENT_READ_UNAUTH_MBUCK_COUNT 10
+#define CLIENT_READ_CONN_DISCONNECTED 11
+#define CLIENT_READ_CONN_CLOSED 12
+#define CLIENT_READ_REACHED_MAX_QUERYBUF 13
 
 /* Client block type (btype field in client structure)
  * if CLIENT_BLOCKED flag is set. */
@@ -2759,6 +2762,8 @@ void sendPendingClientsToIOThreads(void);
 void putInPendingClienstForMainThread(client *c);
 void putInPendingClienstForIOThreads(client *c);
 void updateIOThreadClientOutputBufferMemoryUsage(client *c);
+size_t getIOThreadClientMemoryUsage(client *c, size_t *output_buffer_mem_usage);
+void handleClientReadError(client *c);
 
 /* logreqres.c - logging of requests and responses */
 void reqresReset(client *c, int free_buf);
