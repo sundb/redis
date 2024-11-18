@@ -152,6 +152,7 @@ client *createClient(connection *conn) {
     c->qb_pos = 0;
     c->querybuf = NULL;
     c->querybuf_peak = 0;
+    c->in_reusable_querybuf = 0;
     c->reqtype = 0;
     c->argc = 0;
     c->argv = NULL;
@@ -1640,7 +1641,7 @@ void deauthenticateAndCloseClient(client *c) {
  * If any data remained in the buffer, the client will take ownership of the buffer
  * and a new empty buffer will be allocated for the reusable buffer. */
 static void resetReusableQueryBuf(client *c) {
-    serverAssert(c->flags & CLIENT_REUSABLE_QUERYBUFFER);
+    serverAssert(c->in_reusable_querybuf);
     if (c->querybuf != thread_reusable_qb || sdslen(c->querybuf) > c->qb_pos) {
         /* If querybuf has been reallocated or there is still data left,
          * let the client take ownership of the reusable buffer. */
@@ -1654,7 +1655,7 @@ static void resetReusableQueryBuf(client *c) {
 
     /* Mark that the client is no longer using the reusable query buffer
      * and indicate that it is no longer used by any client. */
-    c->flags &= ~CLIENT_REUSABLE_QUERYBUFFER;
+    c->in_reusable_querybuf = 0;
     thread_reusable_qb_used = 0;
 }
 
@@ -1717,7 +1718,7 @@ void freeClient(client *c) {
     }
 
     /* Free the query buffer */
-    if (c->flags & CLIENT_REUSABLE_QUERYBUFFER)
+    if (c->in_reusable_querybuf)
         resetReusableQueryBuf(c);
     sdsfree(c->querybuf);
     c->querybuf = NULL;
@@ -2890,7 +2891,7 @@ void readQueryFromClient(connection *conn) {
             /* Assign the reusable query buffer to the client and mark it as in use. */
             serverAssert(sdslen(thread_reusable_qb) == 0);
             c->querybuf = thread_reusable_qb;
-            c->flags |= CLIENT_REUSABLE_QUERYBUFFER;
+            c->in_reusable_querybuf = 1;
             thread_reusable_qb_used = 1;
         }
     }
@@ -2919,18 +2920,10 @@ void readQueryFromClient(connection *conn) {
             goto done;
         } else {
             c->read_flags = CLIENT_READ_CONN_DISCONNECTED;
-            // serverLog(LL_VERBOSE, "Reading from client: %s",connGetLastError(c->conn));
-            // freeClientAsync(c);
             goto done;
         }
     } else if (nread == 0) {
         c->read_flags = CLIENT_READ_CONN_CLOSED;
-        // if (server.verbosity <= LL_VERBOSE) {
-            // sds info = catClientInfoString(sdsempty(), c);
-            // serverLog(LL_VERBOSE, "Client closed connection %s", info);
-            // sdsfree(info);
-        // }
-        // freeClientAsync(c);
         goto done;
     }
 
@@ -2955,14 +2948,6 @@ void readQueryFromClient(connection *conn) {
          (c->mstate.argv_len_sums + sdslen(c->querybuf) > 1024*1024 && authRequired(c))))
     {
         c->read_flags = CLIENT_READ_REACHED_MAX_QUERYBUF;
-        // sds ci = catClientInfoString(sdsempty(),c), bytes = sdsempty();
-
-        // bytes = sdscatrepr(bytes,c->querybuf,64);
-        // serverLog(LL_WARNING,"Closing client that reached max query buffer length: %s (qbuf initial bytes: %s)", ci, bytes);
-        // sdsfree(ci);
-        // sdsfree(bytes);
-        // freeClientAsync(c);
-        // atomicIncr(server.stat_client_qbuf_limit_disconnections, 1);
         goto done;
     }
 
@@ -2975,7 +2960,7 @@ done:
     if (c && c->running_tid == IOTHREAD_MAIN_THREAD_ID && c->read_flags)
         handleClientReadError(c);
 
-    if (c && (c->flags & CLIENT_REUSABLE_QUERYBUFFER)) {
+    if (c && c->in_reusable_querybuf) {
         serverAssert(c->qb_pos == 0); /* Ensure the client's query buffer is trimmed in processInputBuffer */
         resetReusableQueryBuf(c);
     }
