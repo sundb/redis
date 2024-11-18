@@ -2835,8 +2835,11 @@ void readQueryFromClient(connection *conn) {
     client *c = connGetPrivateData(conn);
     int nread, big_arg = 0;
     size_t qblen, readlen;
-    c->read_flags = 0;
     if (c->read_enabled == 0) return;
+
+    /* The read_flags should only be reset when c->read_enabled is not 0, as
+     * the client might be currently handled by the main thread. */
+    c->read_flags = 0;
 
     /* Update total number of reads on server */
     atomicIncr(server.stat_total_reads_processed, 1);
