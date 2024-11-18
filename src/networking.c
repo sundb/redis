@@ -213,6 +213,8 @@ client *createClient(connection *conn) {
     listInitNode(&c->clients_pending_write_node, c);
     c->mem_usage_bucket = NULL;
     c->mem_usage_bucket_node = NULL;
+    c->read_enabled = 1;
+    c->write_enabled = 1;
     if (conn) linkClient(c);
     initClientMultiState(c);
     return c;
@@ -1438,6 +1440,7 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
         /* Select io thread */
         c->tid = c->id % (server.io_threads_num-1) + 1;
         c->running_tid = c->tid;
+        serverAssert(c->tid != IOTHREAD_MAIN_THREAD_ID);
         /* Let the specific io thread to handle */
         putInPendingClienstForIOThreads(c);
     }
@@ -1839,6 +1842,9 @@ void freeClientAsync(client *c) {
              * TODO:is it safe? */
             connShutdown(c->conn);
         } else {
+            /* Remove read and write handler from io thread event loop. */
+            connSetReadHandler(c->conn, NULL);
+            connSetWriteHandler(c->conn, NULL);
             putInPendingClienstForMainThread(c);
         }
         return;
@@ -2067,6 +2073,7 @@ int _writeToClient(client *c, ssize_t *nwritten) {
  * set to 0. So when handler_installed is set to 0 the function must be
  * thread safe. */
 int writeToClient(client *c, int handler_installed) {
+    if (c->write_enabled == 0) return C_OK;
     /* Update total number of writes on server */
     atomicIncr(server.stat_total_writes_processed, 1);
     if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
@@ -2245,7 +2252,7 @@ void resetClient(client *c) {
  *    path, it is not really released, but only marked for later release. */
 void protectClient(client *c) {
     c->flags |= CLIENT_PROTECTED;
-    if (c->conn) {
+    if (c->conn && c->read_enabled && c->write_enabled) {
         connSetReadHandler(c->conn,NULL);
         connSetWriteHandler(c->conn,NULL);
     }
@@ -2256,7 +2263,8 @@ void unprotectClient(client *c) {
     if (c->flags & CLIENT_PROTECTED) {
         c->flags &= ~CLIENT_PROTECTED;
         if (c->conn) {
-            connSetReadHandler(c->conn,readQueryFromClient);
+            if (c->read_enabled && c->write_enabled)
+                connSetReadHandler(c->conn,readQueryFromClient);
             if (clientHasPendingReplies(c)) putClientInPendingWriteQueue(c);
         }
     }
@@ -2828,6 +2836,7 @@ void readQueryFromClient(connection *conn) {
     int nread, big_arg = 0;
     size_t qblen, readlen;
     c->read_flags = 0;
+    if (c->read_enabled == 0) return;
 
     /* Update total number of reads on server */
     atomicIncr(server.stat_total_reads_processed, 1);
@@ -3032,7 +3041,7 @@ sds catClientInfoString(sds s, client *client) {
         !server.crashing)
     {
         paused = 1;
-        pauseIOThread(client->tid);
+        pauseIOThread(client->running_tid);
     }
 
     p = flags;
@@ -3108,9 +3117,10 @@ sds catClientInfoString(sds s, client *client) {
         " redir=%I", (client->flags & CLIENT_TRACKING) ? (long long) client->client_tracking_redirection : -1,
         " resp=%i", client->resp,
         " lib-name=%s", client->lib_name ? (char*)client->lib_name->ptr : "",
-        " lib-ver=%s", client->lib_ver ? (char*)client->lib_ver->ptr : ""));
+        " lib-ver=%s", client->lib_ver ? (char*)client->lib_ver->ptr : "",
+        " io-thread=%i", client->running_tid));
 
-    if (paused) resumeIOThread(client->tid);
+    if (paused) resumeIOThread(client->running_tid);
     return ret;
 }
 
