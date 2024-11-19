@@ -230,7 +230,7 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
         /* Let main thread to run it. */
         c->running_tid = IOTHREAD_MAIN_THREAD_ID;
 
-        if (c->read_flags) {
+        if (c->read_error) {
             handleClientReadError(c);
             if (c->flags & CLIENT_CLOSE_ASAP) continue;
             c->running_tid = c->tid;

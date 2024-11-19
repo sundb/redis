@@ -166,7 +166,7 @@ client *createClient(connection *conn) {
     c->bulklen = -1;
     c->sentlen = 0;
     c->flags = 0;
-    c->read_flags = 0;
+    c->read_error = 0;
     c->slot = -1;
     c->ctime = c->lastinteraction = server.unixtime;
     c->duration = 0;
@@ -2290,7 +2290,7 @@ int processInlineBuffer(client *c) {
     /* Nothing to do without a \r\n */
     if (newline == NULL) {
         if (sdslen(c->querybuf)-c->qb_pos > PROTO_INLINE_MAX_SIZE) {
-            c->read_flags = CLIENT_READ_TOO_BIG_INLINE_REQUEST;
+            c->read_error = CLIENT_READ_TOO_BIG_INLINE_REQUEST;
         }
         return C_ERR;
     }
@@ -2305,7 +2305,7 @@ int processInlineBuffer(client *c) {
     argv = sdssplitargs(aux,&argc);
     sdsfree(aux);
     if (argv == NULL) {
-        c->read_flags = CLIENT_READ_UNBALANCED_QUOTES;
+        c->read_error = CLIENT_READ_UNBALANCED_QUOTES;
         return C_ERR;
     }
 
@@ -2324,7 +2324,7 @@ int processInlineBuffer(client *c) {
      * to keep the connection active. */
     if (querylen != 0 && c->flags & CLIENT_MASTER) {
         sdsfreesplitres(argv,argc);
-        c->read_flags = CLIENT_READ_MASTER_USING_INLINE_PROTOCAL;
+        c->read_error = CLIENT_READ_MASTER_USING_INLINE_PROTOCAL;
         return C_ERR;
     }
 
@@ -2409,7 +2409,7 @@ int processMultibulkBuffer(client *c) {
         newline = strchr(c->querybuf+c->qb_pos,'\r');
         if (newline == NULL) {
             if (sdslen(c->querybuf)-c->qb_pos > PROTO_INLINE_MAX_SIZE) {
-                c->read_flags = CLIENT_READ_TOO_BIG_MBULK_COUNT_STRING;
+                c->read_error = CLIENT_READ_TOO_BIG_MBULK_COUNT_STRING;
             }
             return C_ERR;
         }
@@ -2423,10 +2423,10 @@ int processMultibulkBuffer(client *c) {
         serverAssertWithInfo(c,NULL,c->querybuf[c->qb_pos] == '*');
         ok = string2ll(c->querybuf+1+c->qb_pos,newline-(c->querybuf+1+c->qb_pos),&ll);
         if (!ok || ll > INT_MAX) {
-            c->read_flags = CLIENT_READ_INVALID_MULTIBUCK_LENGTH;
+            c->read_error = CLIENT_READ_INVALID_MULTIBUCK_LENGTH;
             return C_ERR;
         } else if (ll > 10 && authRequired(c)) {
-            c->read_flags = CLIENT_READ_UNAUTH_MBUCK_COUNT;
+            c->read_error = CLIENT_READ_UNAUTH_MBUCK_COUNT;
             return C_ERR;
         }
 
@@ -2453,7 +2453,7 @@ int processMultibulkBuffer(client *c) {
             newline = strchr(c->querybuf+c->qb_pos,'\r');
             if (newline == NULL) {
                 if (sdslen(c->querybuf)-c->qb_pos > PROTO_INLINE_MAX_SIZE) {
-                    c->read_flags = CLIENT_READ_TOO_BIG_BUCK_COUNT_STRING;
+                    c->read_error = CLIENT_READ_TOO_BIG_BUCK_COUNT_STRING;
                     return C_ERR;
                 }
                 break;
@@ -2464,17 +2464,17 @@ int processMultibulkBuffer(client *c) {
                 break;
 
             if (c->querybuf[c->qb_pos] != '$') {
-                c->read_flags = CLIENT_READ_EXPECTED_DOLLAR;
+                c->read_error = CLIENT_READ_EXPECTED_DOLLAR;
                 return C_ERR;
             }
 
             ok = string2ll(c->querybuf+c->qb_pos+1,newline-(c->querybuf+c->qb_pos+1),&ll);
             if (!ok || ll < 0 ||
                 (!(c->flags & CLIENT_MASTER) && ll > server.proto_max_bulk_len)) {
-                c->read_flags = CLIENT_READ_INVALID_BUCK_LENGTH;
+                c->read_error = CLIENT_READ_INVALID_BUCK_LENGTH;
                 return C_ERR;
             } else if (ll > 16384 && authRequired(c)) {
-                c->read_flags = CLIENT_READ_UNAUTH_BUCK_LENGTH;
+                c->read_error = CLIENT_READ_UNAUTH_BUCK_LENGTH;
                 return C_ERR;
             }
 
@@ -2652,7 +2652,7 @@ int processPendingCommandAndInputBuffer(client *c) {
 }
 
 void handleClientReadError(client *c) {
-    switch (c->read_flags) {
+    switch (c->read_error) {
         case CLIENT_READ_TOO_BIG_INLINE_REQUEST:
             addReplyError(c,"Protocol error: too big inline request");
             setProtocolError("too big inline request",c);
@@ -2762,13 +2762,13 @@ int processInputBuffer(client *c) {
 
         if (c->reqtype == PROTO_REQ_INLINE) {
             if (processInlineBuffer(c) != C_OK) {
-                if (c->running_tid != IOTHREAD_MAIN_THREAD_ID && c->read_flags)
+                if (c->running_tid != IOTHREAD_MAIN_THREAD_ID && c->read_error)
                     putInPendingClienstForMainThread(c);
                 break;
             }
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
             if (processMultibulkBuffer(c) != C_OK) {
-                if (c->running_tid != IOTHREAD_MAIN_THREAD_ID && c->read_flags)
+                if (c->running_tid != IOTHREAD_MAIN_THREAD_ID && c->read_error)
                     putInPendingClienstForMainThread(c);
                 break;
             }
@@ -2838,9 +2838,9 @@ void readQueryFromClient(connection *conn) {
     size_t qblen, readlen;
     if (c->read_enabled == 0) return;
 
-    /* The read_flags should only be reset when c->read_enabled is not 0, as
+    /* The read_error should only be reset when c->read_enabled is not 0, as
      * the client might be currently handled by the main thread. */
-    c->read_flags = 0;
+    c->read_error = 0;
 
     /* Update total number of reads on server */
     atomicIncr(server.stat_total_reads_processed, 1);
@@ -2919,11 +2919,11 @@ void readQueryFromClient(connection *conn) {
         if (connGetState(conn) == CONN_STATE_CONNECTED) {
             goto done;
         } else {
-            c->read_flags = CLIENT_READ_CONN_DISCONNECTED;
+            c->read_error = CLIENT_READ_CONN_DISCONNECTED;
             goto done;
         }
     } else if (nread == 0) {
-        c->read_flags = CLIENT_READ_CONN_CLOSED;
+        c->read_error = CLIENT_READ_CONN_CLOSED;
         goto done;
     }
 
@@ -2947,7 +2947,7 @@ void readQueryFromClient(connection *conn) {
         (c->mstate.argv_len_sums + sdslen(c->querybuf) > server.client_max_querybuf_len ||
          (c->mstate.argv_len_sums + sdslen(c->querybuf) > 1024*1024 && authRequired(c))))
     {
-        c->read_flags = CLIENT_READ_REACHED_MAX_QUERYBUF;
+        c->read_error = CLIENT_READ_REACHED_MAX_QUERYBUF;
         goto done;
     }
 
@@ -2957,7 +2957,7 @@ void readQueryFromClient(connection *conn) {
          c = NULL;
 
 done:
-    if (c && c->running_tid == IOTHREAD_MAIN_THREAD_ID && c->read_flags)
+    if (c && c->running_tid == IOTHREAD_MAIN_THREAD_ID && c->read_error)
         handleClientReadError(c);
 
     if (c && c->in_reusable_querybuf) {

@@ -1186,7 +1186,7 @@ typedef struct {
 typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
-    uint64_t read_flags;    /* Client flags: CLIENT_READ_* macros. */
+    uint64_t read_error;    /* Client flags: CLIENT_READ_* macros. */
     connection *conn;
     int tid;                /* Thread ID this client is bound to. */
     int running_tid;        /* Thread ID this client is running on. */
