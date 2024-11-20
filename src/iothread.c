@@ -234,6 +234,15 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
         /* Let main thread to run it. */
         c->running_tid = IOTHREAD_MAIN_THREAD_ID;
 
+        /* If a read error occurs, handle it in the main thread and return the client to the IO thread. */
+        if (c->read_error) {
+            handleClientReadError(c);
+            if (c->flags & CLIENT_CLOSE_ASAP) continue;
+            c->running_tid = c->tid;
+            listAddNodeHead(pending_clients_for_io_threads[t->id], c);
+            continue;
+        }
+
         /* The client is asked to close. */
         if (isClientClosing(c)) {
             if (connHasReadHandler(c->conn) || connHasWriteHandler(c->conn)) {
