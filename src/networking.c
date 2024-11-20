@@ -2701,7 +2701,6 @@ void handleClientReadError(client *c) {
             serverPanic("Unknown client read error");
             break;
     }
-    c->read_error = 0;
 }
 
 /* This function is called every time, in the client structure 'c', there is
@@ -2818,7 +2817,7 @@ void readQueryFromClient(connection *conn) {
     int nread, big_arg = 0;
     size_t qblen, readlen;
     if (c->read_enabled == 0) return;
-    serverAssert(!c->read_error); /* Make sure the error was handled correctly */
+    c->read_error = 0;
 
     /* Update total number of reads on server */
     atomicIncr(server.stat_total_reads_processed, 1);
