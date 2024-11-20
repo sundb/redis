@@ -3033,6 +3033,7 @@ static int applyClientMaxMemoryUsage(const char **err) {
     if (server.maxmemory_clients != 0)
         initServerClientMemUsageBuckets();
 
+    pauseAllIOThreads();
     /* When client eviction is enabled update memory buckets for all clients.
      * When disabled, clear that data structure. */
     listRewind(server.clients, &li);
@@ -3046,6 +3047,7 @@ static int applyClientMaxMemoryUsage(const char **err) {
             updateClientMemUsageAndBucket(c);
         }
     }
+    resumeAllIOThreads();
 
     if (server.maxmemory_clients == 0)
         freeServerClientMemUsageBuckets();

@@ -47,6 +47,7 @@ int isClientClosing(client *c) {
 
 /* Only the main thread can call these function. */
 void pauseIOThread(int id) {
+    if (server.io_threads_num <= 1) return;
     if (AllIOThreadsPaused) return;
     serverAssert(pthread_equal(pthread_self(), server.main_thread_id));
 
@@ -71,19 +72,21 @@ void resumeIOThreadCore(int id) {
     atomicGetWithSync(io_threads[id].paused, paused);
     serverAssert(paused == IO_THREAD_PAUSED);
     /* Resume */
-    atomicSetWithSync(io_threads[id].paused, IO_THREAD_UNPAUSING);
+    atomicSetWithSync(io_threads[id].paused, IO_THREAD_RESUMING);
     while (paused != IO_THREAD_UNPAUSED) {
         atomicGetWithSync(io_threads[id].paused, paused);
     }
 }
 
 void resumeIOThread(int id) {
+    if (server.io_threads_num <= 1) return;
     serverAssert(pthread_equal(pthread_self(), server.main_thread_id));
     if (AllIOThreadsPaused) return;
     resumeIOThreadCore(id);
 }
 
 void pauseAllIOThreads(void) {
+    if (server.io_threads_num <= 1) return;
     serverAssert(!AllIOThreadsPaused);
     serverAssert(pthread_equal(pthread_self(), server.main_thread_id));
 
@@ -109,6 +112,7 @@ void pauseAllIOThreads(void) {
 }
 
 void resumeAllIOThreads(void) {
+    if (server.io_threads_num <= 1) return;
     serverAssert(AllIOThreadsPaused);
     serverAssert(pthread_equal(pthread_self(), server.main_thread_id));
 
@@ -135,7 +139,7 @@ void ioThreadBeforeSleep(struct aeEventLoop *el) {
     if (paused == IO_THREAD_PAUSING) {
         atomicSetWithSync(t->paused, IO_THREAD_PAUSED);
         /* Wait for unpaused */
-        while (paused != IO_THREAD_UNPAUSING) {
+        while (paused != IO_THREAD_RESUMING) {
             atomicGetWithSync(t->paused, paused);
         }
         atomicSetWithSync(t->paused, IO_THREAD_UNPAUSED);
@@ -260,20 +264,17 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
 
         /* The client only can be processed in the main thread, otherwise data
          * race will happen, since we may touch client's data in main thread. */
-        if (c->flags & CLIENT_SLAVE ||
+        if (c->flags & CLIENT_CLOSE_ASAP ||
+            c->flags & CLIENT_SLAVE ||
             c->flags & CLIENT_PUBSUB ||
-            c->flags & CLIENT_CLOSE_ASAP ||
             c->flags & CLIENT_MONITOR ||
             c->flags & CLIENT_BLOCKED ||
-            c->flags & CLIENT_UNBLOCKED ||
-            c->flags & CLIENT_MULTI ||
             c->flags & CLIENT_LUA_DEBUG ||
             c->flags & CLIENT_LUA_DEBUG_SYNC ||
             c->flags & CLIENT_TRACKING ||
-            c->flags & CLIENT_PUSHING ||
             c->flags & CLIENT_PROTECTED ||
-            (c->lastcmd && (c->lastcmd->proc == watchCommand ||
-                            c->lastcmd->proc == debugCommand ||
+            listLength(c->watched_keys) > 0 ||
+            (c->lastcmd && (c->lastcmd->proc == debugCommand ||
                             c->lastcmd->proc == flushallCommand ||
                             c->lastcmd->proc == flushdbCommand ||
                             c->lastcmd->proc == sflushCommand)))
@@ -294,13 +295,16 @@ void handleClientsFromIOThreads(struct aeEventLoop *el, int fd, void *ptr, int m
         }
 
         /* If the client is still valid, let io threads handle its writing. */
-        if (c->flags & CLIENT_PENDING_WRITE || c->flags & (CLIENT_REPLY_SKIP|CLIENT_REPLY_OFF|CLIENT_REPLY_SKIP_NEXT)) {
+        if (c->flags & CLIENT_PENDING_WRITE ||
+            c->flags & (CLIENT_REPLY_SKIP|CLIENT_REPLY_OFF|CLIENT_REPLY_SKIP_NEXT))
+        {
             if (c->flags & CLIENT_PENDING_WRITE) {
                 c->flags &= ~CLIENT_PENDING_WRITE;
                 listUnlinkNode(server.clients_pending_write, &c->clients_pending_write_node);
             }
             c->running_tid = c->tid;
-            listAddNodeTail(pending_clients_for_io_threads[c->tid], c);
+            listUnlinkNode(clients, ln);
+            listLinkNodeHead(pending_clients_for_io_threads[c->tid], ln);
             continue;
         }
 

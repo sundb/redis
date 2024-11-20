@@ -3034,7 +3034,7 @@ sds catClientInfoString(sds s, client *client) {
         " resp=%i", client->resp,
         " lib-name=%s", client->lib_name ? (char*)client->lib_name->ptr : "",
         " lib-ver=%s", client->lib_ver ? (char*)client->lib_ver->ptr : "",
-        " io-thread=%i", client->running_tid));
+        " io-thread-id=%i", client->tid));
 
     if (paused) resumeIOThread(client->running_tid);
     return ret;

@@ -585,7 +585,7 @@ typedef enum {
 #define IO_THREAD_UNPAUSED      0
 #define IO_THREAD_PAUSING       1
 #define IO_THREAD_PAUSED        2
-#define IO_THREAD_UNPAUSING     3
+#define IO_THREAD_RESUMING      3
 
 
 /* IO thread job type */
