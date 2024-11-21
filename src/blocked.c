@@ -184,7 +184,7 @@ void unblockClient(client *c, int queue_for_reprocessing) {
 
     /* Reset the client for a new query, unless the client has pending command to process
      * or in case a shutdown operation was canceled and we are still in the processCommand sequence  */
-    if (!(c->flags & CLIENT_PENDING_COMMAND) && c->bstate.btype != BLOCKED_SHUTDOWN) {
+    if (!(c->io_flags & CLIENT_PENDING_COMMAND) && c->bstate.btype != BLOCKED_SHUTDOWN) {
         freeClientOriginalArgv(c);
         /* Clients that are not blocked on keys are not reprocessed so we must
          * call reqresAppendResponse here (for clients blocked on key,
@@ -270,7 +270,7 @@ void disconnectAllBlockedClients(void) {
 
             if (c->bstate.btype == BLOCKED_LAZYFREE) {
                 addReply(c, shared.ok); /* No reason lazy-free to fail */
-                c->flags &= ~CLIENT_PENDING_COMMAND;
+                c->io_flags &= ~CLIENT_PENDING_COMMAND;
                 unblockClient(c, 1);
             } else {
 
@@ -405,7 +405,7 @@ void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeo
      * However in case of modules, they have a different way to handle the reprocessing
      * which does not require setting the pending command flag */
     if (btype != BLOCKED_MODULE)
-        c->flags |= CLIENT_PENDING_COMMAND;
+        c->io_flags |= CLIENT_PENDING_COMMAND;
     blockClient(c,btype);
 }
 
@@ -616,7 +616,7 @@ void blockPostponeClient(client *c) {
     listAddNodeTail(server.postponed_clients, c);
     c->postponed_list_node = listLast(server.postponed_clients);
     /* Mark this client to execute its command */
-    c->flags |= CLIENT_PENDING_COMMAND;
+    c->io_flags |= CLIENT_PENDING_COMMAND;
 }
 
 /* Block client due to shutdown command */
@@ -645,8 +645,8 @@ static void unblockClientOnKey(client *c, robj *key) {
     unblockClient(c, 0);
     /* In case this client was blocked on keys during command
      * we need to re process the command again */
-    if (c->flags & CLIENT_PENDING_COMMAND) {
-        c->flags &= ~CLIENT_PENDING_COMMAND;
+    if (c->io_flags & CLIENT_PENDING_COMMAND) {
+        c->io_flags &= ~CLIENT_PENDING_COMMAND;
         /* We want the command processing and the unblock handler (see RM_Call 'K' option)
          * to run atomically, this is why we must enter the execution unit here before
          * running the command, and exit the execution unit after calling the unblock handler (if exists).
@@ -702,8 +702,8 @@ void unblockClientOnTimeout(client *c) {
     if (c->bstate.btype == BLOCKED_MODULE && isModuleClientUnblocked(c)) return;
 
     replyToBlockedClientTimedOut(c);
-    if (c->flags & CLIENT_PENDING_COMMAND)
-        c->flags &= ~CLIENT_PENDING_COMMAND;
+    if (c->io_flags & CLIENT_PENDING_COMMAND)
+        c->io_flags &= ~CLIENT_PENDING_COMMAND;
     unblockClient(c, 1);
 }
 
@@ -713,8 +713,8 @@ void unblockClientOnError(client *c, const char *err_str) {
     if (err_str)
         addReplyError(c, err_str);
     updateStatsOnUnblock(c, 0, 0, 1);
-    if (c->flags & CLIENT_PENDING_COMMAND)
-        c->flags &= ~CLIENT_PENDING_COMMAND;
+    if (c->io_flags & CLIENT_PENDING_COMMAND)
+        c->io_flags &= ~CLIENT_PENDING_COMMAND;
     unblockClient(c, 1);
 }
 
