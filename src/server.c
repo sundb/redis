@@ -1676,6 +1676,10 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
         processed += handleClientsWithPendingWrites();
         processed += freeClientsInAsyncFreeQueue();
         server.events_processed_while_blocked += processed;
+
+        /* New connections may have been established while blocked,
+         * ensure they are promptly sent to IO threads. */
+        sendPendingClientsToIOThreads();
         return;
     }
 
