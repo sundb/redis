@@ -216,6 +216,7 @@ client *createClient(connection *conn) {
     c->mem_usage_bucket_node = NULL;
     c->read_enabled = 1;
     c->write_enabled = 1;
+    c->has_pending_command = 0;
     if (conn) linkClient(c);
     initClientMultiState(c);
     return c;
@@ -307,13 +308,8 @@ int prepareClientToWrite(client *c) {
     if (!c->conn) return C_ERR; /* Fake client for AOF loading. */
 
     /* Schedule the client to write the output buffers to the socket, unless
-     * it should already be setup to do so (it has already pending data).
-     *
-     * If CLIENT_PENDING_READ is set, we're in an IO thread and should
-     * not put the client in pending write queue. Instead, it will be
-     * done by handleClientsWithPendingReadsUsingThreads() upon return.
-     */
-    if (!clientHasPendingReplies(c) && c->running_tid == IOTHREAD_MAIN_THREAD_ID)
+     * it should already be setup to do so (it has already pending data). */
+    if (!clientHasPendingReplies(c) && likely(c->running_tid == IOTHREAD_MAIN_THREAD_ID))
         putClientInPendingWriteQueue(c);
 
     /* Authorize the caller to queue in the output buffer of this client. */
@@ -1668,6 +1664,12 @@ void freeClient(client *c) {
         return;
     }
 
+    /* We need to uninstall event handler first if the client has binded event
+     * handler in io thread event loop. */
+    if (c->tid != IOTHREAD_MAIN_THREAD_ID) {
+        uninstallHandlerFromIOThreadEventLoop(c);
+    }
+
     /* For connected clients, call the disconnection event of modules hooks. */
     if (c->conn) {
         moduleFireServerEvent(REDISMODULE_EVENT_CLIENT_CHANGE,
@@ -2717,6 +2719,7 @@ int processInputBuffer(client *c) {
         /* Don't process more buffers from clients that have already pending
          * commands to execute in c->argv. */
         if (c->flags & CLIENT_PENDING_COMMAND) break;
+        if (c->has_pending_command) break;
 
         /* Don't process input from the master while there is a busy script
          * condition on the slave. We want just to accumulate the replication
@@ -2764,7 +2767,7 @@ int processInputBuffer(client *c) {
              * execute the command here. All we can do is to flag the client
              * as one that needs to process the command. */
             if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-                c->flags |= CLIENT_PENDING_COMMAND;
+                c->has_pending_command = 1;
                 putInPendingClienstForMainThread(c);
                 break;
             }

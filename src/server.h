@@ -185,7 +185,9 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 /* Hash table parameters */
 #define HASHTABLE_MAX_LOAD_FACTOR 1.618   /* Maximum hash table load factor. */
 
-/* Main thread id when enabling io thread. */
+/* Main thread id for doing IO work, whatever we enable or disable io thread
+ * the main thread always does IO work, so we can consider that the main thread
+ * is the io thread 0. */
 #define IOTHREAD_MAIN_THREAD_ID 0
 
 /* Command flags. Please check the definition of struct redisCommand in this file
@@ -601,10 +603,6 @@ typedef enum {
 #define IO_THREAD_PAUSING       1
 #define IO_THREAD_PAUSED        2
 #define IO_THREAD_RESUMING      3
-
-
-/* IO thread job type */
-#define IO_THREAD_JOB_RESIZE_EVENT_LOOP 1
 
 /* Command call flags, see call() function */
 #define CMD_CALL_NONE 0
@@ -1312,10 +1310,10 @@ typedef struct client {
 #ifdef LOG_REQ_RES
     clientReqResInfo reqres;
 #endif
-    redisAtomic size_t output_buffer_len;
-    redisAtomic size_t output_buffer_mem;
-    int read_enabled; /* Client can read from socket. */
-    int write_enabled; /* Client can write to socket. */
+    /* TODO: put the variables together for io thread? */
+    int8_t read_enabled;        /* Client can read from socket. */
+    int8_t write_enabled;       /* Client can write to socket. */
+    int8_t has_pending_command; /* Client has a command to execute in io thread. */
 } client;
 
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
@@ -1336,11 +1334,6 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
 
     redisAtomic int paused;                  /* Paused status for the io thread. */
 } ioThread;
-
-typedef struct ioThreadJob {
-    int type;
-    void *data;
-} ioThreadJob;
 
 /* ACL information */
 typedef struct aclInfo {
@@ -2759,12 +2752,12 @@ void resumeIOThread(int id);
 void pauseAllIOThreads(void);
 void resumeAllIOThreads(void);
 int isClientClosing(client *c);
-void resizeIOThreadsEventLoop(unsigned int newsize);
+int resizeIOThreadsEventLoop(size_t newsize);
 void sendPendingClientsToIOThreads(void);
 void putInPendingClienstForMainThread(client *c);
 void putInPendingClienstForIOThreads(client *c);
-void updateIOThreadClientOutputBufferMemoryUsage(client *c);
 void handleClientReadError(client *c);
+void uninstallHandlerFromIOThreadEventLoop(client *c);
 
 /* logreqres.c - logging of requests and responses */
 void reqresReset(client *c, int free_buf);
