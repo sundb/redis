@@ -1675,11 +1675,15 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
             flushAppendOnlyFile(0);
         processed += handleClientsWithPendingWrites();
         processed += freeClientsInAsyncFreeQueue();
-        server.events_processed_while_blocked += processed;
 
-        /* New connections may have been established while blocked,
-         * ensure they are promptly sent to IO threads. */
-        sendPendingClientsToIOThreads();
+        /* Let the clients after the blocking call be processed. */
+        processClientsOfAllIOThreads();
+        /* New connections may have been established while blocked, clients from
+         * IO thread may have replies to write, ensure they are promptly sent to
+         * IO threads. */
+        processed += sendPendingClientsToIOThreads();
+
+        server.events_processed_while_blocked += processed;
         return;
     }
 

@@ -1320,19 +1320,15 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     long id;                                    /* The unique ID assigned. */
     pthread_t tid;                              /* Thread ID */
     aeEventLoop *el;                            /* Main event loop of io thread. */
-
-    list *job_queue;                           /* List of jobs to execute. */
-    eventNotifier *job_notifier;                         /* Used to wake up the loop when a job is added. */
-    pthread_mutex_t job_queue_mutext;          /* Mutex for job queue */
-
-    list *pending_clients;                /* List of clients with pending writes. */
-    eventNotifier *pending_clients_notifier;                /* Used to wake up the loop when write should be performed. */
-    pthread_mutex_t pending_clients_mutex;        /* Mutex for pending write list */
-
-    list *pending_clients_for_main_thread;     /* Clients that are waiting to be executed by the main thread. */
-    list *clients;                          /* IO thread managed clients. */
-
-    redisAtomic int paused;                  /* Paused status for the io thread. */
+    list *job_queue;                            /* List of jobs to execute. */
+    eventNotifier *job_notifier;                /* Used to wake up the loop when a job is added. */
+    pthread_mutex_t job_queue_mutext;           /* Mutex for job queue */
+    list *pending_clients;                      /* List of clients with pending writes. */
+    eventNotifier *pending_clients_notifier;    /* Used to wake up the loop when write should be performed. */
+    pthread_mutex_t pending_clients_mutex;      /* Mutex for pending write list */
+    list *pending_clients_for_main_thread;      /* Clients that are waiting to be executed by the main thread. */
+    list *clients;                              /* IO thread managed clients. */
+    redisAtomic int paused;                     /* Paused status for the io thread. */
 } ioThread;
 
 /* ACL information */
@@ -2753,11 +2749,12 @@ void pauseAllIOThreads(void);
 void resumeAllIOThreads(void);
 int isClientClosing(client *c);
 int resizeIOThreadsEventLoop(size_t newsize);
-void sendPendingClientsToIOThreads(void);
+int sendPendingClientsToIOThreads(void);
 void putInPendingClienstForMainThread(client *c);
 void putInPendingClienstForIOThreads(client *c);
 void handleClientReadError(client *c);
 void uninstallHandlerFromIOThreadEventLoop(client *c);
+void processClientsOfAllIOThreads(void);
 
 /* logreqres.c - logging of requests and responses */
 void reqresReset(client *c, int free_buf);

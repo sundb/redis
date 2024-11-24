@@ -379,7 +379,6 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
         /* Call the multiplexing API, will return only on timeout or when
          * some event fires. */
         numevents = aeApiPoll(eventLoop, tvp);
-        eventLoop->numevents = numevents;
 
         /* Don't process file events if not requested. */
         if (!(flags & AE_FILE_EVENTS)) {
