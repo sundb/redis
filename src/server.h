@@ -185,7 +185,9 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 /* Hash table parameters */
 #define HASHTABLE_MAX_LOAD_FACTOR 1.618   /* Maximum hash table load factor. */
 
-/* Main thread id when enabling io thread. */
+/* Main thread id for doing IO work, whatever we enable or disable io thread
+ * the main thread always does IO work, so we can consider that the main thread
+ * is the io thread 0. */
 #define IOTHREAD_MAIN_THREAD_ID 0
 
 /* Command flags. Please check the definition of struct redisCommand in this file
@@ -602,10 +604,6 @@ typedef enum {
 #define IO_THREAD_PAUSING       1
 #define IO_THREAD_PAUSED        2
 #define IO_THREAD_RESUMING      3
-
-
-/* IO thread job type */
-#define IO_THREAD_JOB_RESIZE_EVENT_LOOP 1
 
 /* Command call flags, see call() function */
 #define CMD_CALL_NONE 0
@@ -1187,6 +1185,7 @@ typedef struct {
 typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
+    uint64_t io_flags;      /* Accessed by both main and IO threads, but not modified concurrently */
     connection *conn;
     int tid;                /* Thread ID this client is bound to. */
     int running_tid;        /* Thread ID this client is running on. */
@@ -1311,11 +1310,10 @@ typedef struct client {
 #ifdef LOG_REQ_RES
     clientReqResInfo reqres;
 #endif
-    redisAtomic size_t output_buffer_len;
-    redisAtomic size_t output_buffer_mem;
-    int read_enabled; /* Client can read from socket. */
-    int write_enabled; /* Client can write to socket. */
-    uint64_t io_flags; /* Accessed by both main and IO threads, but not modified concurrently */
+    /* TODO: put the variables together for io thread? */
+    int8_t read_enabled;        /* Client can read from socket. */
+    int8_t write_enabled;       /* Client can write to socket. */
+    int8_t has_pending_command; /* Client has a command to execute in io thread. */
     uint64_t read_error; /* Client read error: CLIENT_READ_* macros. */
 } client;
 
@@ -1323,25 +1321,16 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     long id;                                    /* The unique ID assigned. */
     pthread_t tid;                              /* Thread ID */
     aeEventLoop *el;                            /* Main event loop of io thread. */
-
-    list *job_queue;                           /* List of jobs to execute. */
-    eventNotifier *job_notifier;                         /* Used to wake up the loop when a job is added. */
-    pthread_mutex_t job_queue_mutext;          /* Mutex for job queue */
-
-    list *pending_clients;                /* List of clients with pending writes. */
-    eventNotifier *pending_clients_notifier;                /* Used to wake up the loop when write should be performed. */
-    pthread_mutex_t pending_clients_mutex;        /* Mutex for pending write list */
-
-    list *pending_clients_for_main_thread;     /* Clients that are waiting to be executed by the main thread. */
-    list *clients;                          /* IO thread managed clients. */
-
-    redisAtomic int paused;                  /* Paused status for the io thread. */
+    list *job_queue;                            /* List of jobs to execute. */
+    eventNotifier *job_notifier;                /* Used to wake up the loop when a job is added. */
+    pthread_mutex_t job_queue_mutext;           /* Mutex for job queue */
+    list *pending_clients;                      /* List of clients with pending writes. */
+    eventNotifier *pending_clients_notifier;    /* Used to wake up the loop when write should be performed. */
+    pthread_mutex_t pending_clients_mutex;      /* Mutex for pending write list */
+    list *pending_clients_for_main_thread;      /* Clients that are waiting to be executed by the main thread. */
+    list *clients;                              /* IO thread managed clients. */
+    redisAtomic int paused;                     /* Paused status for the io thread. */
 } ioThread;
-
-typedef struct ioThreadJob {
-    int type;
-    void *data;
-} ioThreadJob;
 
 /* ACL information */
 typedef struct aclInfo {
@@ -2760,12 +2749,13 @@ void resumeIOThread(int id);
 void pauseAllIOThreads(void);
 void resumeAllIOThreads(void);
 int isClientClosing(client *c);
-void resizeIOThreadsEventLoop(unsigned int newsize);
-void sendPendingClientsToIOThreads(void);
+int resizeIOThreadsEventLoop(size_t newsize);
+int sendPendingClientsToIOThreads(void);
 void putInPendingClienstForMainThread(client *c);
 void putInPendingClienstForIOThreads(client *c);
-void updateIOThreadClientOutputBufferMemoryUsage(client *c);
 void handleClientReadError(client *c);
+void uninstallHandlerFromIOThreadEventLoop(client *c);
+void processClientsOfAllIOThreads(void);
 
 /* logreqres.c - logging of requests and responses */
 void reqresReset(client *c, int free_buf);

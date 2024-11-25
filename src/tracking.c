@@ -319,8 +319,8 @@ done:
     if (paused) {
         if (clientHasPendingReplies(c)) {
             serverAssert(!(c->flags & CLIENT_PENDING_WRITE));
-            /* Actually we instal write hanlder of client which is in IO thread event loop,
-             * it is safe since the io thread is paused */
+            /* Actually we install write handler of client which is in IO thread
+             * event loop, it is safe since the io thread is paused */
             connSetWriteHandler(c->conn, sendReplyToClient);
         }
         resumeIOThread(c->running_tid);
