@@ -37,8 +37,7 @@ void putInPendingClienstForMainThread(client *c) {
         listDelNode(io_threads[c->tid].clients, c->io_thread_client_list_node);
         c->io_thread_client_list_node = NULL;
         /* Disable read and write to avoid race when main thread processes. */
-        c->read_enabled = 0;
-        c->write_enabled = 0;
+        c->io_flags &= ~(CLIENT_READ_ENABLED | CLIENT_WRITE_ENABLED);
         listAddNodeTail(io_threads[c->tid].pending_clients_for_main_thread, c);
     }
 }
@@ -49,8 +48,7 @@ void putInPendingClienstForMainThread(client *c) {
 void putInPendingClienstForIOThreads(client *c) {
     connSetReadHandler(c->conn, NULL);
     connSetWriteHandler(c->conn, NULL);
-    c->read_enabled = 0;
-    c->write_enabled = 0;
+    c->io_flags &= ~(CLIENT_READ_ENABLED | CLIENT_WRITE_ENABLED);
     listAddNodeTail(pending_clients_for_io_threads[c->tid], c);
 }
 
@@ -76,8 +74,7 @@ void keepClientInMainThread(client *c) {
     /* Let main thread to run it, rebind event loop and read handler */
     connRebindEventLoop(c->conn, server.el);
     connSetReadHandler(c->conn, readQueryFromClient);
-    c->read_enabled = 1;
-    c->write_enabled = 1;
+    c->io_flags |= CLIENT_READ_ENABLED | CLIENT_WRITE_ENABLED;
     c->running_tid = IOTHREAD_MAIN_THREAD_ID;
     c->tid = IOTHREAD_MAIN_THREAD_ID;
 }
@@ -254,7 +251,7 @@ void processClientsFromIOThread(ioThread *t) {
 
         /* Make sure the client is readable or writable in io thread to
          * avoid data race. */
-        serverAssert(!c->read_enabled && !c->write_enabled);
+        serverAssert(!(c->io_flags & (CLIENT_READ_ENABLED | CLIENT_WRITE_ENABLED)));
         serverAssert(!(c->flags & CLIENT_CLOSE_ASAP));
 
         /* Let main thread to run it, set running thread id first. */
@@ -274,8 +271,8 @@ void processClientsFromIOThread(ioThread *t) {
         updateClientMemUsageAndBucket(c);
 
         /* Process the pending command and input buffer. */
-        if (!c->read_error && c->has_pending_command) {
-            c->has_pending_command = 0;
+        if (!c->read_error && c->io_flags & CLIENT_PENDING_COMMAND) {
+            c->io_flags &= ~CLIENT_PENDING_COMMAND;
             c->flags |= CLIENT_PENDING_COMMAND;
             if (processPendingCommandAndInputBuffer(c) == C_ERR) {
                 /* If the client is no longer valid, it must be freed safely. */
@@ -415,7 +412,7 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
     listRewind(clients, &li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
-        serverAssert(!c->read_enabled && !c->write_enabled);
+        serverAssert(!(c->io_flags & (CLIENT_READ_ENABLED | CLIENT_WRITE_ENABLED)));
         /* Main thread must handle clients with CLIENT_CLOSE_ASAP flag, since
          * we only set 'closing' state when clients in io thread are freed ASAP. */
         serverAssert(!(c->flags & CLIENT_CLOSE_ASAP));
@@ -434,8 +431,7 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
         }
 
         /* Enable read and write */
-        c->read_enabled = 1;
-        c->write_enabled = 1;
+        c->io_flags |= CLIENT_READ_ENABLED | CLIENT_WRITE_ENABLED;
 
         /* Only bind once, we never remove read handler unless freeing client. */
         if (!connHasReadHandler(c->conn)) {

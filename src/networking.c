@@ -165,7 +165,7 @@ client *createClient(connection *conn) {
     c->bulklen = -1;
     c->sentlen = 0;
     c->flags = 0;
-    c->io_flags = 0;
+    c->io_flags = CLIENT_READ_ENABLED | CLIENT_WRITE_ENABLED;
     c->slot = -1;
     c->ctime = c->lastinteraction = server.unixtime;
     c->duration = 0;
@@ -213,10 +213,7 @@ client *createClient(connection *conn) {
     listInitNode(&c->clients_pending_write_node, c);
     c->mem_usage_bucket = NULL;
     c->mem_usage_bucket_node = NULL;
-    c->read_enabled = 1;
-    c->write_enabled = 1;
     c->read_error = 0;
-    c->has_pending_command = 0;
     if (conn) linkClient(c);
     initClientMultiState(c);
     return c;
@@ -2070,7 +2067,7 @@ int _writeToClient(client *c, ssize_t *nwritten) {
  * set to 0. So when handler_installed is set to 0 the function must be
  * thread safe. */
 int writeToClient(client *c, int handler_installed) {
-    if (c->write_enabled == 0) return C_OK;
+    if (!(c->io_flags & CLIENT_WRITE_ENABLED)) return C_OK;
     /* Update total number of writes on server */
     atomicIncr(server.stat_total_writes_processed, 1);
     if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
@@ -2245,7 +2242,7 @@ void resetClient(client *c) {
  *    path, it is not really released, but only marked for later release. */
 void protectClient(client *c) {
     c->flags |= CLIENT_PROTECTED;
-    if (c->conn && c->read_enabled && c->write_enabled) {
+    if (c->conn && c->io_flags & CLIENT_READ_ENABLED && c->io_flags & CLIENT_WRITE_ENABLED) {
         connSetReadHandler(c->conn,NULL);
         connSetWriteHandler(c->conn,NULL);
     }
@@ -2256,7 +2253,7 @@ void unprotectClient(client *c) {
     if (c->flags & CLIENT_PROTECTED) {
         c->flags &= ~CLIENT_PROTECTED;
         if (c->conn) {
-            if (c->read_enabled && c->write_enabled)
+            if (c->io_flags & CLIENT_READ_ENABLED && c->io_flags & CLIENT_WRITE_ENABLED)
                 connSetReadHandler(c->conn,readQueryFromClient);
             if (clientHasPendingReplies(c)) putClientInPendingWriteQueue(c);
         }
@@ -2619,8 +2616,8 @@ int processPendingCommandAndInputBuffer(client *c) {
      * But in case of a module blocked client (see RM_Call 'K' flag) we do not reach this code path.
      * So whenever we change the code here we need to consider if we need this change on module
      * blocked client as well */
-    if (c->io_flags & CLIENT_PENDING_COMMAND) {
-        c->io_flags &= ~CLIENT_PENDING_COMMAND;
+    if (c->flags & CLIENT_PENDING_COMMAND) {
+        c->flags &= ~CLIENT_PENDING_COMMAND;
         if (processCommandAndResetClient(c) == C_ERR) {
             return C_ERR;
         }
@@ -2718,8 +2715,7 @@ int processInputBuffer(client *c) {
 
         /* Don't process more buffers from clients that have already pending
          * commands to execute in c->argv. */
-        if (c->flags & CLIENT_PENDING_COMMAND) break;
-        if (c->has_pending_command) break;
+        if (c->flags & CLIENT_PENDING_COMMAND || c->io_flags & CLIENT_PENDING_COMMAND) break;
 
         /* Don't process input from the master while there is a busy script
          * condition on the slave. We want just to accumulate the replication
@@ -2767,7 +2763,7 @@ int processInputBuffer(client *c) {
              * execute the command here. All we can do is to flag the client
              * as one that needs to process the command. */
             if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-                c->has_pending_command = 1;
+                c->io_flags |= CLIENT_PENDING_COMMAND;
                 putInPendingClienstForMainThread(c);
                 break;
             }
@@ -2819,7 +2815,7 @@ void readQueryFromClient(connection *conn) {
     client *c = connGetPrivateData(conn);
     int nread, big_arg = 0;
     size_t qblen, readlen;
-    if (c->read_enabled == 0) return;
+    if (!(c->io_flags & CLIENT_READ_ENABLED)) return;
     c->read_error = 0;
 
     /* Update total number of reads on server */

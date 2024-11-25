@@ -8108,7 +8108,7 @@ RedisModuleBlockedClient *RM_BlockClientOnAuth(RedisModuleCtx *ctx, RedisModuleA
     }
     RedisModuleBlockedClient *bc = moduleBlockClient(ctx,NULL,reply_callback,NULL,free_privdata,0, NULL,0,NULL,0);
     if (ctx->client->flags & CLIENT_BLOCKED) {
-        ctx->client->io_flags |= CLIENT_PENDING_COMMAND;
+        ctx->client->flags |= CLIENT_PENDING_COMMAND;
     }
     return bc;
 }
