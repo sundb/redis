@@ -2757,7 +2757,10 @@ int processInputBuffer(client *c) {
 
         /* Multibulk processing could see a <= 0 length. */
         if (c->argc == 0) {
-            resetClient(c);
+            freeClientArgv(c);
+            c->reqtype = 0;
+            c->multibulklen = 0;
+            c->bulklen = -1;
         } else {
             /* If we are in the context of an I/O thread, we can't really
              * execute the command here. All we can do is to flag the client
