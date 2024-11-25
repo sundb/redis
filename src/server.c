@@ -1001,6 +1001,7 @@ void getExpansiveClientsInfo(size_t *in_usage, size_t *out_usage) {
  * default server.hz value is 10, so sometimes here we need to process thousands
  * of clients per second, turning this function into a source of latency.
  */
+#define CLIENTS_CRON_PAUSE_IOTHREAD 8
 #define CLIENTS_CRON_MIN_ITERATIONS 5
 void clientsCron(void) {
     /* Try to process at least numclients/server.hz of clients
@@ -1035,10 +1036,14 @@ void clientsCron(void) {
     ClientsPeakMemInput[zeroidx] = 0;
     ClientsPeakMemOutput[zeroidx] = 0;
 
-    int allpaused = 0;
+    /* Pause the IO threads that are processing clients, to let us access clients
+     * safely. In order to avoid increasing CPU usage by pausing all threads when
+     * there are too many io threads, we pause io threads in multiple batches. */
+    static int start = 1, end = 0;
     if (server.io_threads_num >= 1 && listLength(server.clients) > 0) {
-        allpaused = 1;
-        pauseAllIOThreads();
+        end = start + CLIENTS_CRON_PAUSE_IOTHREAD - 1;
+        if (end >= server.io_threads_num) end = server.io_threads_num - 1;
+        pauseIOThreadsRange(start, end);
     }
 
     while(listLength(server.clients) && iterations--) {
@@ -1050,6 +1055,15 @@ void clientsCron(void) {
         head = listFirst(server.clients);
         c = listNodeValue(head);
         listRotateHeadToTail(server.clients);
+
+        if (c->running_tid != IOTHREAD_MAIN_THREAD_ID &&
+            !(c->running_tid >= start && c->running_tid <= end))
+        {
+            /* Skip clients that are being processed by the IO threads that
+             * are not paused. */
+            continue;
+        }
+
         /* The following functions do different service checks on the client.
          * The protocol is that they return non-zero if the client was
          * terminated. */
@@ -1070,7 +1084,14 @@ void clientsCron(void) {
 
         if (closeClientOnOutputBufferLimitReached(c, 0)) continue;
     }
-    if (allpaused) resumeAllIOThreads();
+
+    /* Resume the IO threads that were paused */
+    if (end) {
+        resumeIOThreadsRange(start, end);
+        start = end + 1;
+        if (start >= server.io_threads_num) start = 1;
+        end = 0;
+    }
 }
 
 /* This function handles 'background' operations we are required to do

@@ -2747,6 +2747,8 @@ void pauseIOThread(int id);
 void resumeIOThread(int id);
 void pauseAllIOThreads(void);
 void resumeAllIOThreads(void);
+void pauseIOThreadsRange(int start, int end);
+void resumeIOThreadsRange(int start, int end);
 int isClientClosing(client *c);
 int resizeIOThreadsEventLoop(size_t newsize);
 int sendPendingClientsToIOThreads(void);

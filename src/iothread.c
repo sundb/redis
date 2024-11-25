@@ -111,6 +111,7 @@ int resizeIOThreadsEventLoop(size_t newsize) {
  * Make sure that only the main thread can call these function,
  *  - pauseIOThread, resumeIOThread
  *  - pauseAllIOThreads, resumeAllIOThreads
+ *  - pauseIOThreadsRange, resumeIOThreadsRange
  *
  * The main thread will pause the io thread, and then wait for the io thread to
  * be paused. The io thread will check the paused status in beforeSleep, and then
@@ -121,57 +122,20 @@ int resizeIOThreadsEventLoop(size_t newsize) {
  * resume itself.
  */
 
-static int AllIOThreadsPaused = 0;
+static int PausedIOThreads[IO_THREADS_MAX_NUM] = {0};
 
-/* Pause the specific io thread, and wait for it to be paused. */
-void pauseIOThread(int id) {
+/* Pause the specific range of io threads, and wait for them to be paused. */
+void pauseIOThreadsRange(int start, int end) {
     if (server.io_threads_num <= 1) return;
-    if (AllIOThreadsPaused) return;
-    serverAssert(pthread_equal(pthread_self(), server.main_thread_id));
-
-    int paused;
-    atomicGetWithSync(io_threads[id].paused, paused);
-    /* Don't support to call reentrant */
-    serverAssert(paused == IO_THREAD_UNPAUSED);
-    atomicSetWithSync(io_threads[id].paused, IO_THREAD_PAUSING);
-    /* Just notify io thread, no actual job, since io threads
-     * check paused status in beforesleep, so just try to notify. */
-    triggerEventNotifier(io_threads[id].job_notifier);
-    /* Wait for paused */
-    while (paused != IO_THREAD_PAUSED) {
-        atomicGetWithSync(io_threads[id].paused, paused);
-    }
-}
-
-void resumeIOThreadCore(int id) {
-    int paused;
-    /* Check if it is pause, since we must call pauseIOThread
-     * and resumeIOThread in pairs */
-    atomicGetWithSync(io_threads[id].paused, paused);
-    serverAssert(paused == IO_THREAD_PAUSED);
-    /* Resume */
-    atomicSetWithSync(io_threads[id].paused, IO_THREAD_RESUMING);
-    while (paused != IO_THREAD_UNPAUSED) {
-        atomicGetWithSync(io_threads[id].paused, paused);
-    }
-}
-
-/* Resume the specific io thread, and wait for it to be resumed. */
-void resumeIOThread(int id) {
-    if (server.io_threads_num <= 1) return;
-    serverAssert(pthread_equal(pthread_self(), server.main_thread_id));
-    if (AllIOThreadsPaused) return;
-    resumeIOThreadCore(id);
-}
-
-/* Pause all io threads, and wait for them to be paused. */
-void pauseAllIOThreads(void) {
-    if (server.io_threads_num <= 1) return;
-    serverAssert(!AllIOThreadsPaused);
+    serverAssert(start >= 1 && end < server.io_threads_num && start <= end);
     serverAssert(pthread_equal(pthread_self(), server.main_thread_id));
 
     /* Try to make all io threads paused in parallel */
-    for (int i = 1; i < server.io_threads_num; i++) {
+    for (int i = start; i <= end; i++) {
+        PausedIOThreads[i]++;
+        /* Skip if already paused */
+        if (PausedIOThreads[i] > 1) continue;
+
         int paused;
         atomicGetWithSync(io_threads[i].paused, paused);
         /* Don't support to call reentrant */
@@ -181,26 +145,59 @@ void pauseAllIOThreads(void) {
          * check paused status in beforesleep, so just try to notify. */
         triggerEventNotifier(io_threads[i].job_notifier);
     }
+
     /* Wait for all io threads paused */
-    for (int i = 1; i < server.io_threads_num; i++) {
+    for (int i = start; i <= end; i++) {
+        if (PausedIOThreads[i] > 1) continue;
         int paused = IO_THREAD_PAUSING;
         while (paused != IO_THREAD_PAUSED) {
             atomicGetWithSync(io_threads[i].paused, paused);
         }
     }
-    AllIOThreadsPaused = 1;
+}
+
+/* Resume the specific range of io threads, and wait for them to be resumed. */
+void resumeIOThreadsRange(int start, int end) {
+    if (server.io_threads_num <= 1) return;
+    serverAssert(start >= 1 && end < server.io_threads_num && start <= end);
+    serverAssert(pthread_equal(pthread_self(), server.main_thread_id));
+
+    for (int i = start; i <= end; i++) {
+        serverAssert(PausedIOThreads[i] > 0);
+        PausedIOThreads[i]--;
+        if (PausedIOThreads[i] > 0) continue;
+
+        int paused;
+        /* Check if it is paused, since we must call 'pause' and
+         * 'resume' in pairs */
+        atomicGetWithSync(io_threads[i].paused, paused);
+        serverAssert(paused == IO_THREAD_PAUSED);
+        /* Resume */
+        atomicSetWithSync(io_threads[i].paused, IO_THREAD_RESUMING);
+        while (paused != IO_THREAD_UNPAUSED) {
+            atomicGetWithSync(io_threads[i].paused, paused);
+        }
+    }
+}
+
+/* Pause the specific io thread, and wait for it to be paused. */
+void pauseIOThread(int id) {
+    pauseIOThreadsRange(id, id);
+}
+
+/* Resume the specific io thread, and wait for it to be resumed. */
+void resumeIOThread(int id) {
+    resumeIOThreadsRange(id, id);
+}
+
+/* Pause all io threads, and wait for them to be paused. */
+void pauseAllIOThreads(void) {
+    pauseIOThreadsRange(1, server.io_threads_num-1);
 }
 
 /* Resume all io threads, and wait for them to be resumed. */
 void resumeAllIOThreads(void) {
-    if (server.io_threads_num <= 1) return;
-    serverAssert(AllIOThreadsPaused);
-    serverAssert(pthread_equal(pthread_self(), server.main_thread_id));
-
-    for (int i = 1; i < server.io_threads_num; i++) {
-        resumeIOThreadCore(i);
-    }
-    AllIOThreadsPaused = 0;
+    resumeIOThreadsRange(1, server.io_threads_num-1);
 }
 
 /* Add the pending clients to the list of IO threads, and trigger an event to

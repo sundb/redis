@@ -1659,6 +1659,7 @@ void freeClient(client *c) {
         return;
     }
 
+    /* If the client is running in a io thread, we can't free it directly. */
     if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
         freeClientAsync(c);
         return;

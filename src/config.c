@@ -2479,6 +2479,8 @@ static int updateReplBacklogSize(const char **err) {
 
 static int updateMaxmemory(const char **err) {
     UNUSED(err);
+
+    pauseAllIOThreads();
     if (server.maxmemory) {
         size_t used = zmalloc_used_memory()-freeMemoryGetNotCountedMemory();
         if (server.maxmemory < used) {
@@ -2486,6 +2488,7 @@ static int updateMaxmemory(const char **err) {
         }
         startEvictionTimeProc();
     }
+    resumeAllIOThreads();
     return 1;
 }
 
