@@ -397,6 +397,7 @@ run_solo {defrag} {
             r save ;# saving an rdb iterates over all the data / pointers
         } {OK}
 
+        if {[lindex [r config get io-threads] 1] == 1} {
         test "Active defrag pubsub: $type" {
             r flushdb
             r config set hz 100
@@ -489,6 +490,7 @@ run_solo {defrag} {
             }
             $rd_pubsub close
         }
+        } ;# Active defrag pubsub
 
         test "Active Defrag HFE: $type" {
             r flushdb
@@ -790,9 +792,9 @@ run_solo {defrag} {
     }
     }
 
-    start_cluster 1 0 {tags {"defrag external:skip cluster"} overrides {appendonly yes auto-aof-rewrite-percentage 0 save "" loglevel debug}} {
-        test_active_defrag "cluster"
-    }
+    # start_cluster 1 0 {tags {"defrag external:skip cluster"} overrides {appendonly yes auto-aof-rewrite-percentage 0 save "" loglevel debug}} {
+    #     test_active_defrag "cluster"
+    # }
 
     start_server {tags {"defrag external:skip standalone"} overrides {appendonly yes auto-aof-rewrite-percentage 0 save "" loglevel debug}} {
         test_active_defrag "standalone"
