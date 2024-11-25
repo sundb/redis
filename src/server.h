@@ -1315,7 +1315,7 @@ typedef struct client {
 #ifdef LOG_REQ_RES
     clientReqResInfo reqres;
 #endif
-    uint64_t read_error; /* Client read error: CLIENT_READ_* macros. */
+    uint16_t read_error; /* Client read error: CLIENT_READ_* macros. */
 } client;
 
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
