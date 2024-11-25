@@ -311,6 +311,7 @@ void processClientsFromIOThread(ioThread *t) {
                 listUnlinkNode(server.clients_pending_write, &c->clients_pending_write_node);
             }
             c->running_tid = c->tid;
+            printf("putInPendingClienstForIOThreads , c->id :%d \n", c->id);
             listLinkNodeHead(pending_clients_for_io_threads[c->tid], node);
             node = NULL;
             continue;
@@ -415,6 +416,7 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
         serverAssert(!(c->io_flags & (CLIENT_IO_READ_ENABLED | CLIENT_IO_WRITE_ENABLED)));
         /* Main thread must handle clients with CLIENT_CLOSE_ASAP flag, since
          * we only set 'closing' state when clients in io thread are freed ASAP. */
+        printf("assert: c->id: %d, %p\n", c->id, c);
         serverAssert(!(c->flags & CLIENT_CLOSE_ASAP));
 
         /* Link client in IO thread clients list first. */

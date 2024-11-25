@@ -331,6 +331,8 @@ static int connSocketIsLocal(connection *conn) {
     if (connSocketAddr(conn, cip, sizeof(cip) - 1, NULL, 1) == C_ERR)
         return -1;
 
+    printf("cip: %s\n", cip);
+
     return !strncmp(cip, "127.", 4) || !strcmp(cip, "::1");
 }
 

@@ -232,6 +232,7 @@ void installClientWriteHandler(client *c) {
         ae_barrier = 1;
     }
     if (connSetWriteHandlerWithBarrier(c->conn, sendReplyToClient, ae_barrier) == C_ERR) {
+        printf("freeClientAsync: installClientWriteHandler\n");
         freeClientAsync(c);
     }
 }
@@ -1220,6 +1221,7 @@ void AddReplyFromClient(client *dst, client *src) {
      * they changed) */
     if (src->flags & CLIENT_CLOSE_ASAP) {
         sds client = catClientInfoString(sdsempty(),dst);
+        printf("freeClientAsync: AddReplyFromClient\n");
         freeClientAsync(dst);
         serverLog(LL_WARNING,"Client %s scheduled to be closed ASAP for overcoming of output buffer limits.", client);
         sdsfree(client);
@@ -1307,6 +1309,7 @@ void clientAcceptHandler(connection *conn) {
         serverLog(LL_WARNING,
                   "Error accepting a client connection: %s (addr=%s laddr=%s)",
                   connGetLastError(conn), getClientPeerId(c), getClientSockname(c));
+        printf("freeClientAsync: clientAcceptHandler\n");
         freeClientAsync(c);
         return;
     }
@@ -1343,6 +1346,7 @@ void clientAcceptHandler(connection *conn) {
                 /* Nothing to do, Just to avoid the warning... */
             }
             server.stat_rejected_conn++;
+            printf("freeClientAsync: clientAcceptHandler 1, c: %p\n", c);
             freeClientAsync(c);
             return;
         }
@@ -1436,6 +1440,7 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
         c->running_tid = c->tid;
         serverAssert(c->tid != IOTHREAD_MAIN_THREAD_ID);
         /* Let the specific io thread to handle */
+        printf("putInPendingClienstForIOThreads acceptCommonHandler, c->id :%d, c: %p\n", c->id, c);
         putInPendingClienstForIOThreads(c);
     }
 }
@@ -1620,6 +1625,7 @@ void deauthenticateAndCloseClient(client *c) {
     if (c == server.current_client) {
         c->flags |= CLIENT_CLOSE_AFTER_COMMAND;
     } else {
+        printf("freeClientAsync: deauthenticateAndCloseClient 1\n");
         freeClientAsync(c);
     }
 }
@@ -1652,11 +1658,13 @@ void freeClient(client *c) {
     /* If a client is protected, yet we need to free it right now, make sure
      * to at least use asynchronous freeing. */
     if (c->flags & CLIENT_PROTECTED) {
+        printf("freeClientAsync: freeClient\n");
         freeClientAsync(c);
         return;
     }
 
     if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
+        printf("freeClientAsync: freeClient 1\n");
         freeClientAsync(c);
         return;
     }
@@ -1824,6 +1832,8 @@ void freeClient(client *c) {
  * a context where calling freeClient() is not possible, because the client
  * should be valid for the continuation of the flow of the program. */
 void freeClientAsync(client *c) {
+    printf("freeClientAsync: c->id: %d, c: %p\n", c->id, c);
+
     if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
         if (isClientClosing(c)) return;
         /* If called in the IO thread, let main thread handle it. If called
@@ -1849,6 +1859,8 @@ void freeClientAsync(client *c) {
     /* Replicas that was marked as CLIENT_CLOSE_ASAP should not keep the
      * replication backlog from been trimmed. */
     if (c->flags & CLIENT_SLAVE) freeReplicaReferencedReplBuffer(c);
+
+    printf("listAddNodeTail(server.clients_to_close,c): c->id: %d, c: %p, %d\n", c->id, c, c->running_tid);
     listAddNodeTail(server.clients_to_close,c);
 }
 
@@ -1909,6 +1921,7 @@ int freeClientsInAsyncFreeQueue(void) {
 
         if (c->flags & CLIENT_PROTECTED) continue;
 
+        printf("freeClientsInAsyncFreeQueue: c->id: %d, c: %p\n", c->id, c);
         c->flags &= ~CLIENT_CLOSE_ASAP;
         freeClient(c);
         listDelNode(server.clients_to_close,ln);
@@ -2108,6 +2121,7 @@ int writeToClient(client *c, int handler_installed) {
         if (connGetState(c->conn) != CONN_STATE_CONNECTED) {
             serverLog(LL_VERBOSE,
                 "Error writing to client: %s", connGetLastError(c->conn));
+            printf("freeClientAsync: writeToClient 1\n");
             freeClientAsync(c);
             return C_ERR;
         }
@@ -2132,6 +2146,7 @@ int writeToClient(client *c, int handler_installed) {
 
         /* Close connection after entire reply has been sent. */
         if (c->flags & CLIENT_CLOSE_AFTER_REPLY) {
+            printf("freeClientAsync: writeToClient 2\n");
             freeClientAsync(c);
             return C_ERR;
         }
@@ -2899,11 +2914,13 @@ void readQueryFromClient(connection *conn) {
             goto done;
         } else {
             c->read_error = CLIENT_READ_CONN_DISCONNECTED;
+            printf("freeClientAsync: readQueryFromClient\n");
             freeClientAsync(c);
             goto done;
         }
     } else if (nread == 0) {
         c->read_error = CLIENT_READ_CONN_CLOSED;
+        printf("freeClientAsync: readQueryFromClient 1\n");
         freeClientAsync(c);
         goto done;
     }
@@ -2929,6 +2946,7 @@ void readQueryFromClient(connection *conn) {
          (c->mstate.argv_len_sums + sdslen(c->querybuf) > 1024*1024 && authRequired(c))))
     {
         c->read_error = CLIENT_READ_REACHED_MAX_QUERYBUF;
+        printf("freeClientAsync: readQueryFromClient 3\n");
         freeClientAsync(c);
         atomicIncr(server.stat_client_qbuf_limit_disconnections, 1);
         goto done;
@@ -3930,6 +3948,7 @@ void securityWarningCommand(client *c) {
         }
         logged_time = now;
     }
+    printf("freeClientAsync: securityWarningCommand 3\n");
     freeClientAsync(c);
 }
 
@@ -4218,6 +4237,7 @@ int closeClientOnOutputBufferLimitReached(client *c, int async) {
         sds client = catClientInfoString(sdsempty(),c);
 
         if (async) {
+            printf("freeClientAsync: closeClientOnOutputBufferLimitReached 3\n");
             freeClientAsync(c);
             serverLog(LL_WARNING,
                       "Client %s scheduled to be closed ASAP for overcoming of output buffer limits.",
