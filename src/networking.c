@@ -166,7 +166,7 @@ client *createClient(connection *conn) {
     c->bulklen = -1;
     c->sentlen = 0;
     c->flags = 0;
-    c->read_error = 0;
+    c->io_flags = CLIENT_IO_READ_ENABLED | CLIENT_IO_WRITE_ENABLED;
     c->slot = -1;
     c->ctime = c->lastinteraction = server.unixtime;
     c->duration = 0;
@@ -214,9 +214,7 @@ client *createClient(connection *conn) {
     listInitNode(&c->clients_pending_write_node, c);
     c->mem_usage_bucket = NULL;
     c->mem_usage_bucket_node = NULL;
-    c->read_enabled = 1;
-    c->write_enabled = 1;
-    c->has_pending_command = 0;
+    c->read_error = 0;
     if (conn) linkClient(c);
     initClientMultiState(c);
     return c;
@@ -1631,7 +1629,7 @@ void deauthenticateAndCloseClient(client *c) {
  * If any data remained in the buffer, the client will take ownership of the buffer
  * and a new empty buffer will be allocated for the reusable buffer. */
 static void resetReusableQueryBuf(client *c) {
-    serverAssert(c->in_reusable_querybuf);
+    serverAssert(c->io_flags & CLIENT_IO_REUSABLE_QUERYBUFFER);
     if (c->querybuf != thread_reusable_qb || sdslen(c->querybuf) > c->qb_pos) {
         /* If querybuf has been reallocated or there is still data left,
          * let the client take ownership of the reusable buffer. */
@@ -1645,7 +1643,7 @@ static void resetReusableQueryBuf(client *c) {
 
     /* Mark that the client is no longer using the reusable query buffer
      * and indicate that it is no longer used by any client. */
-    c->in_reusable_querybuf = 0;
+    c->io_flags &= ~CLIENT_IO_REUSABLE_QUERYBUFFER;
     thread_reusable_qb_used = 0;
 }
 
@@ -1715,7 +1713,7 @@ void freeClient(client *c) {
     }
 
     /* Free the query buffer */
-    if (c->in_reusable_querybuf)
+    if (c->io_flags & CLIENT_IO_REUSABLE_QUERYBUFFER)
         resetReusableQueryBuf(c);
     sdsfree(c->querybuf);
     c->querybuf = NULL;
@@ -2071,7 +2069,7 @@ int _writeToClient(client *c, ssize_t *nwritten) {
  * set to 0. So when handler_installed is set to 0 the function must be
  * thread safe. */
 int writeToClient(client *c, int handler_installed) {
-    if (c->write_enabled == 0) return C_OK;
+    if (!(c->io_flags & CLIENT_IO_WRITE_ENABLED)) return C_OK;
     /* Update total number of writes on server */
     atomicIncr(server.stat_total_writes_processed, 1);
     if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
@@ -2246,7 +2244,7 @@ void resetClient(client *c) {
  *    path, it is not really released, but only marked for later release. */
 void protectClient(client *c) {
     c->flags |= CLIENT_PROTECTED;
-    if (c->conn && c->read_enabled && c->write_enabled) {
+    if (c->conn && c->io_flags & CLIENT_IO_READ_ENABLED && c->io_flags & CLIENT_IO_WRITE_ENABLED) {
         connSetReadHandler(c->conn,NULL);
         connSetWriteHandler(c->conn,NULL);
     }
@@ -2257,7 +2255,7 @@ void unprotectClient(client *c) {
     if (c->flags & CLIENT_PROTECTED) {
         c->flags &= ~CLIENT_PROTECTED;
         if (c->conn) {
-            if (c->read_enabled && c->write_enabled)
+            if (c->io_flags & CLIENT_IO_READ_ENABLED && c->io_flags & CLIENT_IO_WRITE_ENABLED)
                 connSetReadHandler(c->conn,readQueryFromClient);
             if (clientHasPendingReplies(c)) putClientInPendingWriteQueue(c);
         }
@@ -2720,7 +2718,6 @@ int processInputBuffer(client *c) {
         /* Don't process more buffers from clients that have already pending
          * commands to execute in c->argv. */
         if (c->flags & CLIENT_PENDING_COMMAND) break;
-        if (c->has_pending_command) break;
 
         /* Don't process input from the master while there is a busy script
          * condition on the slave. We want just to accumulate the replication
@@ -2762,13 +2759,16 @@ int processInputBuffer(client *c) {
 
         /* Multibulk processing could see a <= 0 length. */
         if (c->argc == 0) {
-            resetClient(c);
+            freeClientArgv(c);
+            c->reqtype = 0;
+            c->multibulklen = 0;
+            c->bulklen = -1;
         } else {
             /* If we are in the context of an I/O thread, we can't really
              * execute the command here. All we can do is to flag the client
              * as one that needs to process the command. */
             if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-                c->has_pending_command = 1;
+                c->io_flags |= CLIENT_IO_PENDING_COMMAND;
                 putInPendingClienstForMainThread(c);
                 break;
             }
@@ -2820,7 +2820,7 @@ void readQueryFromClient(connection *conn) {
     client *c = connGetPrivateData(conn);
     int nread, big_arg = 0;
     size_t qblen, readlen;
-    if (c->read_enabled == 0) return;
+    if (!(c->io_flags & CLIENT_IO_READ_ENABLED)) return;
     c->read_error = 0;
 
     /* Update total number of reads on server */
@@ -2872,7 +2872,7 @@ void readQueryFromClient(connection *conn) {
             /* Assign the reusable query buffer to the client and mark it as in use. */
             serverAssert(sdslen(thread_reusable_qb) == 0);
             c->querybuf = thread_reusable_qb;
-            c->in_reusable_querybuf = 1;
+            c->io_flags |= CLIENT_IO_REUSABLE_QUERYBUFFER;
             thread_reusable_qb_used = 1;
         }
     }
@@ -2948,7 +2948,7 @@ done:
         }
     }
 
-    if (c && c->in_reusable_querybuf) {
+    if (c && (c->io_flags & CLIENT_IO_REUSABLE_QUERYBUFFER)) {
         serverAssert(c->qb_pos == 0); /* Ensure the client's query buffer is trimmed in processInputBuffer */
         resetReusableQueryBuf(c);
     }

@@ -394,6 +394,12 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 /* Any flag that does not let optimize FLUSH SYNC to run it in bg as blocking client ASYNC */
 #define CLIENT_AVOID_BLOCKING_ASYNC_FLUSH (CLIENT_DENY_BLOCKING|CLIENT_MULTI|CLIENT_LUA_DEBUG|CLIENT_LUA_DEBUG_SYNC|CLIENT_MODULE)
 
+/* Client flags for client IO */
+#define CLIENT_IO_READ_ENABLED (1ULL<<0) /* Client can read from socket. */
+#define CLIENT_IO_WRITE_ENABLED (1ULL<<1) /* Client can write to socket. */
+#define CLIENT_IO_PENDING_COMMAND (1ULL<<2) /* Similar to CLIENT_PENDING_COMMAND. */
+#define CLIENT_IO_REUSABLE_QUERYBUFFER (1ULL<<3) /* The client is using the reusable query buffer. */
+
 /* Definitions for client read errors. These error codes are used to indicate
  * various issues that can occur while reading or parsing data from a client. */
 #define CLIENT_READ_TOO_BIG_INLINE_REQUEST 1
@@ -1184,7 +1190,7 @@ typedef struct {
 typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
-    uint64_t read_error;    /* Client flags: CLIENT_READ_* macros. */
+    uint8_t io_flags;      /* Accessed by both main and IO threads, but not modified concurrently */
     connection *conn;
     int tid;                /* Thread ID this client is bound to. */
     int running_tid;        /* Thread ID this client is running on. */
@@ -1310,10 +1316,7 @@ typedef struct client {
 #ifdef LOG_REQ_RES
     clientReqResInfo reqres;
 #endif
-    /* TODO: put the variables together for io thread? */
-    int8_t read_enabled;        /* Client can read from socket. */
-    int8_t write_enabled;       /* Client can write to socket. */
-    int8_t has_pending_command; /* Client has a command to execute in io thread. */
+    uint16_t read_error; /* Client read error: CLIENT_READ_* macros. */
 } client;
 
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
