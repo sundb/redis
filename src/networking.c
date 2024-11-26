@@ -1355,6 +1355,16 @@ void clientAcceptHandler(connection *conn) {
     moduleFireServerEvent(REDISMODULE_EVENT_CLIENT_CHANGE,
                           REDISMODULE_SUBEVENT_CLIENT_CHANGE_CONNECTED,
                           c);
+
+    /* Handle clients in io thread */
+    if (server.io_threads_num > 1) {
+        /* Select io thread */
+        c->tid = c->id % (server.io_threads_num-1) + 1;
+        c->running_tid = c->tid;
+        serverAssert(c->tid != IOTHREAD_MAIN_THREAD_ID);
+        /* Let the specific io thread to handle */
+        putInPendingClienstForIOThreads(c);
+    }
 }
 
 void acceptCommonHandler(connection *conn, int flags, char *ip) {
@@ -1430,16 +1440,6 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
                       connGetLastError(conn), getClientPeerId(c), getClientSockname(c));
         freeClient(connGetPrivateData(conn));
         return;
-    }
-
-    /* Handle clients in io thread */
-    if (server.io_threads_num > 1) {
-        /* Select io thread */
-        c->tid = c->id % (server.io_threads_num-1) + 1;
-        c->running_tid = c->tid;
-        serverAssert(c->tid != IOTHREAD_MAIN_THREAD_ID);
-        /* Let the specific io thread to handle */
-        putInPendingClienstForIOThreads(c);
     }
 }
 

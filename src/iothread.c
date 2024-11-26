@@ -230,8 +230,8 @@ extern int ProcessingEventsWhileBlocked;
  * And for some clients, we may keep them in the main thread, since they are not
  * suitable to be processed in IO threads.
  * Replica, pubsub, monitor, blocked, tracking, watching clients which main thread
- * may directly operate on them when conditions are met, so we should keep them
- * in the main thread.
+ * may directly operate on them when conditions are met, script command with debug
+ * may operate connection directly, so we should keep them in the main thread.
  *
  * Please notice that this function may be called reentrantly, i,e, the same goes
  * for handleClientsFromIOThread and processClientsOfAllIOThreads. For example,
@@ -295,7 +295,9 @@ void processClientsFromIOThread(ioThread *t) {
             c->flags & CLIENT_MONITOR ||
             c->flags & CLIENT_BLOCKED ||
             c->flags & CLIENT_TRACKING ||
-            c->flags & CLIENT_MULTI)
+            c->flags & CLIENT_MULTI ||
+            c->flags & CLIENT_LUA_DEBUG ||
+            c->flags & CLIENT_LUA_DEBUG_SYNC)
         {
             keepClientInMainThread(c);
             continue;
@@ -498,7 +500,6 @@ int ioThreadCron(struct aeEventLoop *eventLoop, long long id, void *ptr) {
     UNUSED(id);
 
     ioThread *t = ptr;
-    serverLog(LL_DEBUG, "io thead %ld, event loop size: %d", t->id, aeGetSetSize(t->el));
 
     /* Clients cron in io thread, and iterate over all clients in 1s. */
     int iterations = max(IO_THREAD_CRON_CLIENTS_ITERATIONS, listLength(t->clients)/10);
