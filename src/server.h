@@ -185,6 +185,9 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 /* Hash table parameters */
 #define HASHTABLE_MAX_LOAD_FACTOR 1.618   /* Maximum hash table load factor. */
 
+/* Max number of IO threads */
+#define IO_THREADS_MAX_NUM 128
+
 /* Main thread id for doing IO work, whatever we enable or disable io thread
  * the main thread always does IO work, so we can consider that the main thread
  * is the io thread 0. */
@@ -1692,6 +1695,7 @@ struct redisServer {
     redisAtomic uint64_t next_client_id; /* Next client unique ID. Incremental. */
     int protected_mode;         /* Don't accept external connections. */
     int io_threads_num;         /* Number of IO threads to use. */
+    int io_threads_clients_num[IO_THREADS_MAX_NUM]; /* Number of IO threads to use. */
     int io_threads_do_reads;    /* Read and parse from IO threads? */
     int io_threads_active;      /* Is IO threads currently active? */
     long long events_processed_while_blocked; /* processEventsWhileBlocked() */
@@ -2760,6 +2764,7 @@ void putInPendingClienstForIOThreads(client *c);
 void handleClientReadError(client *c);
 void uninstallHandlerFromIOThreadEventLoop(client *c);
 void processClientsOfAllIOThreads(void);
+void assignClientToIOThread(client *c);
 
 /* logreqres.c - logging of requests and responses */
 void reqresReset(client *c, int free_buf);

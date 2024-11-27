@@ -2795,6 +2795,7 @@ void initServer(void) {
     server.aof_last_write_errno = 0;
     server.repl_good_slaves_count = 0;
     server.last_sig_received = 0;
+    memset(server.io_threads_clients_num, 0, sizeof(server.io_threads_clients_num));
 
     /* Initiate acl info struct */
     server.acl_info.invalid_cmd_accesses = 0;
@@ -5703,6 +5704,14 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "total_watched_keys:%lu\r\n", watched_keys,
             "total_blocking_keys:%lu\r\n", blocking_keys,
             "total_blocking_keys_on_nokey:%lu\r\n", blocking_keys_on_nokey));
+
+        if (server.io_threads_num > 1) {
+            info = sdscatprintf(info, "main_thread_clients:%ld\r\n",
+                server.io_threads_clients_num[IOTHREAD_MAIN_THREAD_ID] - listLength(server.slaves));
+            for (j = 1; j < server.io_threads_num; j++) {
+                info = sdscatprintf(info, "io_thread_%d_clients:%d\r\n", j, server.io_threads_clients_num[j]);
+            }
+        }
     }
 
     /* Memory */

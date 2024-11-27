@@ -1353,16 +1353,10 @@ void clientAcceptHandler(connection *conn) {
     moduleFireServerEvent(REDISMODULE_EVENT_CLIENT_CHANGE,
                           REDISMODULE_SUBEVENT_CLIENT_CHANGE_CONNECTED,
                           c);
+    server.io_threads_clients_num[IOTHREAD_MAIN_THREAD_ID]++;
 
-    /* Handle clients in io thread */
-    if (server.io_threads_num > 1) {
-        /* Select io thread */
-        c->tid = c->id % (server.io_threads_num-1) + 1;
-        c->running_tid = c->tid;
-        serverAssert(c->tid != IOTHREAD_MAIN_THREAD_ID);
-        /* Let the specific io thread to handle */
-        putInPendingClienstForIOThreads(c);
-    }
+    /* Assign the client to an IO thread */
+    if (server.io_threads_num > 1) assignClientToIOThread(c);
 }
 
 void acceptCommonHandler(connection *conn, int flags, char *ip) {
@@ -1669,6 +1663,9 @@ void freeClient(client *c) {
         uninstallHandlerFromIOThreadEventLoop(c);
     }
 
+    /* Update the number of clients in the IO thread. */
+    server.io_threads_clients_num[c->tid]--;
+
     /* For connected clients, call the disconnection event of modules hooks. */
     if (c->conn) {
         moduleFireServerEvent(REDISMODULE_EVENT_CLIENT_CHANGE,
@@ -1827,7 +1824,6 @@ void freeClient(client *c) {
  * should be valid for the continuation of the flow of the program. */
 void freeClientAsync(client *c) {
     if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-        if (isClientClosing(c)) return;
         /* If called in the IO thread, let main thread handle it. If called
          * in the main thread, just set 'closing' flag, and IO thread will
          * schedule it to be freed by main thread. */
