@@ -140,6 +140,9 @@ void assignClientToIOThread(client *c) {
  * resume itself.
  */
 
+/* We may pause the same io thread nestedly, so we need to record the times of
+ * pausing, and only when the times of pausing is 0, we can pause the io thread,
+ * and only when the times of pausing is 1, we can resume the io thread. */
 static int PausedIOThreads[IO_THREADS_MAX_NUM] = {0};
 
 /* Pause the specific range of io threads, and wait for them to be paused. */
@@ -249,7 +252,8 @@ extern int ProcessingEventsWhileBlocked;
  * suitable to be processed in IO threads.
  * Replica, pubsub, monitor, blocked, tracking, watching clients which main thread
  * may directly operate on them when conditions are met, script command with debug
- * may operate connection directly, so we should keep them in the main thread.
+ * may operate connection directly, we may change flags of client in transaction,
+ * so we should keep them in the main thread.
  *
  * Please notice that this function may be called reentrantly, i,e, the same goes
  * for handleClientsFromIOThread and processClientsOfAllIOThreads. For example,
@@ -311,6 +315,7 @@ void processClientsFromIOThread(ioThread *t) {
             c->flags & CLIENT_PUBSUB ||
             c->flags & CLIENT_MONITOR ||
             c->flags & CLIENT_BLOCKED ||
+            c->flags & CLIENT_UNBLOCKED ||
             c->flags & CLIENT_TRACKING ||
             c->flags & CLIENT_MULTI ||
             c->flags & CLIENT_LUA_DEBUG ||
