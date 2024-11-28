@@ -133,7 +133,6 @@ client *createClient(connection *conn) {
     c->id = client_id;
     c->tid = IOTHREAD_MAIN_THREAD_ID;
     c->running_tid = IOTHREAD_MAIN_THREAD_ID;
-    atomicSetWithSync(c->closing, 0);
 #ifdef LOG_REQ_RES
     reqresReset(c, 0);
     c->resp = server.client_default_resp;
@@ -1653,8 +1652,7 @@ void freeClient(client *c) {
 
     /* If the client is running in a io thread, we can't free it directly. */
     if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-        freeClientAsync(c);
-        return;
+        fetchClientFromIOThread(c);
     }
 
     /* We need to uninstall event handler first if the client has binded event
@@ -1824,21 +1822,14 @@ void freeClient(client *c) {
  * should be valid for the continuation of the flow of the program. */
 void freeClientAsync(client *c) {
     if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-        /* If called in the IO thread, let main thread handle it. If called
-         * in the main thread, just set 'closing' flag, and IO thread will
-         * schedule it to be freed by main thread. */
-        atomicSetWithSync(c->closing, 1);
-        if (pthread_equal(pthread_self(), server.main_thread_id)) {
-            /* Trigger event for io threads if it is not active, and
-             * shutdown can make sure the client can not be used anymore.
-             * TODO:is it safe? */
-            connShutdown(c->conn);
-        } else {
-            /* Remove read and write handler from io thread event loop. */
-            connSetReadHandler(c->conn, NULL);
-            connSetWriteHandler(c->conn, NULL);
-            putInPendingClienstForMainThread(c);
+        int main_thread = pthread_equal(pthread_self(), server.main_thread_id);
+        /* Make sure the main thread can access IO thread data safely. */
+        if (main_thread) pauseIOThread(c->tid);
+        if (!(c->flags & CLIENT_IO_CLOSE_ASYNC)) {
+            c->io_flags |= CLIENT_IO_CLOSE_ASYNC;
+            putInPendingClienstForMainThread(c, 1);
         }
+        if (main_thread) resumeIOThread(c->tid);
         return;
     }
 
@@ -2740,13 +2731,13 @@ int processInputBuffer(client *c) {
         if (c->reqtype == PROTO_REQ_INLINE) {
             if (processInlineBuffer(c) != C_OK) {
                 if (c->running_tid != IOTHREAD_MAIN_THREAD_ID && c->read_error)
-                    putInPendingClienstForMainThread(c);
+                    putInPendingClienstForMainThread(c, 0);
                 break;
             }
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
             if (processMultibulkBuffer(c) != C_OK) {
                 if (c->running_tid != IOTHREAD_MAIN_THREAD_ID && c->read_error)
-                    putInPendingClienstForMainThread(c);
+                    putInPendingClienstForMainThread(c, 0);
                 break;
             }
         } else {
@@ -2765,7 +2756,7 @@ int processInputBuffer(client *c) {
              * as one that needs to process the command. */
             if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
                 c->io_flags |= CLIENT_IO_PENDING_COMMAND;
-                putInPendingClienstForMainThread(c);
+                putInPendingClienstForMainThread(c, 0);
                 break;
             }
 

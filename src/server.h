@@ -402,6 +402,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_IO_WRITE_ENABLED (1ULL<<1) /* Client can write to socket. */
 #define CLIENT_IO_PENDING_COMMAND (1ULL<<2) /* Similar to CLIENT_PENDING_COMMAND. */
 #define CLIENT_IO_REUSABLE_QUERYBUFFER (1ULL<<3) /* The client is using the reusable query buffer. */
+#define CLIENT_IO_CLOSE_ASYNC (1ULL<<4) /* Close this client async */
 
 /* Definitions for client read errors. These error codes are used to indicate
  * various issues that can occur while reading or parsing data from a client. */
@@ -1197,7 +1198,6 @@ typedef struct client {
     connection *conn;
     int tid;                /* Thread ID this client is bound to. */
     int running_tid;        /* Thread ID this client is running on. */
-    redisAtomic int closing;/* This client is in the process of being closed. */
     int resp;               /* RESP protocol version. Can be 2 or 3. */
     redisDb *db;            /* Pointer to currently SELECTed DB. */
     robj *name;             /* As set by CLIENT SETNAME. */
@@ -1326,9 +1326,6 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     long id;                                    /* The unique ID assigned. */
     pthread_t tid;                              /* Thread ID */
     aeEventLoop *el;                            /* Main event loop of io thread. */
-    list *job_queue;                            /* List of jobs to execute. */
-    eventNotifier *job_notifier;                /* Used to wake up the loop when a job is added. */
-    pthread_mutex_t job_queue_mutext;           /* Mutex for job queue */
     list *pending_clients;                      /* List of clients with pending writes. */
     eventNotifier *pending_clients_notifier;    /* Used to wake up the loop when write should be performed. */
     pthread_mutex_t pending_clients_mutex;      /* Mutex for pending write list */
@@ -2756,15 +2753,15 @@ void pauseAllIOThreads(void);
 void resumeAllIOThreads(void);
 void pauseIOThreadsRange(int start, int end);
 void resumeIOThreadsRange(int start, int end);
-int isClientClosing(client *c);
 int resizeIOThreadsEventLoop(size_t newsize);
 int sendPendingClientsToIOThreads(void);
-void putInPendingClienstForMainThread(client *c);
+void putInPendingClienstForMainThread(client *c, int uninstall_handler);
 void putInPendingClienstForIOThreads(client *c);
 void handleClientReadError(client *c);
 void uninstallHandlerFromIOThreadEventLoop(client *c);
 void processClientsOfAllIOThreads(void);
 void assignClientToIOThread(client *c);
+void fetchClientFromIOThread(client *c);
 
 /* logreqres.c - logging of requests and responses */
 void reqresReset(client *c, int free_buf);
