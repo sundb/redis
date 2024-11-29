@@ -18,6 +18,7 @@ static list *main_thread_pending_clients[IO_THREADS_MAX_NUM] __attribute__((alig
 static list *main_thread_processing_clients[IO_THREADS_MAX_NUM] __attribute__((aligned(CACHE_LINE_SIZE)));
 static pthread_mutex_t main_thread_pending_clients_mutexs[IO_THREADS_MAX_NUM] __attribute__((aligned(CACHE_LINE_SIZE)));
 static eventNotifier* main_thread_pending_clients_notifier[IO_THREADS_MAX_NUM] __attribute__((aligned(CACHE_LINE_SIZE)));
+static __thread ioThread *thisIOThread = NULL;
 
 /* When IO threads read a complete query of clients or want to free clients,
  * it should remove it from its clients list and put the client in the list
@@ -373,7 +374,7 @@ void processClientsFromIOThread(ioThread *t) {
 
         /* TODO: remaining clients are handled by main thread, what's the client status?
          * it should not reach here? */
-        serverPanic("Unknown client status");
+        serverPanic("Unknown client status, c->flags: %lu, %ld\n", c->flags, c->id);
         keepClientInMainThread(c); /* Keep it mian thread if we don't know its status? */
     }
     if (node) zfree(node);
@@ -505,7 +506,14 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
 }
 
 void ioThreadBeforeSleep(struct aeEventLoop *el) {
-    ioThread *t = el->privdata;
+    ioThread *t = thisIOThread;
+
+    /* Handle pending data (typically TLS). */
+    connTypeProcessPendingData(el);
+
+    /* If any connection type (typically TLS) still has pending unread data,
+     * don't sleep at all. */
+    aeSetDontWait(el, connTypeHasPendingData(el));
 
     /* Check if i am pausing */
     int paused;
@@ -566,13 +574,13 @@ int ioThreadCron(struct aeEventLoop *eventLoop, long long id, void *ptr) {
  * and IO thread will communicate through event notifier. */
 void *ioThreadMain(void *ptr) {
     ioThread *t = ptr;
+    thisIOThread = t;
     char thdname[16];
     snprintf(thdname, sizeof(thdname), "io_thd_%ld", t->id);
     redis_set_thread_title(thdname);
     redisSetCpuAffinity(server.server_cpulist);
     makeThreadKillable();
     aeSetBeforeSleepProc(t->el, ioThreadBeforeSleep);
-    t->el->privdata = t;
     aeMain(t->el);
     return NULL;
 }

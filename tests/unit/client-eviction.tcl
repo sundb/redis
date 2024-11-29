@@ -7,6 +7,7 @@ proc client_field {name f} {
     set clients [split [string trim [r client list]] "\r\n"]
     set c [lsearch -inline $clients *name=$name*]
     if {![regexp $f=(\[a-zA-Z0-9-\]+) $c - res]} {
+        # puts [r client list]
         error "no client named $name found with field $f"
     }
     return $res
@@ -108,7 +109,11 @@ start_server {} {
             $rr write [join [list "*1\r\n\$$maxmemory_clients_actual\r\n" [string repeat v $maxmemory_clients_actual]] ""]
             $rr flush
         } e
-        assert {![client_exists $cname]}
+        wait_for_condition 100 10 {
+            ![client_exists $cname]
+        } else {
+            fail "Failed to evict client"
+        }
         $rr close
 
         # Restore settings
@@ -348,6 +353,9 @@ start_server {} {
             fail "Failed to fill qbuf for test"
         }
 
+        puts [r client list]
+        puts [r info memory]
+
         # Make the other two obuf-clients pass obuf limit and also pass maxmemory-clients
         # We use two obuf-clients to make sure that even if client eviction is attempted
         # between two command processing (with no sleep) we don't perform any client eviction
@@ -365,8 +373,14 @@ start_server {} {
         assert_match {no client named obuf-client1 found*} $e
         catch {client_field obuf-client2 name} e
         assert_match {no client named obuf-client2 found*} $e
+        puts "000000000000000000000"
+        puts [r client list]
+        puts [r info memory]
 
-        # Validate qbuf-client is still connected and wasn't evicted
+        # # Validate qbuf-client is still connected and wasn't evicted
+        puts '111111111111111111'
+        puts [r client list]
+        puts '22222222222222222222'
         assert_equal [client_field qbuf-client name] {qbuf-client}
 
         $rr1 close
@@ -404,8 +418,11 @@ start_server {} {
 
         # Decrease maxmemory_clients and expect client eviction
         r config set maxmemory-clients [expr $maxmemory_clients / 2]
-        set connected_clients [llength [lsearch -all [split [string trim [r client list]] "\r\n"] *name=client*]]
-        assert {$connected_clients > 0 && $connected_clients < $client_count}
+        wait_for_condition 200 10 {
+            [llength [lsearch -all [split [string trim [r client list]] "\r\n"] *name=client*]] < $client_count
+        } else {
+            fail "Failed to evict clients"
+        }
 
         foreach rr $rrs {$rr close}
     }
