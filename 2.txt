@@ -1,0 +1,82 @@
+Cleanup: may take some time... OK
+Starting test server at port 21079
+[ready]: 9931
+[1;37;49mTesting unit/introspection[0m
+[ready]: 9933
+[ready]: 9932
+[ready]: 9934
+[ready]: 9935
+[ready]: 9936
+[ready]: 9937
+[ready]: 9939
+[ready]: 9938
+[ready]: 9940
+[ready]: 9944
+[ready]: 9942
+[ready]: 9941
+[ready]: 9943
+[ready]: 9945
+[ready]: 9946
+[[0;33;49mskip[0m]: PING
+[[0;33;49mskip[0m]: CLIENT LIST
+[[0;33;49mskip[0m]: CLIENT LIST with IDs
+[[0;33;49mskip[0m]: CLIENT INFO
+[[0;33;49mskip[0m]: CLIENT KILL with illegal arguments
+[[0;33;49mskip[0m]: CLIENT KILL maxAGE will kill old clients
+[[0;33;49mskip[0m]: CLIENT KILL SKIPME YES/NO will kill all clients
+[[0;33;49mskip[0m]: CLIENT command unhappy path coverage
+[[0;33;49mskip[0m]: CLIENT KILL close the client connection during bgsave
+[[0;33;49mskip[0m]: CLIENT REPLY OFF/ON: disable all commands reply
+[[0;33;49mskip[0m]: CLIENT REPLY ON: unset SKIP flag
+[[0;33;49mskip[0m]: MONITOR can log executed commands
+[[0;33;49mskip[0m]: MONITOR can log commands issued by the scripting engine
+[[0;33;49mskip[0m]: MONITOR can log commands issued by functions
+[[0;33;49mskip[0m]: MONITOR supports redacting command arguments
+[[0;33;49mskip[0m]: MONITOR correctly handles multi-exec cases
+[[0;33;49mskip[0m]: MONITOR log blocked command only once
+[[0;33;49mskip[0m]: CLIENT GETNAME should return NIL if name is not assigned
+[[0;33;49mskip[0m]: CLIENT GETNAME check if name set correctly
+[[0;33;49mskip[0m]: CLIENT LIST shows empty fields for unassigned names
+[[0;33;49mskip[0m]: CLIENT SETNAME does not accept spaces
+[[0;33;49mskip[0m]: CLIENT SETNAME can assign a name to this connection
+[[0;33;49mskip[0m]: CLIENT SETNAME can change the name of an existing connection
+[[0;33;49mskip[0m]: After CLIENT SETNAME, connection can still be closed
+[[0;33;49mskip[0m]: CLIENT SETINFO can set a library name to this connection
+[[0;33;49mskip[0m]: CLIENT SETINFO invalid args
+[[0;33;49mskip[0m]: RESET does NOT clean library name
+[[0;33;49mskip[0m]: CLIENT SETINFO can clear library name
+[[0;33;49mskip[0m]: CONFIG save params special case handled properly
+[[0;33;49mskip[0m]: CONFIG sanity
+[[0;33;49mskip[0m]: CONFIG REWRITE sanity
+[[0;33;49mskip[0m]: CONFIG REWRITE handles save and shutdown properly
+[[0;33;49mskip[0m]: CONFIG SET with multiple args
+[[0;33;49mskip[0m]: CONFIG SET rollback on set error
+[[0;33;49mskip[0m]: CONFIG SET rollback on apply error
+[[0;33;49mskip[0m]: CONFIG SET duplicate configs
+[[0;33;49mskip[0m]: CONFIG SET set immutable
+[[0;33;49mskip[0m]: CONFIG GET hidden configs
+[[0;33;49mskip[0m]: CONFIG GET multiple args
+[[0;33;49mskip[0m]: redis-server command line arguments - error cases
+[[0;33;49mskip[0m]: redis-server command line arguments - allow passing option name and option value in the same arg
+[[0;33;49mskip[0m]: redis-server command line arguments - wrong usage that we support anyway
+[[0;33;49mskip[0m]: redis-server command line arguments - allow option value to use the `--` prefix
+[[0;33;49mskip[0m]: redis-server command line arguments - option name and option value in the same arg and `--` prefix
+[[0;33;49mskip[0m]: redis-server command line arguments - save with empty input
+[[0;33;49mskip[0m]: redis-server command line arguments - take one bulk string with spaces for MULTI_ARG configs parsing
+[[0;33;49mskip[0m]: cannot modify protected configuration - no
+[[0;33;49mskip[0m]: cannot modify protected configuration - local
+[[0;33;49mskip[0m]: config during loading
+[[0;33;49mskip[0m]: CONFIG REWRITE handles rename-command properly
+[[0;33;49mskip[0m]: CONFIG REWRITE handles alias config properly
+[[0;33;49mskip[0m]: IO threads client number
+[[0;33;49mskip[0m]: Clients are evenly distributed among io threads
+[1/1 [0;33;49mdone[0m]: unit/introspection (1 seconds)
+
+                   The End
+
+Execution time of different units:
+  1 seconds - unit/introspection
+
+[1;37;49m\o/[0m [1;32;49mAll tests passed without errors![0m
+
+Cleanup: may take some time... OK

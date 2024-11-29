@@ -604,14 +604,14 @@ static void updateSSLEvent(tls_connection *conn) {
     if (need_read && !(mask & AE_READABLE))
         aeCreateFileEvent(conn->c.el, conn->c.fd, AE_READABLE, tlsEventHandler, conn);
     if (!need_read && (mask & AE_READABLE)) {
-        printf("delete read event\n");
+        // printf("delete read event\n");
         aeDeleteFileEvent(conn->c.el, conn->c.fd, AE_READABLE);
     }
 
     if (need_write && !(mask & AE_WRITABLE))
         aeCreateFileEvent(conn->c.el, conn->c.fd, AE_WRITABLE, tlsEventHandler, conn);
     if (!need_write && (mask & AE_WRITABLE)) {
-        printf("delete write event\n");
+        // printf("delete write event\n");
         aeDeleteFileEvent(conn->c.el, conn->c.fd, AE_WRITABLE);
     }
 }
@@ -967,7 +967,7 @@ static const char *connTLSGetLastError(connection *conn_) {
 }
 
 static int connTLSSetWriteHandler(connection *conn, ConnectionCallbackFunc func, int barrier) {
-    printf("connTLSSetWriteHandler\n");
+    // printf("connTLSSetWriteHandler\n");
     conn->write_handler = func;
     if (barrier)
         conn->flags |= CONN_FLAG_WRITE_BARRIER;
@@ -978,7 +978,7 @@ static int connTLSSetWriteHandler(connection *conn, ConnectionCallbackFunc func,
 }
 
 static int connTLSSetReadHandler(connection *conn, ConnectionCallbackFunc func) {
-     printf("connTLSSetReadHandler\n");
+    //  printf("connTLSSetReadHandler\n");
     conn->read_handler = func;
     updateSSLEvent((tls_connection *) conn);
     return C_OK;
