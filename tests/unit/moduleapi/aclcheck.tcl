@@ -18,10 +18,43 @@ start_server {tags {"modules acl"}} {
         assert {[dict get $entry object] eq {set}}
         assert {[dict get $entry reason] eq {command}}
     }
+        
+    test {test module check acl for key prefix permission} {
+        r acl setuser default +set resetkeys ~CART* %W~ORDER* %R~PRODUCT* ~ESCAPED_STAR\\* ~NON_ESCAPED_STAR\\\\*
+        
+        # check for key permission of prefix CART* (READ+WRITE)
+        catch {r aclcheck.set.check.prefixkey "~" CAR CART_CLOTHES_7 5} e
+        assert_match "*DENIED KEY*" $e
+        assert_equal [r aclcheck.set.check.prefixkey "~" CART CART 5] OK
+        assert_equal [r aclcheck.set.check.prefixkey "W" CART_BOOKS CART_BOOKS_12 5] OK
+        assert_equal [r aclcheck.set.check.prefixkey "R" CART_CLOTHES CART_CLOTHES_7 5] OK
+        
+        # check for key permission of prefix ORDER* (WRITE)
+        catch {r aclcheck.set.check.prefixkey "~" ORDE ORDER_2024_155351 5} e
+        assert_match "*DENIED KEY*" $e
+        assert_equal [r aclcheck.set.check.prefixkey "~" ORDER ORDER 5] OK
+        assert_equal [r aclcheck.set.check.prefixkey "W" ORDER_2024 ORDER_2024_564879 5] OK
+        assert_equal [r aclcheck.set.check.prefixkey "~" ORDER_2023 ORDER_2023_564879 5] OK
+        catch {r aclcheck.set.check.prefixkey "R" ORDER_2023 ORDER_2023_564879 5}
+        assert_match "*DENIED KEY*" $e
+        
+        # check for key permission of prefix PRODUCT* (READ)
+        catch {r aclcheck.set.check.prefixkey "~" PRODUC PRODUCT_CLOTHES_753376 5} e
+        assert_match "*DENIED KEY*" $e
+        assert_equal [r aclcheck.set.check.prefixkey "~" PRODUCT PRODUCT 5] OK
+        assert_equal [r aclcheck.set.check.prefixkey "~" PRODUCT_BOOKS PRODUCT_BOOKS_753376 5] OK
+        
+        # pattern ends with a escaped '*' character should not be counted as a prefix
+        catch {r aclcheck.set.check.prefixkey "~" ESCAPED_STAR ESCAPED_STAR_12 5} e
+        assert_match "*DENIED KEY*" $e
+        catch {r aclcheck.set.check.prefixkey "~" ESCAPED_STAR* ESCAPED_STAR* 5} e
+        assert_match "*DENIED KEY*" $e        
+        assert_equal [r aclcheck.set.check.prefixkey "~" NON_ESCAPED_STAR\\ NON_ESCAPED_STAR\\clothes 5] OK
+    }    
 
     test {test module check acl for key perm} {
         # give permission for SET and block all keys but x(READ+WRITE), y(WRITE), z(READ)
-        r acl setuser default +set resetkeys ~x %W~y %R~z
+        r acl setuser default +set resetkeys ~x %W~y %R~z ~ESCAPED_STAR\\*
 
         assert_equal [r aclcheck.set.check.key "*" x 5] OK
         catch {r aclcheck.set.check.key "*" v 5} e
@@ -40,6 +73,9 @@ start_server {tags {"modules acl"}} {
         assert_equal [r aclcheck.set.check.key "R" z 5] OK
         catch {r aclcheck.set.check.key "R" v 5} e
         assert_match "*DENIED KEY*" $e
+        
+        # check pattern ends with escaped '*' character
+        assert_equal [r aclcheck.set.check.key "~" ESCAPED_STAR* 5] OK
     }
 
     test {test module check acl for module user} {

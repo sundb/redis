@@ -64,7 +64,7 @@ lua_State *createLuaState(void) {
     size_t sz = sizeof(unsigned int);
     int err = je_mallctl("tcache.create", (void *)&tcache, &sz, NULL, 0);
     if (err) {
-        serverLog(LL_WARNING, "Failed creating the lua jemalloc tcache.");
+        serverLog(LL_WARNING, "Failed creating the lua jemalloc tcache (err=%d).", err);
         exit(1);
     }
 
@@ -79,7 +79,7 @@ void luaEnvInit(void) {
     size_t sz = sizeof(unsigned int);
     int err = je_mallctl("arenas.create", (void *)&arena, &sz, NULL, 0);
     if (err) {
-        serverLog(LL_WARNING, "Failed creating the lua jemalloc arena.");
+        serverLog(LL_WARNING, "Failed creating the lua jemalloc arena (err=%d).", err);
         exit(1);
     }
     server.lua_arena = arena;

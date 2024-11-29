@@ -1066,7 +1066,7 @@ int ACLSetSelector(aclSelector *selector, const char* op, size_t oplen) {
                     flags |= ACL_READ_PERMISSION;
                 } else if (toupper(op[offset]) == 'W' && !(flags & ACL_WRITE_PERMISSION)) {
                     flags |= ACL_WRITE_PERMISSION;
-                } else if (op[offset] == '~') {
+                } else if (op[offset] == '~' && flags) {
                     offset++;
                     break;
                 } else {
@@ -1577,14 +1577,22 @@ static int ACLSelectorCheckKey(aclSelector *selector, const char *key, int keyle
     if (keyspec_flags & CMD_KEY_DELETE) key_flags |= ACL_WRITE_PERMISSION;
     if (keyspec_flags & CMD_KEY_UPDATE) key_flags |= ACL_WRITE_PERMISSION;
 
+    /* Is given key represent a prefix of a set of keys */
+    int prefix = keyspec_flags & CMD_KEY_PREFIX;
+
     /* Test this key against every pattern. */
     while((ln = listNext(&li))) {
         keyPattern *pattern = listNodeValue(ln);
         if ((pattern->flags & key_flags) != key_flags)
             continue;
         size_t plen = sdslen(pattern->pattern);
-        if (stringmatchlen(pattern->pattern,plen,key,keylen,0))
-            return ACL_OK;
+        if (prefix) {
+            if (prefixmatch(pattern->pattern,plen,key,keylen,0))
+                return ACL_OK;
+        } else {
+            if (stringmatchlen(pattern->pattern, plen, key, keylen, 0))
+                return ACL_OK;
+        }
     }
     return ACL_DENIED_KEY;
 }

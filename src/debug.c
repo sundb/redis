@@ -1052,6 +1052,46 @@ NULL
 
 /* =========================== Crash handling  ============================== */
 
+/* When hide-user-data-from-log is enabled, to avoid leaking user info, we only
+ * print tokens of the current command into the log. First, we collect command
+ * tokens into this struct (Commands tokens are defined in json schema). Later,
+ * checking each argument against the token list. */
+#define CMD_TOKEN_MAX_COUNT 128 /* Max token count in a command's json schema */
+struct cmdToken {
+    const char *tokens[CMD_TOKEN_MAX_COUNT];
+    int n_token;
+};
+
+/* Collect tokens from command arguments recursively. */
+static void cmdTokenCollect(struct cmdToken *tk, redisCommandArg *args, int argc) {
+    if (args == NULL)
+        return;
+
+    for (int i = 0; i < argc && tk->n_token < CMD_TOKEN_MAX_COUNT; i++) {
+        if (args[i].token)
+            tk->tokens[tk->n_token++] = args[i].token;
+        cmdTokenCollect(tk, args[i].subargs, args[i].num_args);
+    }
+}
+
+/* Get tokens of the command. */
+static void cmdTokenGetFromCommand(struct cmdToken *tk, struct redisCommand *cmd) {
+    tk->n_token = 0;
+    cmdTokenCollect(tk, cmd->args, cmd->num_args);
+}
+
+/* Check if object is one of command's tokens. */
+static int cmdTokenCheck(struct cmdToken *tk, robj *o) {
+    if (o->type != OBJ_STRING || !sdsEncodedObject(o))
+        return 0;
+
+    for (int i = 0; i < tk->n_token; i++) {
+        if (strcasecmp(tk->tokens[i], o->ptr) == 0)
+            return 1;
+    }
+    return 0;
+}
+
 __attribute__ ((noinline))
 void _serverAssert(const char *estr, const char *file, int line) {
     int new_report = bugReportStart();
@@ -1072,27 +1112,34 @@ void _serverAssert(const char *estr, const char *file, int line) {
     bugReportEnd(0, 0);
 }
 
-/* Returns the amount of client's command arguments we allow logging */
-int clientArgsToLog(const client *c) {
-    return server.hide_user_data_from_log ? 1 : c->argc;
-}
-
 void _serverAssertPrintClientInfo(const client *c) {
     int j;
     char conninfo[CONN_INFO_LEN];
+    struct redisCommand *cmd = NULL;
+    struct cmdToken tokens = {{0}};
 
     bugReportStart();
     serverLog(LL_WARNING,"=== ASSERTION FAILED CLIENT CONTEXT ===");
     serverLog(LL_WARNING,"client->flags = %llu", (unsigned long long) c->flags);
     serverLog(LL_WARNING,"client->conn = %s", connGetInfo(c->conn, conninfo, sizeof(conninfo)));
     serverLog(LL_WARNING,"client->argc = %d", c->argc);
+    if (server.hide_user_data_from_log) {
+        cmd = lookupCommand(c->argv, c->argc);
+        if (cmd)
+            cmdTokenGetFromCommand(&tokens, cmd);
+    }
+
     for (j=0; j < c->argc; j++) {
-        if (j >= clientArgsToLog(c)) {
-            serverLog(LL_WARNING,"client->argv[%d] = *redacted*",j);
-            continue;
-        }
         char buf[128];
         char *arg;
+
+        /* Allow command name, subcommand name and command tokens in the log. */
+        if (server.hide_user_data_from_log && (j != 0 && !(j == 1 && cmd && cmd->parent))) {
+            if (!cmdTokenCheck(&tokens, c->argv[j])) {
+                serverLog(LL_WARNING, "client->argv[%d] = *redacted*", j);
+                continue;
+            }
+        }
 
         if (c->argv[j]->type == OBJ_STRING && sdsEncodedObject(c->argv[j])) {
             arg = (char*) c->argv[j]->ptr;
@@ -2061,16 +2108,27 @@ void logCurrentClient(client *cc, const char *title) {
 
     sds client;
     int j;
+    struct redisCommand *cmd = NULL;
+    struct cmdToken tokens = {{0}};
 
     serverLog(LL_WARNING|LL_RAW, "\n------ %s CLIENT INFO ------\n", title);
     client = catClientInfoString(sdsempty(),cc);
     serverLog(LL_WARNING|LL_RAW,"%s\n", client);
     sdsfree(client);
     serverLog(LL_WARNING|LL_RAW,"argc: '%d'\n", cc->argc);
+    if (server.hide_user_data_from_log) {
+        cmd = lookupCommand(cc->argv, cc->argc);
+        if (cmd)
+            cmdTokenGetFromCommand(&tokens, cmd);
+    }
+
     for (j = 0; j < cc->argc; j++) {
-        if (j >= clientArgsToLog(cc)) {
-            serverLog(LL_WARNING|LL_RAW,"argv[%d]: *redacted*\n",j);
-            continue;
+        /* Allow command name, subcommand name and command tokens in the log. */
+        if (server.hide_user_data_from_log && (j != 0 && !(j == 1 && cmd && cmd->parent))) {
+            if (!cmdTokenCheck(&tokens, cc->argv[j])) {
+                serverLog(LL_WARNING|LL_RAW, "argv[%d]: '*redacted*'\n", j);
+                continue;
+            }
         }
         robj *decoded;
         decoded = getDecodedObject(cc->argv[j]);

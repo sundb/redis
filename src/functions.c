@@ -1063,7 +1063,7 @@ void functionLoadCommand(client *c) {
 }
 
 /* Return memory usage of all the engines combine */
-unsigned long functionsMemory(void) {
+unsigned long functionsMemoryVM(void) {
     dictIterator *iter = dictGetIterator(engines);
     dictEntry *entry = NULL;
     size_t engines_memory = 0;
@@ -1078,7 +1078,7 @@ unsigned long functionsMemory(void) {
 }
 
 /* Return memory overhead of all the engines combine */
-unsigned long functionsMemoryOverhead(void) {
+unsigned long functionsMemoryEngine(void) {
     size_t memory_overhead = dictMemUsage(engines);
     memory_overhead += dictMemUsage(curr_functions_lib_ctx->functions);
     memory_overhead += sizeof(functionsLibCtx);

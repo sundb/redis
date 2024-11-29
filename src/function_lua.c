@@ -23,6 +23,9 @@
 #include <lua.h>
 #include <lauxlib.h>
 #include <lualib.h>
+#if defined(USE_JEMALLOC)
+#include <lstate.h>
+#endif
 
 #define LUA_ENGINE_NAME "LUA"
 #define REGISTRY_ENGINE_CTX_NAME "__ENGINE_CTX__"
@@ -189,8 +192,18 @@ static void luaEngineFreeFunction(void *engine_ctx, void *compiled_function) {
 
 static void luaEngineFreeCtx(void *engine_ctx) {
     luaEngineCtx *lua_engine_ctx = engine_ctx;
+#if defined(USE_JEMALLOC)
+    /* When lua is closed, destroy the previously used private tcache. */
+    void *ud = (global_State*)G(lua_engine_ctx->lua)->ud;
+    unsigned int lua_tcache = (unsigned int)(uintptr_t)ud;
+#endif
+
     lua_close(lua_engine_ctx->lua);
     zfree(lua_engine_ctx);
+
+#if defined(USE_JEMALLOC)
+    je_mallctl("tcache.destroy", NULL, NULL, (void *)&lua_tcache, sizeof(unsigned int));
+#endif
 }
 
 static void luaRegisterFunctionArgsInitialize(registerFunctionArgs *register_f_args,

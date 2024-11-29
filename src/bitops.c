@@ -16,16 +16,47 @@
 /* Count number of bits set in the binary array pointed by 's' and long
  * 'count' bytes. The implementation of this function is required to
  * work with an input string length up to 512 MB or more (server.proto_max_bulk_len) */
+ATTRIBUTE_TARGET_POPCNT
 long long redisPopcount(void *s, long count) {
     long long bits = 0;
     unsigned char *p = s;
     uint32_t *p4;
+#if defined(HAVE_POPCNT)
+    int use_popcnt = __builtin_cpu_supports("popcnt"); /* Check if CPU supports POPCNT instruction. */
+#else
+    int use_popcnt = 0; /* Assume CPU does not support POPCNT if
+                         * __builtin_cpu_supports() is not available. */
+#endif
     static const unsigned char bitsinbyte[256] = {0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4,1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,1,2,2,3,2,3,3,4,2,3,3,4,3,4,4,5,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,2,3,3,4,3,4,4,5,3,4,4,5,4,5,5,6,3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,3,4,4,5,4,5,5,6,4,5,5,6,5,6,6,7,4,5,5,6,5,6,6,7,5,6,6,7,6,7,7,8};
-
-    /* Count initial bytes not aligned to 32 bit. */
-    while((unsigned long)p & 3 && count) {
+    
+    /* Count initial bytes not aligned to 64-bit when using the POPCNT instruction,
+     * otherwise align to 32-bit. */
+    int align = use_popcnt ? 7 : 3;
+    while ((unsigned long)p & align && count) {
         bits += bitsinbyte[*p++];
         count--;
+    }
+
+    if (likely(use_popcnt)) {
+        /* Use separate counters to make the CPU think there are no
+         * dependencies between these popcnt operations. */
+        uint64_t cnt[4];
+        memset(cnt, 0, sizeof(cnt));
+
+        /* Count bits 32 bytes at a time by using popcnt.
+         * Unroll the loop to avoid the overhead of a single popcnt per iteration,
+         * allowing the CPU to extract more instruction-level parallelism.
+         * Reference: https://danluu.com/assembly-intrinsics/ */
+        while (count >= 32) {
+            cnt[0] += __builtin_popcountll(*(uint64_t*)(p));
+            cnt[1] += __builtin_popcountll(*(uint64_t*)(p + 8));
+            cnt[2] += __builtin_popcountll(*(uint64_t*)(p + 16));
+            cnt[3] += __builtin_popcountll(*(uint64_t*)(p + 24));
+            count -= 32;
+            p += 32;
+        }
+        bits += cnt[0] + cnt[1] + cnt[2] + cnt[3];
+        goto remain;
     }
 
     /* Count bits 28 bytes at a time */
@@ -64,8 +95,10 @@ long long redisPopcount(void *s, long count) {
                     ((aux6 + (aux6 >> 4)) & 0x0F0F0F0F) +
                     ((aux7 + (aux7 >> 4)) & 0x0F0F0F0F))* 0x01010101) >> 24;
     }
-    /* Count the remaining bytes. */
     p = (unsigned char*)p4;
+
+remain:
+    /* Count the remaining bytes. */
     while(count--) bits += bitsinbyte[*p++];
     return bits;
 }
@@ -456,22 +489,27 @@ int getBitfieldTypeFromArgument(client *c, robj *o, int *sign, int *bits) {
  * bits to a string object. The command creates or pad with zeroes the string
  * so that the 'maxbit' bit can be addressed. The object is finally
  * returned. Otherwise if the key holds a wrong type NULL is returned and
- * an error is sent to the client. */
-robj *lookupStringForBitCommand(client *c, uint64_t maxbit, int *dirty) {
+ * an error is sent to the client.
+ * 
+ * (Must provide all the arguments to the function)
+ */
+static robj *lookupStringForBitCommand(client *c, uint64_t maxbit, 
+                                       size_t *strOldSize, size_t *strGrowSize) 
+{
     size_t byte = maxbit >> 3;
     robj *o = lookupKeyWrite(c->db,c->argv[1]);
     if (checkType(c,o,OBJ_STRING)) return NULL;
-    if (dirty) *dirty = 0;
 
     if (o == NULL) {
         o = createObject(OBJ_STRING,sdsnewlen(NULL, byte+1));
         dbAdd(c->db,c->argv[1],o);
-        if (dirty) *dirty = 1;
+        *strGrowSize = byte + 1;
+        *strOldSize = 0;
     } else {
         o = dbUnshareStringValue(c->db,c->argv[1],o);
-        size_t oldlen = sdslen(o->ptr);
+        *strOldSize  = sdslen(o->ptr);
         o->ptr = sdsgrowzero(o->ptr,byte+1);
-        if (dirty && oldlen != sdslen(o->ptr)) *dirty = 1;
+        *strGrowSize = sdslen(o->ptr) - *strOldSize;
     }
     return o;
 }
@@ -528,8 +566,9 @@ void setbitCommand(client *c) {
         return;
     }
 
-    int dirty;
-    if ((o = lookupStringForBitCommand(c,bitoffset,&dirty)) == NULL) return;
+    size_t strOldSize, strGrowSize;
+    if ((o = lookupStringForBitCommand(c,bitoffset,&strOldSize,&strGrowSize)) == NULL) 
+        return;
 
     /* Get current values */
     byte = bitoffset >> 3;
@@ -540,7 +579,7 @@ void setbitCommand(client *c) {
     /* Either it is newly created, changed length, or the bit changes before and after.
      * Note that the bitval here is actually a decimal number.
      * So we need to use `!!` to convert it to 0 or 1 for comparison. */
-    if (dirty || (!!bitval != on)) {
+    if (strGrowSize || (!!bitval != on)) {
         /* Update byte with new bit value. */
         byteval &= ~(1 << bit);
         byteval |= ((on & 0x1) << bit);
@@ -548,6 +587,13 @@ void setbitCommand(client *c) {
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_STRING,"setbit",c->argv[1],c->db->id);
         server.dirty++;
+
+        /* If this is not a new key (old size not 0) and size changed, then 
+         * update the keysizes histogram. Otherwise, the histogram already 
+         * updated in lookupStringForBitCommand() by calling dbAdd(). */
+        if ((strOldSize > 0) && (strGrowSize != 0))
+            updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_STRING, 
+                               strOldSize, strOldSize + strGrowSize);
     }
 
     /* Return original value. */
@@ -1032,7 +1078,8 @@ struct bitfieldOp {
 void bitfieldGeneric(client *c, int flags) {
     robj *o;
     uint64_t bitoffset;
-    int j, numops = 0, changes = 0, dirty = 0;
+    int j, numops = 0, changes = 0;
+    size_t strOldSize, strGrowSize = 0;
     struct bitfieldOp *ops = NULL; /* Array of ops to execute at end. */
     int owtype = BFOVERFLOW_WRAP; /* Overflow type. */
     int readonly = 1;
@@ -1126,7 +1173,7 @@ void bitfieldGeneric(client *c, int flags) {
         /* Lookup by making room up to the farthest bit reached by
          * this operation. */
         if ((o = lookupStringForBitCommand(c,
-            highest_write_offset,&dirty)) == NULL) {
+            highest_write_offset,&strOldSize,&strGrowSize)) == NULL) {
             zfree(ops);
             return;
         }
@@ -1176,7 +1223,7 @@ void bitfieldGeneric(client *c, int flags) {
                     setSignedBitfield(o->ptr,thisop->offset,
                                       thisop->bits,newval);
 
-                    if (dirty || (oldval != newval))
+                    if (strGrowSize || (oldval != newval))
                         changes++;
                 } else {
                     addReplyNull(c);
@@ -1210,7 +1257,7 @@ void bitfieldGeneric(client *c, int flags) {
                     setUnsignedBitfield(o->ptr,thisop->offset,
                                         thisop->bits,newval);
 
-                    if (dirty || (oldval != newval))
+                    if (strGrowSize || (oldval != newval))
                         changes++;
                 } else {
                     addReplyNull(c);
@@ -1253,6 +1300,14 @@ void bitfieldGeneric(client *c, int flags) {
     }
 
     if (changes) {
+
+        /* If this is not a new key (old size not 0) and size changed, then 
+         * update the keysizes histogram. Otherwise, the histogram already 
+         * updated in lookupStringForBitCommand() by calling dbAdd(). */
+        if ((strOldSize > 0) && (strGrowSize != 0))
+            updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_STRING,
+                               strOldSize, strOldSize + strGrowSize);
+        
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_STRING,"setbit",c->argv[1],c->db->id);
         server.dirty += changes;

@@ -784,6 +784,19 @@ int clientsCronResizeQueryBuffer(client *c) {
     return 0;
 }
 
+/* If the client has been idle for too long, free the client's arguments. */
+int clientsCronFreeArgvIfIdle(client *c) {
+    /* If the arguments have already been freed or are still in use, exit ASAP. */
+    if (!c->argv || c->argc) return 0;
+    time_t idletime = server.unixtime - c->lastinteraction;
+    if (idletime > 2) {
+        c->argv_len = 0;
+        zfree(c->argv);
+        c->argv = NULL;
+    }
+    return 0;
+}
+
 /* The client output buffer can be adjusted to better fit the memory requirements.
  *
  * the logic is:
@@ -1050,6 +1063,7 @@ void clientsCron(void) {
          * terminated. */
         if (clientsCronHandleTimeout(c,now)) continue;
         if (clientsCronResizeQueryBuffer(c)) continue;
+        if (clientsCronFreeArgvIfIdle(c)) continue;
         if (clientsCronResizeOutputBuffer(c,now)) continue;
 
         if (clientsCronTrackExpansiveClients(c, curr_peak_mem_usage_slot)) continue;
@@ -2074,7 +2088,7 @@ void initServerConfig(void) {
         server.bindaddr[j] = zstrdup(default_bindaddr[j]);
     memset(server.listeners, 0x00, sizeof(server.listeners));
     server.active_expire_enabled = 1;
-    server.lazy_expire_disabled = 0;
+    server.allow_access_expired = 0;
     server.skip_checksum_validation = 0;
     server.loading = 0;
     server.async_loading = 0;
@@ -2690,7 +2704,7 @@ void initServer(void) {
         flags |= KVSTORE_FREE_EMPTY_DICTS;
     }
     for (j = 0; j < server.dbnum; j++) {
-        server.db[j].keys = kvstoreCreate(&dbDictType, slot_count_bits, flags);
+        server.db[j].keys = kvstoreCreate(&dbDictType, slot_count_bits, flags | KVSTORE_ALLOC_META_KEYS_HIST);
         server.db[j].expires = kvstoreCreate(&dbExpiresDictType, slot_count_bits, flags);
         server.db[j].hexpires = ebCreate();
         server.db[j].expires_cursor = 0;
@@ -5521,7 +5535,7 @@ void releaseInfoSectionDict(dict *sec) {
 dict *genInfoSectionDict(robj **argv, int argc, char **defaults, int *out_all, int *out_everything) {
     char *default_sections[] = {
         "server", "clients", "memory", "persistence", "stats", "replication",
-        "cpu", "module_list", "errorstats", "cluster", "keyspace", NULL};
+        "cpu", "module_list", "errorstats", "cluster", "keyspace", "keysizes", NULL};
     if (!defaults)
         defaults = default_sections;
 
@@ -5686,8 +5700,8 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
         size_t zmalloc_used = zmalloc_used_memory();
         size_t total_system_mem = server.system_memory_size;
         const char *evict_policy = evictPolicyToString();
-        long long memory_lua = evalMemory();
-        long long memory_functions = functionsMemory();
+        long long memory_lua = evalScriptsMemoryVM();
+        long long memory_functions = functionsMemoryVM();
         struct redisMemOverhead *mh = getMemoryOverheadData();
 
         /* Peak memory is updated from time to time by serverCron() so it
@@ -5702,7 +5716,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
         bytesToHuman(total_system_hmem,sizeof(total_system_hmem),total_system_mem);
         bytesToHuman(used_memory_lua_hmem,sizeof(used_memory_lua_hmem),memory_lua);
         bytesToHuman(used_memory_vm_total_hmem,sizeof(used_memory_vm_total_hmem),memory_functions + memory_lua);
-        bytesToHuman(used_memory_scripts_hmem,sizeof(used_memory_scripts_hmem),mh->lua_caches + mh->functions_caches);
+        bytesToHuman(used_memory_scripts_hmem,sizeof(used_memory_scripts_hmem),mh->eval_caches + mh->functions_caches);
         bytesToHuman(used_memory_rss_hmem,sizeof(used_memory_rss_hmem),server.cron_malloc_stats.process_rss);
         bytesToHuman(maxmemory_hmem,sizeof(maxmemory_hmem),server.maxmemory);
 
@@ -5728,7 +5742,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "used_memory_lua:%lld\r\n", memory_lua, /* deprecated, renamed to used_memory_vm_eval */
             "used_memory_vm_eval:%lld\r\n", memory_lua,
             "used_memory_lua_human:%s\r\n", used_memory_lua_hmem, /* deprecated */
-            "used_memory_scripts_eval:%lld\r\n", (long long)mh->lua_caches,
+            "used_memory_scripts_eval:%lld\r\n", (long long)mh->eval_caches,
             "number_of_cached_scripts:%lu\r\n", dictSize(evalScriptsDict()),
             "number_of_functions:%lu\r\n", functionsNum(),
             "number_of_libraries:%lu\r\n", functionsLibNum(),
@@ -5736,7 +5750,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "used_memory_vm_total:%lld\r\n", memory_functions + memory_lua,
             "used_memory_vm_total_human:%s\r\n", used_memory_vm_total_hmem,
             "used_memory_functions:%lld\r\n", (long long)mh->functions_caches,
-            "used_memory_scripts:%lld\r\n", (long long)mh->lua_caches + (long long)mh->functions_caches,
+            "used_memory_scripts:%lld\r\n", (long long)mh->eval_caches + (long long)mh->functions_caches,
             "used_memory_scripts_human:%s\r\n", used_memory_scripts_hmem,
             "maxmemory:%lld\r\n", server.maxmemory,
             "maxmemory_human:%s\r\n", maxmemory_hmem,
@@ -6145,6 +6159,60 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
                 info = sdscatprintf(info,
                     "db%d:keys=%lld,expires=%lld,avg_ttl=%lld,subexpiry=%lld\r\n",
                     j, keys, vkeys, server.db[j].avg_ttl, hexpires);
+            }
+        }
+    }
+
+    /* keysizes */
+    if (all_sections || (dictFind(section_dict,"keysizes") != NULL)) {
+        if (sections++) info = sdscat(info,"\r\n");
+        info = sdscatprintf(info, "# Keysizes\r\n");
+        
+        char *typestr[] = {
+            [OBJ_STRING] = "distrib_strings_sizes",
+            [OBJ_LIST] = "distrib_lists_items",
+            [OBJ_SET] = "distrib_sets_items",
+            [OBJ_ZSET] = "distrib_zsets_items",
+            [OBJ_HASH] = "distrib_hashes_items"
+        };
+        serverAssert(sizeof(typestr)/sizeof(typestr[0]) == OBJ_TYPE_BASIC_MAX);
+        
+        for (int dbnum = 0; dbnum < server.dbnum; dbnum++) {
+            char *expSizeLabels[] = {
+                "1",   "2",  "4",  "8",  "16",  "32",  "64",  "128",  "256",  "512", /* Byte */
+                "1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K", "256K", "512K", /* Kilo */
+                "1M", "2M", "4M", "8M", "16M", "32M", "64M", "128M", "256M", "512M", /* Mega */
+                "1G", "2G", "4G", "8G", "16G", "32G", "64G", "128G", "256G", "512G", /* Giga */
+                "1T", "2T", "4T", "8T", "16T", "32T", "64T", "128T", "256T", "512T", /* Tera */
+                "1P", "2P", "4P", "8P", "16P", "32P", "64P", "128P", "256P", "512P", /* Peta */
+                "1E", "2E", "4E", "8E"                                               /* Exa */
+            };
+                                 
+            if (kvstoreSize(server.db[dbnum].keys) == 0)
+                continue;
+            
+            for (int type = 0; type < OBJ_TYPE_BASIC_MAX; type++) {
+                uint64_t *kvstoreHist = kvstoreGetMetadata(server.db[dbnum].keys)->keysizes_hist[type];
+                char buf[10000];
+                int cnt = 0, buflen = 0;
+
+                /* Print histogram to temp buf[]. First bin is garbage */
+                buflen += snprintf(buf + buflen, sizeof(buf) - buflen, "db%d_%s:", dbnum, typestr[type]);
+
+                for (int i = 0; i < MAX_KEYSIZES_BINS; i++) {
+                    if (kvstoreHist[i] == 0) 
+                        continue;
+                    
+                    int res = snprintf(buf + buflen, sizeof(buf) - buflen,
+                                       (cnt == 0) ? "%s=%llu" : ",%s=%llu", 
+                                       expSizeLabels[i], (unsigned long long) kvstoreHist[i]);
+                    if (res < 0) break;
+                    buflen += res;
+                    cnt += kvstoreHist[i];
+                }
+
+                /* Print the temp buf[] to the info string */
+                if (cnt) info = sdscatprintf(info, "%s\r\n", buf);
             }
         }
     }

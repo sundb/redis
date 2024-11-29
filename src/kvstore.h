@@ -4,6 +4,21 @@
 #include "dict.h"
 #include "adlist.h"
 
+/* maximum number of bins of keysizes histogram */
+#define MAX_KEYSIZES_BINS 48
+#define MAX_KEYSIZES_TYPES 5 /* static_assert at db.c verifies == OBJ_TYPE_BASIC_MAX */
+
+/* When creating kvstore with flag `KVSTORE_ALLOC_META_KEYS_HIST`, then kvstore 
+ * alloc and memset struct kvstoreMetadata on init, yet, managed outside kvstore */
+typedef struct {
+    uint64_t keysizes_hist[MAX_KEYSIZES_TYPES][MAX_KEYSIZES_BINS];
+} kvstoreMetadata;
+
+/* Like kvstoreMetadata, this one per dict */
+typedef struct {
+    uint64_t keysizes_hist[MAX_KEYSIZES_TYPES][MAX_KEYSIZES_BINS];
+} kvstoreDictMetadata;
+
 typedef struct _kvstore kvstore;
 typedef struct _kvstoreIterator kvstoreIterator;
 typedef struct _kvstoreDictIterator kvstoreDictIterator;
@@ -13,6 +28,7 @@ typedef int (kvstoreExpandShouldSkipDictIndex)(int didx);
 
 #define KVSTORE_ALLOCATE_DICTS_ON_DEMAND (1<<0)
 #define KVSTORE_FREE_EMPTY_DICTS (1<<1)
+#define KVSTORE_ALLOC_META_KEYS_HIST (1<<2) /* Alloc keysizes histogram */
 kvstore *kvstoreCreate(dictType *type, int num_dicts_bits, int flags);
 void kvstoreEmpty(kvstore *kvs, void(callback)(dict*));
 void kvstoreRelease(kvstore *kvs);
@@ -71,6 +87,8 @@ void kvstoreDictSetVal(kvstore *kvs, int didx, dictEntry *de, void *val);
 dictEntry *kvstoreDictTwoPhaseUnlinkFind(kvstore *kvs, int didx, const void *key, dictEntry ***plink, int *table_index);
 void kvstoreDictTwoPhaseUnlinkFree(kvstore *kvs, int didx, dictEntry *he, dictEntry **plink, int table_index);
 int kvstoreDictDelete(kvstore *kvs, int didx, const void *key);
+kvstoreDictMetadata *kvstoreGetDictMetadata(kvstore *kvs, int didx);
+kvstoreMetadata *kvstoreGetMetadata(kvstore *kvs);
 
 #ifdef REDIS_TEST
 int kvstoreTest(int argc, char *argv[], int flags);

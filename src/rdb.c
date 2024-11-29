@@ -2332,6 +2332,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
                 rdbReportCorruptRDB("invalid expireAt time: %llu",
                                     (unsigned long long) expireAt);
                 decrRefCount(o);
+                if (dupSearchDict != NULL) dictRelease(dupSearchDict);
                 return NULL;
             }
 

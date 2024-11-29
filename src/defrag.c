@@ -729,8 +729,9 @@ void defragStream(redisDb *db, dictEntry *kde) {
 void defragModule(redisDb *db, dictEntry *kde) {
     robj *obj = dictGetVal(kde);
     serverAssert(obj->type == OBJ_MODULE);
-
-    if (!moduleDefragValue(dictGetKey(kde), obj, db->id))
+    robj keyobj;
+    initStaticStringObject(keyobj, dictGetKey(kde));
+    if (!moduleDefragValue(&keyobj, obj, db->id))
         defragLater(db, kde);
 }
 
@@ -940,7 +941,9 @@ int defragLaterItem(dictEntry *de, unsigned long *cursor, long long endtime, int
         } else if (ob->type == OBJ_STREAM) {
             return scanLaterStreamListpacks(ob, cursor, endtime);
         } else if (ob->type == OBJ_MODULE) {
-            return moduleLateDefrag(dictGetKey(de), ob, cursor, endtime, dbid);
+            robj keyobj;
+            initStaticStringObject(keyobj, dictGetKey(de));
+            return moduleLateDefrag(&keyobj, ob, cursor, endtime, dbid);
         } else {
             *cursor = 0; /* object type may have changed since we schedule it for later */
         }

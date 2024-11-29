@@ -241,6 +241,11 @@ proc tags_acceptable {tags err_return} {
         return 0
     }
 
+    if { [lsearch $tags "experimental"] >=0 && [lsearch $::allowtags "experimental"] == -1 } {
+        set err "experimental test not allowed"
+        return 0
+    }
+
     return 1
 }
 
@@ -368,6 +373,8 @@ proc run_external_server_test {code overrides} {
 
     r flushall
     r function flush
+    r script flush
+    r config resetstat
 
     # store configs
     set saved_config {}

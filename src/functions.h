@@ -102,8 +102,8 @@ struct functionLibInfo {
 
 int functionsRegisterEngine(const char *engine_name, engine *engine_ctx);
 sds functionsCreateWithLibraryCtx(sds code, int replace, sds* err, functionsLibCtx *lib_ctx, size_t timeout);
-unsigned long functionsMemory(void);
-unsigned long functionsMemoryOverhead(void);
+unsigned long functionsMemoryVM(void);
+unsigned long functionsMemoryEngine(void);
 unsigned long functionsNum(void);
 unsigned long functionsLibNum(void);
 dict* functionsLibGet(void);

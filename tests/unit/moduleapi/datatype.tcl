@@ -1,6 +1,11 @@
 set testmodule [file normalize tests/modules/datatype.so]
 
 start_server {tags {"modules"}} {
+    test {DataType: test loadex with invalid config} {
+        catch { r module loadex $testmodule CONFIG invalid_config 1 } e
+        assert_match {*ERR Error loading the extension*} $e
+    }
+
     r module load $testmodule
 
     test {DataType: Test module is sane, GET/SET work.} {

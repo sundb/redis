@@ -207,7 +207,7 @@ void emptyDbAsync(redisDb *db) {
     }
     kvstore *oldkeys = db->keys, *oldexpires = db->expires;
     ebuckets oldHfe = db->hexpires;
-    db->keys = kvstoreCreate(&dbDictType, slot_count_bits, flags);
+    db->keys = kvstoreCreate(&dbDictType, slot_count_bits, flags | KVSTORE_ALLOC_META_KEYS_HIST);
     db->expires = kvstoreCreate(&dbExpiresDictType, slot_count_bits, flags);
     db->hexpires = ebCreate();
     atomicIncr(lazyfree_objects, kvstoreSize(oldkeys));

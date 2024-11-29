@@ -2,8 +2,13 @@
  * Copyright (c) 2009-Present, Redis Ltd.
  * All rights reserved.
  *
+ * Copyright (c) 2024-present, Valkey contributors.
+ * All rights reserved.
+ *
  * Licensed under your choice of the Redis Source Available License 2.0
  * (RSALv2) or the Server Side Public License v1 (SSPLv1).
+ *
+ * Portions of this file are available under BSD3 terms; see REDISCONTRIBUTIONS for more information.
  */
 
 #include "server.h"
@@ -598,6 +603,8 @@ void saddCommand(client *c) {
         if (setTypeAdd(set,c->argv[j]->ptr)) added++;
     }
     if (added) {
+        unsigned long size = setTypeSize(set);
+        updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_SET, size - added, size);
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_SET,"sadd",c->argv[1],c->db->id);
     }
@@ -612,6 +619,8 @@ void sremCommand(client *c) {
     if ((set = lookupKeyWriteOrReply(c,c->argv[1],shared.czero)) == NULL ||
         checkType(c,set,OBJ_SET)) return;
 
+    unsigned long oldSize = setTypeSize(set);
+
     for (j = 2; j < c->argc; j++) {
         if (setTypeRemove(set,c->argv[j]->ptr)) {
             deleted++;
@@ -623,6 +632,8 @@ void sremCommand(client *c) {
         }
     }
     if (deleted) {
+        
+        updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_SET, oldSize, oldSize - deleted);
         signalModifiedKey(c,c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_SET,"srem",c->argv[1],c->db->id);
         if (keyremoved)
@@ -664,8 +675,12 @@ void smoveCommand(client *c) {
     }
     notifyKeyspaceEvent(NOTIFY_SET,"srem",c->argv[1],c->db->id);
 
+    /* Update keysizes histogram */
+    unsigned long srcLen = setTypeSize(srcset); 
+    updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_SET, srcLen + 1, srcLen);
+
     /* Remove the src set from the database when empty */
-    if (setTypeSize(srcset) == 0) {
+    if (srcLen == 0) {
         dbDelete(c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],c->db->id);
     }
@@ -681,6 +696,8 @@ void smoveCommand(client *c) {
 
     /* An extra key has changed when ele was successfully added to dstset */
     if (setTypeAdd(dstset,ele->ptr)) {
+        unsigned long dstLen = setTypeSize(dstset);
+        updateKeysizesHist(c->db, getKeySlot(c->argv[2]->ptr), OBJ_SET, dstLen - 1, dstLen);
         server.dirty++;
         signalModifiedKey(c,c->db,c->argv[2]);
         notifyKeyspaceEvent(NOTIFY_SET,"sadd",c->argv[2],c->db->id);
@@ -738,7 +755,7 @@ void scardCommand(client *c) {
 
 void spopWithCountCommand(client *c) {
     long l;
-    unsigned long count, size;
+    unsigned long count, size, toRemove;
     robj *set;
 
     /* Get the count argument */
@@ -758,10 +775,12 @@ void spopWithCountCommand(client *c) {
     }
 
     size = setTypeSize(set);
+    toRemove = (count >= size) ? size : count;
 
     /* Generate an SPOP keyspace notification */
     notifyKeyspaceEvent(NOTIFY_SET,"spop",c->argv[1],c->db->id);
-    server.dirty += (count >= size) ? size : count;
+    server.dirty += toRemove;
+    updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_SET, size, size - toRemove);
 
     /* CASE 1:
      * The number of requested elements is greater than or equal to
@@ -944,6 +963,7 @@ void spopWithCountCommand(client *c) {
 }
 
 void spopCommand(client *c) {
+    unsigned long size;
     robj *set, *ele;
 
     if (c->argc == 3) {
@@ -958,6 +978,9 @@ void spopCommand(client *c) {
      * indeed a set */
     if ((set = lookupKeyWriteOrReply(c,c->argv[1],shared.null[c->resp]))
          == NULL || checkType(c,set,OBJ_SET)) return;
+
+    size = setTypeSize(set);
+    updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_SET, size, size-1);
 
     /* Pop a random element from the set */
     ele = setTypePopRandom(set);
@@ -1492,6 +1515,7 @@ void sunionDiffGenericCommand(client *c, robj **setkeys, int setnum,
     robj **sets = zmalloc(sizeof(robj*)*setnum);
     setTypeIterator *si;
     robj *dstset = NULL;
+    int dstset_encoding = OBJ_ENCODING_INTSET;
     char *str;
     size_t len;
     int64_t llval;
@@ -1509,6 +1533,23 @@ void sunionDiffGenericCommand(client *c, robj **setkeys, int setnum,
         if (checkType(c,setobj,OBJ_SET)) {
             zfree(sets);
             return;
+        }
+        /* For a SET's encoding, according to the factory method setTypeCreate(), currently have 3 types:
+         * 1. OBJ_ENCODING_INTSET
+         * 2. OBJ_ENCODING_LISTPACK
+         * 3. OBJ_ENCODING_HT
+         * 'dstset_encoding' is used to determine which kind of encoding to use when initialize 'dstset'.
+         *
+         * If all sets are all OBJ_ENCODING_INTSET encoding or 'dstkey' is not null, keep 'dstset'
+         * OBJ_ENCODING_INTSET encoding when initialize. Otherwise it is not efficient to create the 'dstset'
+         * from intset and then convert to listpack or hashtable.
+         *
+         * If one of the set is OBJ_ENCODING_LISTPACK, let's set 'dstset' to hashtable default encoding,
+         * the hashtable is more efficient when find and compare than the listpack. The corresponding
+         * time complexity are O(1) vs O(n). */
+        if (!dstkey && dstset_encoding == OBJ_ENCODING_INTSET &&
+            (setobj->encoding == OBJ_ENCODING_LISTPACK || setobj->encoding == OBJ_ENCODING_HT)) {
+            dstset_encoding = OBJ_ENCODING_HT;
         }
         sets[j] = setobj;
         if (j > 0 && sets[0] == sets[j]) {
@@ -1552,7 +1593,11 @@ void sunionDiffGenericCommand(client *c, robj **setkeys, int setnum,
     /* We need a temp set object to store our union/diff. If the dstkey
      * is not NULL (that is, we are inside an SUNIONSTORE/SDIFFSTORE operation) then
      * this set object will be the resulting object to set into the target key*/
-    dstset = createIntsetObject();
+    if (dstset_encoding == OBJ_ENCODING_INTSET) {
+        dstset = createIntsetObject();
+    } else {
+        dstset = createSetObject();
+    }
 
     if (op == SET_OP_UNION) {
         /* Union is trivial, just add every element of every set to the

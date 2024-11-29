@@ -6,6 +6,9 @@ if {$::singledb} {
     set ::dbnum 9
 }
 
+file delete ./.rediscli_history_test
+set ::env(REDISCLI_HISTFILE) ".rediscli_history_test"
+
 start_server {tags {"cli"}} {
     proc open_cli {{opts ""} {infile ""}} {
         if { $opts == "" } {
@@ -68,10 +71,8 @@ start_server {tags {"cli"}} {
         set _ [format_output [read_cli $fd]]
     }
 
-    file delete ./.rediscli_history_test
     proc test_interactive_cli_with_prompt {name code} {
         set ::env(FAKETTY_WITH_PROMPT) 1
-        set ::env(REDISCLI_HISTFILE) ".rediscli_history_test"
         test_interactive_cli $name $code
         unset ::env(FAKETTY_WITH_PROMPT)
     }
@@ -808,6 +809,12 @@ if {!$::tls} { ;# fake_redis_node doesn't support TLS
         assert_equal 3 [exec {*}$cmdline ZCARD new_zset]
         assert_equal "a\n1\nb\n2\nc\n3" [exec {*}$cmdline ZRANGE new_zset 0 -1 WITHSCORES]
     }
+
+    test "Send eval command by using --eval option" {
+        set tmpfile [write_tmpfile {return ARGV[1]}]
+        set cmdline [rediscli [srv host] [srv port]]
+        assert_equal "foo" [exec {*}$cmdline --eval $tmpfile , foo]
+    }
 }
 
 start_server {tags {"cli external:skip"}} {
@@ -833,3 +840,4 @@ start_server {tags {"cli external:skip"}} {
     }
 }
 
+file delete ./.rediscli_history_test

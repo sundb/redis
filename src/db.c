@@ -21,9 +21,12 @@
  * C-level DB API
  *----------------------------------------------------------------------------*/
 
+static_assert(MAX_KEYSIZES_TYPES == OBJ_TYPE_BASIC_MAX, "Must be equal");
+
 /* Flags for expireIfNeeded */
 #define EXPIRE_FORCE_DELETE_EXPIRED 1
 #define EXPIRE_AVOID_DELETE_EXPIRED 2
+#define EXPIRE_ALLOW_ACCESS_EXPIRED 4
 
 /* Return values for expireIfNeeded */
 typedef enum {
@@ -43,6 +46,48 @@ void updateLFU(robj *val) {
     unsigned long counter = LFUDecrAndReturn(val);
     counter = LFULogIncr(counter);
     val->lru = (LFUGetTimeInMinutes()<<8) | counter;
+}
+
+/* 
+ * Update histogram of keys-sizes
+ * 
+ * It is used to track the distribution of key sizes in the dataset. It is updated 
+ * every time key's length is modified. Available to user via INFO command. 
+ * 
+ * The histogram is a base-2 logarithmic histogram, with 64 bins. The i'th bin 
+ * represents the number of keys with a size in the range 2^i and 2^(i+1) 
+ * exclusive. oldLen/newLen must be smaller than 2^48, and if their value 
+ * equals 0, it means that the key is being created/deleted, respectively. Each 
+ * data type has its own histogram and it is per database (In addition, there is 
+ * histogram per slot for future cluster use).
+ * 
+ * Examples to LEN values and corresponding bins in histogram: 
+ *               [1,2)->0 [2,4)->1 [4,8)->2 [8,16)->3
+ */
+void updateKeysizesHist(redisDb *db, int didx, uint32_t type, uint64_t oldLen, uint64_t newLen) {
+    if(unlikely(type >= OBJ_TYPE_BASIC_MAX))
+        return;
+
+    kvstoreDictMetadata *dictMeta = kvstoreGetDictMetadata(db->keys, didx);
+    kvstoreMetadata *kvstoreMeta = kvstoreGetMetadata(db->keys);
+
+    if (oldLen != 0) {
+        int old_bin = log2ceil(oldLen);
+        debugServerAssertWithInfo(server.current_client, NULL, old_bin < MAX_KEYSIZES_BINS);        
+        /* If following a key deletion it is last one in slot's dict, then
+         * slot's dict might get released as well. Verify if metadata is not NULL. */
+        if(dictMeta) dictMeta->keysizes_hist[type][old_bin]--;
+        kvstoreMeta->keysizes_hist[type][old_bin]--;
+    }
+    
+    if (newLen != 0) {
+        int new_bin = log2ceil(newLen);
+        debugServerAssertWithInfo(server.current_client, NULL, new_bin < MAX_KEYSIZES_BINS);
+        /* If following a key deletion it is last one in slot's dict, then
+         * slot's dict might get released as well. Verify if metadata is not NULL. */
+        if(dictMeta) dictMeta->keysizes_hist[type][new_bin]++;
+        kvstoreMeta->keysizes_hist[type][new_bin]++;
+    }
 }
 
 /* Lookup a key for read or write operations, or return NULL if the key is not
@@ -94,6 +139,8 @@ robj *lookupKey(redisDb *db, robj *key, int flags, dictEntry **deref) {
             expire_flags |= EXPIRE_FORCE_DELETE_EXPIRED;
         if (flags & LOOKUP_NOEXPIRE)
             expire_flags |= EXPIRE_AVOID_DELETE_EXPIRED;
+        if (flags & LOOKUP_ACCESS_EXPIRED)
+            expire_flags |= EXPIRE_ALLOW_ACCESS_EXPIRED;
         if (expireIfNeeded(db, key, expire_flags) != KEY_VALID) {
             /* The key is no longer valid. */
             val = NULL;
@@ -202,6 +249,7 @@ static dictEntry *dbAddInternal(redisDb *db, robj *key, robj *val, int update_if
     kvstoreDictSetVal(db->keys, slot, de, val);
     signalKeyAsReady(db, key, val->type);
     notifyKeyspaceEvent(NOTIFY_NEW,"new",key,db->id);
+    updateKeysizesHist(db, slot, val->type, 0, getObjectLength(val)); /* add hist */
     return de;
 }
 
@@ -247,6 +295,7 @@ int dbAddRDBLoad(redisDb *db, sds key, robj *val) {
     int slot = getKeySlot(key);
     dictEntry *de = kvstoreDictAddRaw(db->keys, slot, key, NULL);
     if (de == NULL) return 0;
+    updateKeysizesHist(db, slot, val->type, 0, getObjectLength(val)); /* add hist */
     initObjectLRUOrLFU(val);
     kvstoreDictSetVal(db->keys, slot, de, val);
     return 1;
@@ -270,6 +319,9 @@ static void dbSetValue(redisDb *db, robj *key, robj *val, int overwrite, dictEnt
     serverAssertWithInfo(NULL,key,de != NULL);
     robj *old = dictGetVal(de);
 
+    /* Remove old key from keysizes histogram */
+    updateKeysizesHist(db, slot, old->type, getObjectLength(old), 0); /* remove hist */
+
     val->lru = old->lru;
 
     if (overwrite) {
@@ -287,6 +339,9 @@ static void dbSetValue(redisDb *db, robj *key, robj *val, int overwrite, dictEnt
         old = dictGetVal(de);
     }
     kvstoreDictSetVal(db->keys, slot, de, val);
+
+    /* Add new key to keysizes histogram */
+    updateKeysizesHist(db, slot, val->type, 0, getObjectLength(val));
 
     /* if hash with HFEs, take care to remove from global HFE DS */
     if (old->type == OBJ_HASH)
@@ -372,23 +427,22 @@ robj *dbRandomKey(redisDb *db) {
 
         key = dictGetKey(de);
         keyobj = createStringObject(key,sdslen(key));
-        if (dbFindExpires(db, key)) {
-            if (allvolatile && server.masterhost && --maxtries == 0) {
-                /* If the DB is composed only of keys with an expire set,
-                 * it could happen that all the keys are already logically
-                 * expired in the slave, so the function cannot stop because
-                 * expireIfNeeded() is false, nor it can stop because
-                 * dictGetFairRandomKey() returns NULL (there are keys to return).
-                 * To prevent the infinite loop we do some tries, but if there
-                 * are the conditions for an infinite loop, eventually we
-                 * return a key name that may be already expired. */
-                return keyobj;
-            }
-            if (expireIfNeeded(db,keyobj,0) != KEY_VALID) {
-                decrRefCount(keyobj);
-                continue; /* search for another key. This expired. */
-            }
+        if (allvolatile && server.masterhost && --maxtries == 0) {
+            /* If the DB is composed only of keys with an expire set,
+             * it could happen that all the keys are already logically
+             * expired in the slave, so the function cannot stop because
+             * expireIfNeeded() is false, nor it can stop because
+             * dictGetFairRandomKey() returns NULL (there are keys to return).
+             * To prevent the infinite loop we do some tries, but if there
+             * are the conditions for an infinite loop, eventually we
+             * return a key name that may be already expired. */
+            return keyobj;
         }
+        if (expireIfNeeded(db,keyobj,0) != KEY_VALID) {
+            decrRefCount(keyobj);
+            continue; /* search for another key. This expired. */
+        }
+
         return keyobj;
     }
 }
@@ -401,6 +455,9 @@ int dbGenericDelete(redisDb *db, robj *key, int async, int flags) {
     dictEntry *de = kvstoreDictTwoPhaseUnlinkFind(db->keys, slot, key->ptr, &plink, &table);
     if (de) {
         robj *val = dictGetVal(de);
+
+        /* remove key from histogram */
+        updateKeysizesHist(db, slot, val->type, getObjectLength(val), 0);
 
         /* If hash object with expiry on fields, remove it from HFE DS of DB */
         if (val->type == OBJ_HASH)
@@ -597,7 +654,8 @@ redisDb *initTempDb(void) {
     redisDb *tempDb = zcalloc(sizeof(redisDb)*server.dbnum);
     for (int i=0; i<server.dbnum; i++) {
         tempDb[i].id = i;
-        tempDb[i].keys = kvstoreCreate(&dbDictType, slot_count_bits, flags);
+        tempDb[i].keys = kvstoreCreate(&dbDictType, slot_count_bits, 
+                                       flags | KVSTORE_ALLOC_META_KEYS_HIST);
         tempDb[i].expires = kvstoreCreate(&dbExpiresDictType, slot_count_bits, flags);
         tempDb[i].hexpires = ebCreate();
     }
@@ -727,9 +785,12 @@ void flushAllDataAndResetRDB(int flags) {
 #endif
 }
 
-/* Optimized FLUSHALL\FLUSHDB SYNC command finished to run by lazyfree thread */
-void flushallSyncBgDone(uint64_t client_id) {
-
+/* CB function on blocking ASYNC FLUSH completion
+ *
+ * Utilized by commands SFLUSH, FLUSHALL and FLUSHDB.
+ */
+void flushallSyncBgDone(uint64_t client_id, void *sflush) {
+    SlotsFlush *slotsFlush = sflush;
     client *c = lookupClientByID(client_id);
 
     /* Verify that client still exists */
@@ -742,8 +803,11 @@ void flushallSyncBgDone(uint64_t client_id) {
     /* Don't update blocked_us since command was processed in bg by lazy_free thread */
     updateStatsOnUnblock(c, 0 /*blocked_us*/, elapsedUs(c->bstate.lazyfreeStartTime), 0);
 
-    /* lazyfree bg job always succeed */
-    addReply(c, shared.ok);
+    /* Only SFLUSH command pass pointer to `SlotsFlush` */
+    if (slotsFlush)
+        replySlotsFlushAndFree(c, slotsFlush);
+    else
+        addReply(c, shared.ok);
 
     /* mark client as unblocked */
     unblockClient(c, 1);
@@ -758,10 +822,17 @@ void flushallSyncBgDone(uint64_t client_id) {
     server.current_client = old_client;
 }
 
-void flushCommandCommon(client *c, int isFlushAll) {
-    int blocking_async = 0; /* FLUSHALL\FLUSHDB SYNC opt to run as blocking ASYNC */
-    int flags;
-    if (getFlushCommandFlags(c,&flags) == C_ERR) return;
+/* Common flush command implementation for FLUSHALL and FLUSHDB.
+ *
+ * Return 1 indicates that flush SYNC is actually running in bg as blocking ASYNC
+ * Return 0 otherwise
+ *
+ * sflush - provided only by SFLUSH command, otherwise NULL. Will be used on 
+ *          completion to reply with the slots flush result. Ownership is passed
+ *          to the completion job in case of `blocking_async`.
+ */
+int flushCommandCommon(client *c, int type, int flags, SlotsFlush *sflush) {
+    int blocking_async = 0; /* Flush SYNC option to run as blocking ASYNC */
 
     /* in case of SYNC, check if we can optimize and run it in bg as blocking ASYNC */
     if ((!(flags & EMPTYDB_ASYNC)) && (!(c->flags & CLIENT_AVOID_BLOCKING_ASYNC_FLUSH))) {
@@ -770,7 +841,7 @@ void flushCommandCommon(client *c, int isFlushAll) {
         blocking_async = 1;
     }
 
-    if (isFlushAll)
+    if (type == FLUSH_TYPE_ALL)
         flushAllDataAndResetRDB(flags | EMPTYDB_NOFUNCTIONS);
     else
         server.dirty += emptyData(c->db->id,flags | EMPTYDB_NOFUNCTIONS,NULL);
@@ -788,10 +859,9 @@ void flushCommandCommon(client *c, int isFlushAll) {
 
         c->bstate.timeout = 0;
         blockClient(c,BLOCKED_LAZYFREE);
-        bioCreateCompRq(BIO_WORKER_LAZY_FREE, flushallSyncBgDone, c->id);
-    } else {
-        addReply(c, shared.ok);
+        bioCreateCompRq(BIO_WORKER_LAZY_FREE, flushallSyncBgDone, c->id, sflush);
     }
+
 #if defined(USE_JEMALLOC)
     /* jemalloc 5 doesn't release pages back to the OS when there's no traffic.
      * for large databases, flushdb blocks for long anyway, so a bit more won't
@@ -799,7 +869,7 @@ void flushCommandCommon(client *c, int isFlushAll) {
      *
      * Take care purge only FLUSHDB for sync flow. FLUSHALL sync flow already
      * applied at flushAllDataAndResetRDB. Async flow will apply only later on */
-    if ((!isFlushAll) && (!(flags & EMPTYDB_ASYNC))) {
+    if ((type != FLUSH_TYPE_ALL) && (!(flags & EMPTYDB_ASYNC))) {
         /* Only clear the current thread cache.
          * Ignore the return call since this will fail if the tcache is disabled. */
         je_mallctl("thread.tcache.flush", NULL, NULL, NULL, 0);
@@ -807,20 +877,32 @@ void flushCommandCommon(client *c, int isFlushAll) {
         jemalloc_purge();
     }
 #endif
+    return blocking_async;
 }
 
 /* FLUSHALL [SYNC|ASYNC]
  *
  * Flushes the whole server data set. */
 void flushallCommand(client *c) {
-    flushCommandCommon(c, 1);
+    int flags;
+    if (getFlushCommandFlags(c,&flags) == C_ERR) return;
+
+    /* If FLUSH SYNC isn't running as blocking async, then reply */
+    if (flushCommandCommon(c, FLUSH_TYPE_ALL, flags, NULL) == 0)
+        addReply(c, shared.ok);
 }
 
 /* FLUSHDB [SYNC|ASYNC]
  *
  * Flushes the currently SELECTed Redis DB. */
 void flushdbCommand(client *c) {
-    flushCommandCommon(c, 0);
+    int flags;
+    if (getFlushCommandFlags(c,&flags) == C_ERR) return;
+
+    /* If FLUSH SYNC isn't running as blocking async, then reply */
+    if (flushCommandCommon(c, FLUSH_TYPE_DB,flags, NULL) == 0)
+        addReply(c, shared.ok);
+
 }
 
 /* This command implements DEL and UNLINK. */
@@ -1958,17 +2040,72 @@ long long getExpire(redisDb *db, robj *key) {
     return dictGetSignedIntegerVal(de);
 }
 
-/* Delete the specified expired key and propagate expire. */
-void deleteExpiredKeyAndPropagate(redisDb *db, robj *keyobj) {
-    mstime_t expire_latency;
-    latencyStartMonitor(expire_latency);
-    dbGenericDelete(db,keyobj,server.lazyfree_lazy_expire,DB_FLAG_KEY_EXPIRED);
-    latencyEndMonitor(expire_latency);
-    latencyAddSampleIfNeeded("expire-del",expire_latency);
-    notifyKeyspaceEvent(NOTIFY_EXPIRED,"expired",keyobj,db->id);
+
+/* Delete the specified expired or evicted key and propagate to replicas.
+ * Currently notify_type can only be NOTIFY_EXPIRED or NOTIFY_EVICTED,
+ * and it affects other aspects like the latency monitor event name and,
+ * which config to look for lazy free, stats var to increment, and so on.
+ *
+ * key_mem_freed is an out parameter which contains the estimated
+ * amount of memory freed due to the trimming (may be NULL) */
+static void deleteKeyAndPropagate(redisDb *db, robj *keyobj, int notify_type, long long *key_mem_freed) {
+    mstime_t latency;
+    int del_flag = notify_type == NOTIFY_EXPIRED ? DB_FLAG_KEY_EXPIRED : DB_FLAG_KEY_EVICTED;
+    int lazy_flag = notify_type == NOTIFY_EXPIRED ? server.lazyfree_lazy_expire : server.lazyfree_lazy_eviction;
+    char *latency_name = notify_type == NOTIFY_EXPIRED ? "expire-del" : "evict-del";
+    char *notify_name = notify_type == NOTIFY_EXPIRED ? "expired" : "evicted";
+
+    /* The key needs to be converted from static to heap before deleted */
+    int static_key = keyobj->refcount == OBJ_STATIC_REFCOUNT;
+    if (static_key) {
+        keyobj = createStringObject(keyobj->ptr, sdslen(keyobj->ptr));
+    }
+
+    serverLog(LL_DEBUG,"key %s %s: deleting it", (char*)keyobj->ptr, notify_type == NOTIFY_EXPIRED ? "expired" : "evicted");
+
+    /* We compute the amount of memory freed by db*Delete() alone.
+     * It is possible that actually the memory needed to propagate
+     * the DEL in AOF and replication link is greater than the one
+     * we are freeing removing the key, but we can't account for
+     * that otherwise we would never exit the loop.
+     *
+     * Same for CSC invalidation messages generated by signalModifiedKey.
+     *
+     * AOF and Output buffer memory will be freed eventually so
+     * we only care about memory used by the key space.
+     *
+     * The code here used to first propagate and then record delta
+     * using only zmalloc_used_memory but in CRDT we can't do that
+     * so we use freeMemoryGetNotCountedMemory to avoid counting
+     * AOF and slave buffers */
+    if (key_mem_freed) *key_mem_freed = (long long) zmalloc_used_memory() - freeMemoryGetNotCountedMemory();
+    latencyStartMonitor(latency);
+    dbGenericDelete(db, keyobj, lazy_flag, del_flag);
+    latencyEndMonitor(latency);
+    latencyAddSampleIfNeeded(latency_name, latency);
+    if (key_mem_freed) *key_mem_freed -= (long long) zmalloc_used_memory() - freeMemoryGetNotCountedMemory();
+
+    notifyKeyspaceEvent(notify_type, notify_name,keyobj, db->id);
     signalModifiedKey(NULL, db, keyobj);
-    propagateDeletion(db,keyobj,server.lazyfree_lazy_expire);
-    server.stat_expiredkeys++;
+    propagateDeletion(db, keyobj, lazy_flag);
+
+    if (notify_type == NOTIFY_EXPIRED)
+        server.stat_expiredkeys++;
+    else
+        server.stat_evictedkeys++;
+
+    if (static_key)
+        decrRefCount(keyobj);
+}
+
+/* Delete the specified expired key and propagate. */
+void deleteExpiredKeyAndPropagate(redisDb *db, robj *keyobj) {
+    deleteKeyAndPropagate(db, keyobj, NOTIFY_EXPIRED, NULL);
+}
+
+/* Delete the specified evicted key and propagate. */
+void deleteEvictedKeyAndPropagate(redisDb *db, robj *keyobj, long long *key_mem_freed) {
+    deleteKeyAndPropagate(db, keyobj, NOTIFY_EVICTED, key_mem_freed);
 }
 
 /* Propagate an implicit key deletion into replicas and the AOF file.
@@ -2051,14 +2188,17 @@ int keyIsExpired(redisDb *db, robj *key) {
  *
  * On the other hand, if you just want expiration check, but need to avoid
  * the actual key deletion and propagation of the deletion, use the
- * EXPIRE_AVOID_DELETE_EXPIRED flag.
+ * EXPIRE_AVOID_DELETE_EXPIRED flag. If also needed to read expired key (that
+ * hasn't being deleted yet) then use EXPIRE_ALLOW_ACCESS_EXPIRED.
  *
  * The return value of the function is KEY_VALID if the key is still valid.
  * The function returns KEY_EXPIRED if the key is expired BUT not deleted,
  * or returns KEY_DELETED if the key is expired and deleted. */
 keyStatus expireIfNeeded(redisDb *db, robj *key, int flags) {
-    if (server.lazy_expire_disabled) return KEY_VALID;
-    if (!keyIsExpired(db,key)) return KEY_VALID;
+    if ((server.allow_access_expired) ||
+        (flags & EXPIRE_ALLOW_ACCESS_EXPIRED) ||
+        (!keyIsExpired(db,key)))
+        return KEY_VALID;
 
     /* If we are running in the context of a replica, instead of
      * evicting the expired key from the database, we return ASAP:
@@ -2088,16 +2228,9 @@ keyStatus expireIfNeeded(redisDb *db, robj *key, int flags) {
      * will have failed over and the new primary will send us the expire. */
     if (isPausedActionsWithUpdate(PAUSE_ACTION_EXPIRE)) return KEY_EXPIRED;
 
-    /* The key needs to be converted from static to heap before deleted */
-    int static_key = key->refcount == OBJ_STATIC_REFCOUNT;
-    if (static_key) {
-        key = createStringObject(key->ptr, sdslen(key->ptr));
-    }
     /* Delete the key */
     deleteExpiredKeyAndPropagate(db,key);
-    if (static_key) {
-        decrRefCount(key);
-    }
+
     return KEY_DELETED;
 }
 

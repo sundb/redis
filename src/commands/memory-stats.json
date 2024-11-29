@@ -44,6 +44,9 @@
                 "lua.caches": {
                     "type": "integer"
                 },
+                "script.VMs": {
+                    "type": "integer"
+                },
                 "functions.caches": {
                     "type": "integer"
                 },

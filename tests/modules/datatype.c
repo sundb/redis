@@ -312,3 +312,12 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
 
     return REDISMODULE_OK;
 }
+
+int RedisModule_OnUnload(RedisModuleCtx *ctx) {
+    REDISMODULE_NOT_USED(ctx);
+    if (datatype) {
+        RedisModule_Free(datatype);
+        datatype = NULL;
+    }
+    return REDISMODULE_OK;
+}

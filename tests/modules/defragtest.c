@@ -161,12 +161,13 @@ size_t FragFreeEffort(RedisModuleString *key, const void *value) {
 }
 
 int FragDefrag(RedisModuleDefragCtx *ctx, RedisModuleString *key, void **value) {
-    REDISMODULE_NOT_USED(key);
     unsigned long i = 0;
     int steps = 0;
 
     int dbid = RedisModule_GetDbIdFromDefragCtx(ctx);
     RedisModule_Assert(dbid != -1);
+
+    RedisModule_Log(NULL, "notice", "Defrag key: %s", RedisModule_StringPtrLen(key, NULL));
 
     /* Attempt to get cursor, validate it's what we're exepcting */
     if (RedisModule_DefragCursorGet(ctx, &i) == REDISMODULE_OK) {
