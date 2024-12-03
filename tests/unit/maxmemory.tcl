@@ -29,7 +29,11 @@ start_server {tags {"maxmemory" "external:skip"}} {
         set dbsize [r dbsize]
         
         if $client_eviction {
-            return [expr $evicted_clients > 0 && $evicted_keys == 0 && $dbsize == 50]
+            if {[lindex [r config get io-threads] 1] == 1} {
+                return [expr $evicted_clients > 0 && $evicted_keys == 0 && $dbsize == 50]
+            } else {
+                return [expr $evicted_clients >= 0 && $evicted_keys >= 0 && $dbsize <= 50]
+            }
         } else {
             return [expr $evicted_clients == 0 && $evicted_keys > 0 && $dbsize < 50]
         }

@@ -77,7 +77,6 @@ static int parseProtocolsConfig(const char *str) {
 
 /* list of connections with pending data already read from the socket, but not
  * served to the reader yet. */
-static list *pending_list = NULL;
 
 /**
  * OpenSSL global initialization and locking handling callbacks.
@@ -144,8 +143,6 @@ static void tlsInit(void) {
     if (!RAND_poll()) {
         serverLog(LL_WARNING, "OpenSSL: Failed to seed random number generator.");
     }
-
-    pending_list = listCreate();
 }
 
 static void tlsCleanup(void) {
@@ -612,6 +609,29 @@ static void updateSSLEvent(tls_connection *conn) {
         aeDeleteFileEvent(conn->c.el, conn->c.fd, AE_WRITABLE);
 }
 
+/* If the connection has pending data (data read from socket but not yet
+ * decrypted) the connection is added to the pending list if it's not already in
+ * the list. */
+static void connTLSPendingListAdd(tls_connection *conn) {
+    if (!conn->c.el->privdata)
+        conn->c.el->privdata = listCreate();
+    list *pending_list = conn->c.el->privdata;
+    if (!conn->pending_list_node) {
+        listAddNodeTail(pending_list, conn);
+        conn->pending_list_node = listLast(pending_list);
+    }
+}
+
+/* Remove the connection from the pending list, if it's in the list. */
+static void connTLSPendingListDel(tls_connection *conn) {
+    if (conn->pending_list_node) {
+        list *pending_list = conn->c.el->privdata;
+        serverAssert(pending_list != NULL);
+        listDelNode(pending_list, conn->pending_list_node);
+        conn->pending_list_node = NULL;
+    }
+}
+
 static void tlsHandleEvent(tls_connection *conn, int mask) {
     int ret, conn_error;
 
@@ -721,12 +741,10 @@ static void tlsHandleEvent(tls_connection *conn, int mask) {
             if ((mask & AE_READABLE)) {
                 if (SSL_pending(conn->ssl) > 0) {
                     if (!conn->pending_list_node) {
-                        listAddNodeTail(pending_list, conn);
-                        conn->pending_list_node = listLast(pending_list);
+                        connTLSPendingListAdd(conn);
                     }
                 } else if (conn->pending_list_node) {
-                    listDelNode(pending_list, conn->pending_list_node);
-                    conn->pending_list_node = NULL;
+                    connTLSPendingListDel(conn);
                 }
             }
 
@@ -807,6 +825,7 @@ static void connTLSClose(connection *conn_) {
     }
 
     if (conn->pending_list_node) {
+        list *pending_list = conn->c.el->privdata;
         listDelNode(pending_list, conn->pending_list_node);
         conn->pending_list_node = NULL;
     }
@@ -867,7 +886,23 @@ static int connTLSConnect(connection *conn_, const char *addr, int port, const c
 static int connTLSRebindEventLoop(connection *conn_, aeEventLoop *el) {
     tls_connection *conn = (tls_connection *) conn_;
     serverAssert(!conn->c.read_handler && !conn->c.write_handler);
+    aeEventLoop *old_el = conn->c.el;
+
+    /* Delete old events */
+    if (old_el) {
+        int mask = aeGetFileEvents(conn->c.el, conn->c.fd);
+        if (mask & AE_READABLE) aeDeleteFileEvent(conn->c.el, conn->c.fd, AE_READABLE);
+        if (mask & AE_WRITABLE) aeDeleteFileEvent(conn->c.el, conn->c.fd, AE_WRITABLE);
+    }
+
+    int has_pending = (old_el && conn->pending_list_node != NULL);
+    if (has_pending) connTLSPendingListDel(conn);
     conn->c.el = el;
+    if (el && !old_el) has_pending = SSL_pending(conn->ssl);
+    if (has_pending) {
+        connTLSPendingListAdd(conn);
+    }
+    updateSSLEvent((tls_connection *) conn);
     return C_OK;
 }
 
@@ -1052,16 +1087,20 @@ static const char *connTLSGetType(connection *conn_) {
     return CONN_TYPE_TLS;
 }
 
-static int tlsHasPendingData(void) {
+static int tlsHasPendingData(struct aeEventLoop *el) {
+    list *pending_list = el->privdata;
     if (!pending_list)
         return 0;
     return listLength(pending_list) > 0;
 }
 
-static int tlsProcessPendingData(void) {
+static int tlsProcessPendingData(struct aeEventLoop *el) {
     listIter li;
     listNode *ln;
 
+    list *pending_list = el->privdata;
+    if (!pending_list)
+        return 0;
     int processed = listLength(pending_list);
     listRewind(pending_list,&li);
     while((ln = listNext(&li))) {

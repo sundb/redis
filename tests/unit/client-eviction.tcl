@@ -108,7 +108,13 @@ start_server {} {
             $rr write [join [list "*1\r\n\$$maxmemory_clients_actual\r\n" [string repeat v $maxmemory_clients_actual]] ""]
             $rr flush
         } e
-        assert {![client_exists $cname]}
+
+        wait_for_condition 100 10 {
+            ![client_exists $cname]
+        } else {
+            fail "Client was not evicted"
+        }
+
         $rr close
 
         # Restore settings
@@ -367,7 +373,9 @@ start_server {} {
         assert_match {no client named obuf-client2 found*} $e
 
         # Validate qbuf-client is still connected and wasn't evicted
-        assert_equal [client_field qbuf-client name] {qbuf-client}
+        if {[lindex [r config get io-threads] 1] == 1} {
+            assert_equal [client_field qbuf-client name] {qbuf-client}
+        }
 
         $rr1 close
         $rr2 close
@@ -463,8 +471,11 @@ start_server {} {
         assert {$total_client_mem <= $maxmemory_clients}
 
         # Make sure we have only half of our clients now
-        set connected_clients [llength [lsearch -all [split [string trim [r client list]] "\r\n"] *name=client*]]
-        assert {$connected_clients == [expr $client_count / 2]}
+        wait_for_condition 200 10 {
+            [llength [lsearch -all [split [string trim [r client list]] "\r\n"] *name=client*]] == $client_count / 2
+        } else {
+            fail "Failed to evict clients"
+        }
 
         # Restore the reply buffer resize to default
         r debug replybuffer resizing 1

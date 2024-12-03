@@ -85,8 +85,8 @@ typedef struct ConnectionType {
     ssize_t (*sync_readline)(struct connection *conn, char *ptr, ssize_t size, long long timeout);
 
     /* pending data */
-    int (*has_pending_data)(void);
-    int (*process_pending_data)(void);
+    int (*has_pending_data)(struct aeEventLoop *el);
+    int (*process_pending_data)(struct aeEventLoop *el);
 
     /* TLS specified methods */
     sds (*get_peer_cert)(struct connection *conn);
@@ -410,10 +410,10 @@ static inline int connTypeConfigure(ConnectionType *ct, void *priv, int reconfig
 void connTypeCleanupAll(void);
 
 /* Test all the connection type has pending data or not. */
-int connTypeHasPendingData(void);
+int connTypeHasPendingData(struct aeEventLoop *el);
 
 /* walk all the connection types and process pending data for each connection type */
-int connTypeProcessPendingData(void);
+int connTypeProcessPendingData(struct aeEventLoop *el);
 
 /* Listen on an initialized listener */
 static inline int connListen(connListener *listener) {
