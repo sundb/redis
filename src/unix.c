@@ -192,6 +192,7 @@ static ConnectionType CT_Unix = {
     .accept = connUnixAccept,
 
     /* event loop */
+    .unbind_event_loop = NULL,
     .rebind_event_loop = connUnixRebindEventLoop,
 
     /* IO */

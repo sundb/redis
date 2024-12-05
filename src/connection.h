@@ -70,9 +70,6 @@ typedef struct ConnectionType {
     int (*blocking_connect)(struct connection *conn, const char *addr, int port, long long timeout);
     int (*accept)(struct connection *conn, ConnectionCallbackFunc accept_handler);
 
-    /* event loop */
-    int (*rebind_event_loop)(struct connection *conn, aeEventLoop *el);
-
     /* IO */
     int (*write)(struct connection *conn, const void *data, size_t data_len);
     int (*writev)(struct connection *conn, const struct iovec *iov, int iovcnt);
@@ -84,9 +81,13 @@ typedef struct ConnectionType {
     ssize_t (*sync_read)(struct connection *conn, char *ptr, ssize_t size, long long timeout);
     ssize_t (*sync_readline)(struct connection *conn, char *ptr, ssize_t size, long long timeout);
 
+    /* event loop */
+    void (*unbind_event_loop)(struct connection *conn);
+    int (*rebind_event_loop)(struct connection *conn, aeEventLoop *el);
+
     /* pending data */
-    int (*has_pending_data)(void);
-    int (*process_pending_data)(void);
+    int (*has_pending_data)(struct aeEventLoop *el);
+    int (*process_pending_data)(struct aeEventLoop *el);
 
     /* TLS specified methods */
     sds (*get_peer_cert)(struct connection *conn);
@@ -164,12 +165,6 @@ static inline int connConnect(connection *conn, const char *addr, int port, cons
  */
 static inline int connBlockingConnect(connection *conn, const char *addr, int port, long long timeout) {
     return conn->type->blocking_connect(conn, addr, port, timeout);
-}
-
-/* Rebind the connection to another event loop, read/write handlers must not
- * be installed in the current event loop */
-static inline int connRebindEventLoop(connection *conn, aeEventLoop *el) {
-    return conn->type->rebind_event_loop(conn, el);
 }
 
 /* Write to connection, behaves the same as write(2).
@@ -329,6 +324,21 @@ static inline int connHasReadHandler(connection *conn) {
     return conn->read_handler != NULL;
 }
 
+/* Unbind the current event loop from the connection, so that it can be
+ * rebind to a different event loop in the future. */
+static inline void connUnbindEventLoop(connection *conn) {
+    connSetReadHandler(conn, NULL);
+    connSetWriteHandler(conn, NULL);
+    if (conn->type->unbind_event_loop)
+        conn->type->unbind_event_loop(conn);
+}
+
+/* Rebind the connection to another event loop, read/write handlers must not
+ * be installed in the current event loop */
+static inline int connRebindEventLoop(connection *conn, aeEventLoop *el) {
+    return conn->type->rebind_event_loop(conn, el);
+}
+
 /* Associate a private data pointer with the connection */
 static inline void connSetPrivateData(connection *conn, void *data) {
     conn->private_data = data;
@@ -410,10 +420,10 @@ static inline int connTypeConfigure(ConnectionType *ct, void *priv, int reconfig
 void connTypeCleanupAll(void);
 
 /* Test all the connection type has pending data or not. */
-int connTypeHasPendingData(void);
+int connTypeHasPendingData(struct aeEventLoop *el);
 
 /* walk all the connection types and process pending data for each connection type */
-int connTypeProcessPendingData(void);
+int connTypeProcessPendingData(struct aeEventLoop *el);
 
 /* Listen on an initialized listener */
 static inline int connListen(connListener *listener) {

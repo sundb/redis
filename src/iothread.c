@@ -25,10 +25,8 @@ static eventNotifier* mainThreadPendingClientsNotifiers[IO_THREADS_MAX_NUM] __at
 void putInPendingClienstForMainThread(client *c, int uninstall_handler) {
     /* If the IO thread may no longer manage it, such as closing client, we can
      * uninstall event handler, so main thread doesn't need to do it costly. */
-    if (uninstall_handler) {
-        connSetReadHandler(c->conn, NULL);
-        connSetWriteHandler(c->conn, NULL);
-    }
+    if (uninstall_handler)
+        connUnbindEventLoop(c->conn);
     /* Just skip if it already is transferred. */
     if (c->io_thread_client_list_node) {
         listDelNode(IOThreads[c->tid].clients, c->io_thread_client_list_node);
@@ -47,8 +45,7 @@ void uninstallHandlerFromIOThreadEventLoop(client *c) {
     if (!connHasReadHandler(c->conn) && !connHasWriteHandler(c->conn)) return;
     /* As calling in main thread, we should pause the io thread to make it safe. */
     pauseIOThread(c->tid);
-    connSetReadHandler(c->conn, NULL);
-    connSetWriteHandler(c->conn, NULL);
+    connUnbindEventLoop(c->conn);
     resumeIOThread(c->tid);
 }
 
@@ -101,8 +98,7 @@ void fetchClientFromIOThread(client *c) {
         }
     }
     /* Remove event handler from io thread event loop. */
-    connSetReadHandler(c->conn, NULL);
-    connSetWriteHandler(c->conn, NULL);
+    connUnbindEventLoop(c->conn);
     /* Now main thread can process it. */
     c->running_tid = IOTHREAD_MAIN_THREAD_ID;
     resumeIOThread(c->tid);
@@ -495,7 +491,13 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
 }
 
 void IOThreadBeforeSleep(struct aeEventLoop *el) {
-    IOThread *t = el->privdata;
+    IOThread *t = el->privdata[0];
+
+    /* Handle pending data(typical TLS). */
+    connTypeProcessPendingData(el);
+
+    /* If any connection type(typical TLS) still has pending unread data don't sleep at all. */
+    aeSetDontWait(el, connTypeHasPendingData(el));
 
     /* Check if i am pausing */
     int paused;
@@ -553,7 +555,7 @@ void initThreadedIO(void) {
         IOThread *t = &IOThreads[i];
         t->id = i;
         t->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
-        t->el->privdata = t;
+        t->el->privdata[0] = t;
         t->pending_clients = listCreate();
         t->processing_clients = listCreate();
         t->pending_clients_for_main_thread = listCreate();

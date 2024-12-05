@@ -407,6 +407,7 @@ static ConnectionType CT_Socket = {
     .accept = connSocketAccept,
 
     /* event loop */
+    .unbind_event_loop = NULL,
     .rebind_event_loop = connSocketRebindEventLoop,
 
     /* IO */

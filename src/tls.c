@@ -75,10 +75,6 @@ static int parseProtocolsConfig(const char *str) {
     return protocols;
 }
 
-/* list of connections with pending data already read from the socket, but not
- * served to the reader yet. */
-static list *pending_list = NULL;
-
 /**
  * OpenSSL global initialization and locking handling callbacks.
  * Note that this is only required for OpenSSL < 1.1.0.
@@ -144,8 +140,6 @@ static void tlsInit(void) {
     if (!RAND_poll()) {
         serverLog(LL_WARNING, "OpenSSL: Failed to seed random number generator.");
     }
-
-    pending_list = listCreate();
 }
 
 static void tlsCleanup(void) {
@@ -612,6 +606,28 @@ static void updateSSLEvent(tls_connection *conn) {
         aeDeleteFileEvent(conn->c.el, conn->c.fd, AE_WRITABLE);
 }
 
+/* Add a connection to the list of connections with pending data that has
+ * already been read from the socket but has not yet been served to the reader. */
+static void tlsPendingAdd(tls_connection *conn) {
+    if (!conn->c.el->privdata[1])
+        conn->c.el->privdata[1] = listCreate();
+
+    list *pending_list = conn->c.el->privdata[1];
+    if (!conn->pending_list_node) {
+        listAddNodeTail(pending_list, conn);
+        conn->pending_list_node = listLast(pending_list);
+    }
+}
+
+/* Removes a connection from the list of connections with pending data. */
+static void tlsPendingRemove(tls_connection *conn) {
+    if (conn->pending_list_node) {
+        list *pending_list = conn->c.el->privdata[1];
+        listDelNode(pending_list, conn->pending_list_node);
+        conn->pending_list_node = NULL;
+    }
+}
+
 static void tlsHandleEvent(tls_connection *conn, int mask) {
     int ret, conn_error;
 
@@ -720,13 +736,9 @@ static void tlsHandleEvent(tls_connection *conn, int mask) {
              * to a list of pending connection that should be handled anyway. */
             if ((mask & AE_READABLE)) {
                 if (SSL_pending(conn->ssl) > 0) {
-                    if (!conn->pending_list_node) {
-                        listAddNodeTail(pending_list, conn);
-                        conn->pending_list_node = listLast(pending_list);
-                    }
+                    tlsPendingAdd(conn);
                 } else if (conn->pending_list_node) {
-                    listDelNode(pending_list, conn->pending_list_node);
-                    conn->pending_list_node = NULL;
+                    tlsPendingRemove(conn);
                 }
             }
 
@@ -807,6 +819,7 @@ static void connTLSClose(connection *conn_) {
     }
 
     if (conn->pending_list_node) {
+        list *pending_list = conn->c.el->privdata[1];
         listDelNode(pending_list, conn->pending_list_node);
         conn->pending_list_node = NULL;
     }
@@ -864,10 +877,29 @@ static int connTLSConnect(connection *conn_, const char *addr, int port, const c
     return C_OK;
 }
 
+static void connTLSUnbindEventLoop(connection *conn_) {
+    tls_connection *conn = (tls_connection *) conn_;
+
+    /* We need to remove all events from the old event loop. The subsequent
+     * updateSSLEvent() will add the appropriate events to the new event loop. */
+    if (conn->c.el) {
+        int mask = aeGetFileEvents(conn->c.el, conn->c.fd);
+        if (mask & AE_READABLE) aeDeleteFileEvent(conn->c.el, conn->c.fd, AE_READABLE);
+        if (mask & AE_WRITABLE) aeDeleteFileEvent(conn->c.el, conn->c.fd, AE_WRITABLE);
+
+        /* Check if there are pending events and handle accordingly. */
+        int has_pending = conn->pending_list_node != NULL;
+        if (has_pending) tlsPendingRemove(conn);
+    }
+}
+
 static int connTLSRebindEventLoop(connection *conn_, aeEventLoop *el) {
     tls_connection *conn = (tls_connection *) conn_;
-    serverAssert(!conn->c.read_handler && !conn->c.write_handler);
+    serverAssert(!conn->c.read_handler && !conn->c.write_handler && !conn->pending_list_node);
     conn->c.el = el;
+    if (el && SSL_pending(conn->ssl)) tlsPendingAdd(conn);
+    /* Add the appropriate events to the new event loop. */
+    updateSSLEvent((tls_connection *) conn);
     return C_OK;
 }
 
@@ -1052,16 +1084,19 @@ static const char *connTLSGetType(connection *conn_) {
     return CONN_TYPE_TLS;
 }
 
-static int tlsHasPendingData(void) {
+static int tlsHasPendingData(struct aeEventLoop *el) {
+    list *pending_list = el->privdata[1];
     if (!pending_list)
         return 0;
     return listLength(pending_list) > 0;
 }
 
-static int tlsProcessPendingData(void) {
+static int tlsProcessPendingData(struct aeEventLoop *el) {
     listIter li;
     listNode *ln;
 
+    list *pending_list = el->privdata[1];
+    if (!pending_list) return 0;
     int processed = listLength(pending_list);
     listRewind(pending_list,&li);
     while((ln = listNext(&li))) {
@@ -1123,6 +1158,7 @@ static ConnectionType CT_TLS = {
     .accept = connTLSAccept,
 
     /* event loop */
+    .unbind_event_loop = connTLSUnbindEventLoop,
     .rebind_event_loop = connTLSRebindEventLoop,
 
     /* IO */
