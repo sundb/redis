@@ -117,6 +117,67 @@ int test_open_key_subexpired_hget(RedisModuleCtx *ctx, RedisModuleString **argv,
     return REDISMODULE_OK;
 }
 
+int test_open_key_hget_expire(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    if (argc<3) {
+        RedisModule_WrongArity(ctx);
+        return REDISMODULE_OK;
+    }
+
+    RedisModuleKey *key = openKeyWithMode(ctx, argv[1], REDISMODULE_OPEN_KEY_ACCESS_EXPIRED);
+    if (!key) return REDISMODULE_OK;
+
+    mstime_t expireAt;
+    
+    /* Let's test here that we get error if using invalid flags combination */
+    RedisModule_Assert(
+            RedisModule_HashGet(key,
+                                REDISMODULE_HASH_EXISTS |
+                                REDISMODULE_HASH_EXPIRE_TIME,
+                                argv[2], &expireAt, NULL) == REDISMODULE_ERR);    
+    
+    /* Now let's get the expire time */
+    RedisModule_HashGet(key, REDISMODULE_HASH_EXPIRE_TIME,argv[2],&expireAt,NULL);
+    RedisModule_ReplyWithLongLong(ctx, expireAt);
+    RedisModule_CloseKey(key);
+    return REDISMODULE_OK;
+}
+
+/* Test variadic function to get two expiration times */
+int test_open_key_hget_two_expire(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    if (argc<3) {
+        RedisModule_WrongArity(ctx);
+        return REDISMODULE_OK;
+    }
+
+    RedisModuleKey *key = openKeyWithMode(ctx, argv[1], REDISMODULE_OPEN_KEY_ACCESS_EXPIRED);
+    if (!key) return REDISMODULE_OK;
+
+    mstime_t expireAt1, expireAt2;
+    RedisModule_HashGet(key,REDISMODULE_HASH_EXPIRE_TIME,argv[2],&expireAt1,argv[3],&expireAt2,NULL);
+    
+    /* return the two expire time */
+    RedisModule_ReplyWithArray(ctx, 2);
+    RedisModule_ReplyWithLongLong(ctx, expireAt1);
+    RedisModule_ReplyWithLongLong(ctx, expireAt2);
+    RedisModule_CloseKey(key);
+    return REDISMODULE_OK;
+}
+
+int test_open_key_hget_min_expire(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    if (argc!=2) {
+        RedisModule_WrongArity(ctx);
+        return REDISMODULE_OK;
+    }
+
+    RedisModuleKey *key = openKeyWithMode(ctx, argv[1], REDISMODULE_READ);
+    if (!key) return REDISMODULE_OK;
+
+    volatile mstime_t minExpire = RedisModule_HashFieldMinExpire(key);
+    RedisModule_ReplyWithLongLong(ctx, minExpire);
+    RedisModule_CloseKey(key);
+    return REDISMODULE_OK;
+}
+
 int  numReplies;
 void ScanCallback(RedisModuleKey *key, RedisModuleString *field, RedisModuleString *value, void *privdata) {
     UNUSED(key);
@@ -171,6 +232,12 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
     if (RedisModule_CreateCommand(ctx, "hash.hget_expired", test_open_key_subexpired_hget,"", 0, 0, 0) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
     if (RedisModule_CreateCommand(ctx, "hash.hscan_expired", test_open_key_access_expired_hscan,"", 0, 0, 0) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+    if (RedisModule_CreateCommand(ctx, "hash.hget_expire", test_open_key_hget_expire,"", 0, 0, 0) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+    if (RedisModule_CreateCommand(ctx, "hash.hget_two_expire", test_open_key_hget_two_expire,"", 0, 0, 0) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+    if (RedisModule_CreateCommand(ctx, "hash.hget_min_expire", test_open_key_hget_min_expire,"", 0, 0, 0) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
 
     return REDISMODULE_OK;

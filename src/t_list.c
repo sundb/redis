@@ -683,23 +683,20 @@ void addListQuicklistRangeReply(client *c, robj *o, int from, int rangelen, int 
  * Note that the purpose is to make the methods small so that the
  * code in the loop can be inlined better to improve performance. */
 void addListListpackRangeReply(client *c, robj *o, int from, int rangelen, int reverse) {
-    unsigned char *p = lpSeek(o->ptr, from);
-    unsigned char *vstr;
-    unsigned int vlen;
-    long long lval;
+    unsigned char *lp = o->ptr;
+    unsigned char *p = lpSeek(lp, from);
+    const size_t lpbytes = lpBytes(lp);
+    int64_t vlen;
 
     /* Return the result in form of a multi-bulk reply */
     addReplyArrayLen(c,rangelen);
 
     while(rangelen--) {
         serverAssert(p); /* fail on corrupt data */
-        vstr = lpGetValue(p, &vlen, &lval);
-        if (vstr) {
-            addReplyBulkCBuffer(c,vstr,vlen);
-        } else {
-            addReplyBulkLongLong(c,lval);
-        }
-        p = reverse ? lpPrev(o->ptr,p) : lpNext(o->ptr,p);
+        unsigned char buf[LP_INTBUF_SIZE];
+        unsigned char *vstr = lpGet(p,&vlen,buf);
+        addReplyBulkCBuffer(c,vstr,vlen);
+        p = reverse ? lpPrev(lp,p) : lpNextWithBytes(lp,p,lpbytes);
     }
 }
 

@@ -697,8 +697,9 @@ int _dictClear(dict *d, int htidx, void(callback)(dict*)) {
     /* Free all the elements */
     for (i = 0; i < DICTHT_SIZE(d->ht_size_exp[htidx]) && d->ht_used[htidx] > 0; i++) {
         dictEntry *he, *nextHe;
-
-        if (callback && (i & 65535) == 0) callback(d);
+        /* Callback will be called once for every 65535 deletions. Beware,
+         * if dict has less than 65535 items, it will not be called at all.*/
+        if (callback && i != 0 && (i & 65535) == 0) callback(d);
 
         if ((he = d->ht_table[htidx][i]) == NULL) continue;
         while(he) {
@@ -759,14 +760,23 @@ dictEntry *dictFind(dict *d, const void *key)
     for (table = 0; table <= 1; table++) {
         if (table == 0 && (long)idx < d->rehashidx) continue;
         idx = h & DICTHT_SIZE_MASK(d->ht_size_exp[table]);
+
+        /* Prefetch the bucket at the calculated index */
+        redis_prefetch_read(&d->ht_table[table][idx]);
+
         he = d->ht_table[table][idx];
         while(he) {
             void *he_key = dictGetKey(he);
+
+            /* Prefetch the next entry to improve cache efficiency */
+            redis_prefetch_read(dictGetNext(he));
+
             if (key == he_key || cmpFunc(d, key, he_key))
                 return he;
             he = dictGetNext(he);
         }
-        if (!dictIsRehashing(d)) return NULL;
+        /* Use unlikely to optimize branch prediction for the common case */
+        if (unlikely(!dictIsRehashing(d))) return NULL;
     }
     return NULL;
 }

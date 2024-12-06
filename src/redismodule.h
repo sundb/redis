@@ -115,12 +115,13 @@ typedef long long ustime_t;
 #define REDISMODULE_ZADD_LT      (1<<6)
 
 /* Hash API flags. */
-#define REDISMODULE_HASH_NONE       0
-#define REDISMODULE_HASH_NX         (1<<0)
-#define REDISMODULE_HASH_XX         (1<<1)
-#define REDISMODULE_HASH_CFIELDS    (1<<2)
-#define REDISMODULE_HASH_EXISTS     (1<<3)
-#define REDISMODULE_HASH_COUNT_ALL  (1<<4)
+#define REDISMODULE_HASH_NONE        0
+#define REDISMODULE_HASH_NX          (1<<0)
+#define REDISMODULE_HASH_XX          (1<<1)
+#define REDISMODULE_HASH_CFIELDS     (1<<2)
+#define REDISMODULE_HASH_EXISTS      (1<<3)
+#define REDISMODULE_HASH_COUNT_ALL   (1<<4)
+#define REDISMODULE_HASH_EXPIRE_TIME (1<<5) 
 
 #define REDISMODULE_CONFIG_DEFAULT 0 /* This is the default for a module config. */
 #define REDISMODULE_CONFIG_IMMUTABLE (1ULL<<0) /* Can this value only be set at startup? */
@@ -1083,6 +1084,7 @@ REDISMODULE_API int (*RedisModule_ZsetRangePrev)(RedisModuleKey *key) REDISMODUL
 REDISMODULE_API int (*RedisModule_ZsetRangeEndReached)(RedisModuleKey *key) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_HashSet)(RedisModuleKey *key, int flags, ...) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_HashGet)(RedisModuleKey *key, int flags, ...) REDISMODULE_ATTR;
+REDISMODULE_API mstime_t (*RedisModule_HashFieldMinExpire)(RedisModuleKey *key) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_StreamAdd)(RedisModuleKey *key, int flags, RedisModuleStreamID *id, RedisModuleString **argv, int64_t numfields) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_StreamDelete)(RedisModuleKey *key, RedisModuleStreamID *id) REDISMODULE_ATTR;
 REDISMODULE_API int (*RedisModule_StreamIteratorStart)(RedisModuleKey *key, int flags, RedisModuleStreamID *startid, RedisModuleStreamID *endid) REDISMODULE_ATTR;
@@ -1453,6 +1455,7 @@ static int RedisModule_Init(RedisModuleCtx *ctx, const char *name, int ver, int 
     REDISMODULE_GET_API(ZsetRangeEndReached);
     REDISMODULE_GET_API(HashSet);
     REDISMODULE_GET_API(HashGet);
+    REDISMODULE_GET_API(HashFieldMinExpire);
     REDISMODULE_GET_API(StreamAdd);
     REDISMODULE_GET_API(StreamDelete);
     REDISMODULE_GET_API(StreamIteratorStart);

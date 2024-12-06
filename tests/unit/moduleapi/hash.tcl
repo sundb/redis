@@ -60,7 +60,7 @@ start_server {tags {"modules"}} {
         r debug set-active-expire 1
     } {OK} {needs:debug}
 
-    test {test open key with REDISMODULE_OPEN_KEY_ACCESS_EXPIRED to scan expired fields} {
+    test {Module hash - test open key with REDISMODULE_OPEN_KEY_ACCESS_EXPIRED to scan expired fields} {
         r debug set-active-expire 0
         r del H1
         r hash.set H1 "n" f1 v1 f2 v2 f3 v3
@@ -70,6 +70,9 @@ start_server {tags {"modules"}} {
         assert_equal "f1 f2 f3 v1 v2 v3" [lsort [r hash.hscan_expired H1]]
         # Get expired field with flag REDISMODULE_OPEN_KEY_ACCESS_EXPIRED
         assert_equal {v1} [r hash.hget_expired H1 f1]
+        # Verify we can get the TTL of the expired field as well
+        set now [expr [clock seconds]*1000]
+        assert_range [r hash.hget_expire H1 f2] [expr {$now-1000}] [expr {$now+1000}]        
         # Verify key doesn't exist on normal access without the flag
         assert_equal 0 [r hexists H1 f1]
         assert_equal 0 [r hexists H1 f2]
@@ -78,7 +81,7 @@ start_server {tags {"modules"}} {
         r debug set-active-expire 1
     }
 
-    test {test open key with REDISMODULE_OPEN_KEY_ACCESS_EXPIRED to scan expired key} {
+    test {Module hash - test open key with REDISMODULE_OPEN_KEY_ACCESS_EXPIRED to scan expired key} {
         r debug set-active-expire 0
         r del H1
         r hash.set H1 "n" f1 v1 f2 v2 f3 v3
@@ -91,6 +94,48 @@ start_server {tags {"modules"}} {
         # Verify key doesn't exist on normal access without the flag
         assert_equal 0 [r exists H1]
         r debug set-active-expire 1
+    }
+    
+    test {Module hash - Read field expiration time} {
+        r del H1
+        r hash.set H1 "n" f1 v1 f2 v2 f3 v3 f4 v4
+        r hexpire H1 10   FIELDS 1 f1
+        r hexpire H1 100  FIELDS 1 f2
+        r hexpire H1 1000 FIELDS 1 f3        
+        
+        # Validate that the expiration times for fields f1, f2, and f3 are correct
+        set nowMsec [expr [clock seconds]*1000]
+        assert_range [r hash.hget_expire H1 f1] [expr {$nowMsec+9000}] [expr {$nowMsec+11000}]
+        assert_range [r hash.hget_expire H1 f2] [expr {$nowMsec+90000}] [expr {$nowMsec+110000}]
+        assert_range [r hash.hget_expire H1 f3] [expr {$nowMsec+900000}] [expr {$nowMsec+1100000}]
+        
+        # Assert that field f4 and f5_not_exist have no expiration (should return -1)
+        assert_equal [r hash.hget_expire H1 f4] -1  
+        assert_equal [r hash.hget_expire H1 f5_not_exist] -1
+        
+        # Assert that variadic version of hget_expire works as well
+        assert_equal [r hash.hget_two_expire H1 f1 f2] [list [r hash.hget_expire H1 f1] [r hash.hget_expire H1 f2]]        
+    }
+    
+    test {Module hash - Read minimum expiration time} {
+        r del H1
+        r hash.set H1 "n" f1 v1 f2 v2 f3 v3 f4 v4
+        r hexpire H1 100   FIELDS 1 f1
+        r hexpire H1 10    FIELDS 1 f2
+        r hexpire H1 1000  FIELDS 1 f3        
+        
+        # Validate that the minimum expiration time is correct
+        set nowMsec [expr [clock seconds]*1000]
+        assert_range [r hash.hget_min_expire H1] [expr {$nowMsec+9000}] [expr {$nowMsec+11000}]
+        assert_equal [r hash.hget_min_expire H1] [r hash.hget_expire H1 f2]
+        
+        # Assert error if key not found
+        assert_error {*key not found*} {r hash.hget_min_expire non_exist_hash}
+        
+        # Assert return -1 if no expiration (=REDISMODULE_NO_EXPIRE)
+        r del H2
+        r hash.set H2 "n" f1 v1
+        assert_equal [r hash.hget_min_expire H2] -1
     }
 
     test "Unload the module - hash" {

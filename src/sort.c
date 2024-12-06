@@ -41,7 +41,7 @@ redisSortOperation *createSortOperation(int type, robj *pattern) {
 robj *lookupKeyByPattern(redisDb *db, robj *pattern, robj *subst) {
     char *p, *f, *k;
     sds spat, ssub;
-    robj *keyobj, *fieldobj = NULL, *o;
+    robj *keyobj, *fieldobj = NULL, *o, *val;
     int prefixlen, sublen, postfixlen, fieldlen;
 
     /* If the pattern is "#" return the substitution object itself in order
@@ -95,7 +95,8 @@ robj *lookupKeyByPattern(redisDb *db, robj *pattern, robj *subst) {
         /* Retrieve value from hash by the field name. The returned object
          * is a new object with refcount already incremented. */
         int isHashDeleted;
-        o = hashTypeGetValueObject(db, o, fieldobj->ptr, HFE_LAZY_EXPIRE, &isHashDeleted);
+        hashTypeGetValueObject(db, o, fieldobj->ptr, HFE_LAZY_EXPIRE, &val, NULL, &isHashDeleted);
+        o = val;
 
         if (isHashDeleted)
             goto noobj;

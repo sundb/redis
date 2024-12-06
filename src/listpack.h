@@ -65,6 +65,7 @@ unsigned char *lpFindCb(unsigned char *lp, unsigned char *p, void *user, lpCmp c
 unsigned char *lpFirst(unsigned char *lp);
 unsigned char *lpLast(unsigned char *lp);
 unsigned char *lpNext(unsigned char *lp, unsigned char *p);
+unsigned char *lpNextWithBytes(unsigned char *lp, unsigned char *p, const size_t lpbytes);
 unsigned char *lpPrev(unsigned char *lp, unsigned char *p);
 size_t lpBytes(unsigned char *lp);
 size_t lpEntrySizeInteger(long long lval);
