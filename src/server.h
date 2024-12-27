@@ -1207,6 +1207,16 @@ typedef struct ClientCommand {
     size_t argv_len_sum;    /* Sum of lengths of objects in argv list. */
 } ClientCommand;
 
+#define CLIENT_ARGV_OBJECT_POOL_SIZE  255
+#define CLIENT_ARGV_OBJECT_SIZE_LIMIT 28
+typedef struct clientArgvObjectPool {
+    uint8_t size;
+    uint8_t alloc_index;
+    uint8_t free_index;
+    uint8_t object_zmalloc_size;
+    robj *objects[CLIENT_ARGV_OBJECT_POOL_SIZE];
+} clientArgvObjectPool;
+
 typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
@@ -1225,6 +1235,7 @@ typedef struct client {
     size_t querybuf_peak;   /* Recent (100ms or more) peak of querybuf size. */
     int argc;               /* Num of arguments of current command. */
     robj **argv;            /* Arguments of current command. */
+    clientArgvObjectPool argv_obj_pool; /* Pool of argv objects. */
     int argv_len;           /* Size of argv array (may be more than argc) */
     int argc_parsing;       /* */
     robj **argv_parsing;    /* */

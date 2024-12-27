@@ -71,6 +71,79 @@ size_t getStringObjectLen(robj *o) {
     }
 }
 
+void initClientArgvObjectPool(client *c) {
+    c->argv_obj_pool.size = CLIENT_ARGV_OBJECT_POOL_SIZE;
+    c->argv_obj_pool.alloc_index = 0;
+    c->argv_obj_pool.free_index = 0;
+    for (int i = 0; i < CLIENT_ARGV_OBJECT_POOL_SIZE; i++) {
+        c->argv_obj_pool.objects[i] =
+            createStringObject(SDS_NOINIT, CLIENT_ARGV_OBJECT_SIZE_LIMIT);
+    }
+    size_t size = zmalloc_size(c->argv_obj_pool.objects[0]);
+    serverAssert(size <= UINT8_MAX);
+    c->argv_obj_pool.object_zmalloc_size = size;
+}
+
+void releaseClientArgvObjectPool(client *c) {
+    for (int i = 0; i < CLIENT_ARGV_OBJECT_POOL_SIZE; i++) {
+        if (c->argv_obj_pool.objects[i]) decrRefCount(c->argv_obj_pool.objects[i]);
+    }
+}
+
+static inline size_t getArgvObjectPoolMem(client *c) {
+    return c->argv_obj_pool.size * c->argv_obj_pool.object_zmalloc_size;
+}
+
+robj *tryAllocArgvObjectFromPool(client *c, const char *ptr, size_t len) {
+    if (len > CLIENT_ARGV_OBJECT_SIZE_LIMIT) return createStringObject(ptr, len);
+
+    robj* o = NULL;
+    struct sdshdr8 *sh = NULL;
+    struct clientArgvObjectPool *pool = &c->argv_obj_pool;
+    if (pool->size == 0) {
+        /* Will try to replenish argv object poll when freeing argvs. */
+        o = createStringObject(SDS_NOINIT, CLIENT_ARGV_OBJECT_SIZE_LIMIT);
+        goto copydata;
+    }
+
+    while (!pool->objects[pool->alloc_index]) pool->alloc_index++;
+    o = pool->objects[pool->alloc_index];
+    pool->objects[pool->alloc_index] = NULL;
+    pool->size--;
+    pool->alloc_index++;
+    pool->free_index = 0;
+
+copydata:
+    serverAssert(o->encoding == OBJ_ENCODING_EMBSTR);
+    sh = (void*)(o+1);
+    sh->len = len;
+    memcpy(sh->buf, ptr, len);
+    sh->buf[len] = '\0';
+    return o;
+}
+
+void tryFreeArgvObjectsToPool(client *c, robj *obj) {
+    if (obj->refcount > 1 ||
+        c->argv_obj_pool.size == CLIENT_ARGV_OBJECT_POOL_SIZE)
+    {
+        decrRefCount(obj);
+        return;
+    }
+
+    struct clientArgvObjectPool *pool = &c->argv_obj_pool;
+    if (obj->encoding == OBJ_ENCODING_EMBSTR &&
+        sdsalloc(obj->ptr) == CLIENT_ARGV_OBJECT_SIZE_LIMIT)
+    {
+        while (pool->objects[pool->free_index]) pool->free_index++;
+        pool->objects[pool->free_index] = obj;
+        pool->size++;
+        pool->free_index++;
+        pool->alloc_index = 0;
+    } else {
+        decrRefCount(obj);
+    }
+}
+
 /* Client.reply list dup and free methods. */
 void *dupClientReplyValue(void *o) {
     clientReplyBlock *old = o;
@@ -225,6 +298,7 @@ client *createClient(connection *conn) {
     c->mem_usage_bucket_node = NULL;
     if (conn) linkClient(c);
     initClientMultiState(c);
+    initClientArgvObjectPool(c);
     return c;
 }
 
@@ -1463,7 +1537,7 @@ void freeClientOriginalArgv(client *c) {
 static inline void freeClientArgvInternal(client *c, int free_argv) {
     int j;
     for (j = 0; j < c->argc; j++)
-        decrRefCount(c->argv[j]);
+        tryFreeArgvObjectsToPool(c, c->argv[j]);
     c->argc = 0;
     c->cmd = NULL;
     c->iolookedcmd = NULL;
@@ -1751,6 +1825,7 @@ void freeClient(client *c) {
     freeReplicaReferencedReplBuffer(c);
     freeClientArgv(c);
     freeClientOriginalArgv(c);
+    releaseClientArgvObjectPool(c);
     if (c->deferred_reply_errors)
         listRelease(c->deferred_reply_errors);
 #ifdef LOG_REQ_RES
@@ -2541,7 +2616,7 @@ int processMultibulkBuffer(client *c) {
                 sdsclear(c->querybuf);
             } else {
                 c->argv_parsing[c->argc_parsing++] =
-                    createStringObject(c->querybuf+c->qb_pos,c->bulklen);
+                    tryAllocArgvObjectFromPool(c,c->querybuf+c->qb_pos,c->bulklen);
                 c->argv_len_sum_parsing += c->bulklen;
                 c->qb_pos += c->bulklen+2;
             }
@@ -4167,6 +4242,7 @@ size_t getClientMemoryUsage(client *c, size_t *output_buffer_mem_usage) {
      * i.e. unused sds space and internal fragmentation, just the string length. but this is enough to
      * spot problematic clients. */
     mem += c->argv_len_sum + sizeof(robj*)*c->argc;
+    mem += getArgvObjectPoolMem(c);
     mem += multiStateMemOverhead(c);
 
     /* Add memory overhead of pubsub channels and patterns. Note: this is just the overhead of the robj pointers
