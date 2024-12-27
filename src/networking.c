@@ -2275,9 +2275,9 @@ static inline void resetClientInternal(client *c, int free_argv) {
 
     freeClientArgvInternal(c, free_argv);
     c->cur_script = NULL;
-    c->reqtype = 0;
-    c->multibulklen = 0;
-    c->bulklen = -1;
+    // c->reqtype = 0;
+    // c->multibulklen = 0;
+    // c->bulklen = -1;
     c->slot = -1;
     c->flags &= ~CLIENT_EXECUTING_COMMAND;
 
@@ -2358,7 +2358,7 @@ void unprotectClient(client *c) {
  * a protocol error: in such a case the client structure is setup to reply
  * with the error and close the connection. */
 int processInlineBuffer(client *c) {
-    // printf("processInlineBuffer\n");
+    printf("processInlineBuffer, c->argc_parsing: %d, c->argv_len_parsing: %d, c->argv_len_sum_parsing: %d \n", c->argc_parsing, c->argv_len_parsing, c->argv_len_sum_parsing);
     char *newline;
     int argc, j, linefeed_chars = 1;
     sds *argv, aux;
@@ -2477,7 +2477,7 @@ static void setProtocolError(const char *errstr, client *c) {
  * command is in RESP format, so the first byte in the command is found
  * to be '*'. Otherwise for inline commands processInlineBuffer() is called. */
 int processMultibulkBuffer(client *c) {
-    // printf("processMultibulkBuffer\n");
+    printf("processMultibulkBuffer\n");
     char *newline = NULL;
     int ok;
     long long ll;
@@ -2806,6 +2806,7 @@ void handleClientReadError(client *c) {
  * pending query buffer, already representing a full command, to process.
  * return C_ERR in case the client was freed during the processing */
 int processInputBuffer(client *c) {
+    printf("========= processInputBuffer start, c->id: %d ==============\n", c->id);
     /* Keep processing while there is something in the input buffer */
     while(c->qb_pos < sdslen(c->querybuf)) {
         /* Immediately abort if the client is in the middle of something. */
@@ -2830,6 +2831,7 @@ int processInputBuffer(client *c) {
 
         /* Determine request type when unknown. */
         if (!c->reqtype) {
+            printf("c->qb_pos: %d, c->querybuf[c->qb_pos]: %c\n", c->qb_pos, c->querybuf[c->qb_pos]);
             if (c->querybuf[c->qb_pos] == '*') {
                 c->reqtype = PROTO_REQ_MULTIBULK;
             } else {
@@ -2845,8 +2847,12 @@ int processInputBuffer(client *c) {
             }
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
             if (processMultibulkBuffer(c) != C_OK) {
-                if (c->running_tid != IOTHREAD_MAIN_THREAD_ID && c->read_error)
+                if (c->running_tid != IOTHREAD_MAIN_THREAD_ID && c->read_error) {
+                    printf("error enqueuePendingClientsToMainThread\n");
                     enqueuePendingClientsToMainThread(c, 0);
+                }
+
+                printf("enqueuePendingClientsToMainThread break\n");
                 break;
             }
         } else {
@@ -2855,6 +2861,7 @@ int processInputBuffer(client *c) {
 
         /* Multibulk processing could see a <= 0 length. */
         if (c->argc_parsing == 0) {
+            printf("1111111111111111, c->argc_parsing: %d\n", c->argc_parsing);
             for (int j = 0; j < c->argc_parsing; j++)
                 decrRefCount(c->argv_parsing[j]);
             c->argc_parsing = 0;
@@ -2866,12 +2873,14 @@ int processInputBuffer(client *c) {
             c->multibulklen = 0;
             c->bulklen = -1;
         } else {
+            printf("222222222222222, c->argc_parsing: %d\n", c->argc_parsing);
             ClientCommand *cmd = zcalloc(sizeof(*cmd));
             cmd->argc = c->argc_parsing;
             cmd->argv = c->argv_parsing;
             cmd->argv_len = c->argv_len_parsing;
             cmd->argv_len_sum = c->argv_len_sum_parsing;
             cmd->cmd = lookupCommand(cmd->argv, cmd->argc);
+            // serverAssert(cmd->cmd);
             
             c->argc_parsing = 0;
             c->argv_parsing = NULL;
@@ -2883,17 +2892,23 @@ int processInputBuffer(client *c) {
             // c->argv_len = cmd->argv_len;
             // c->argv_len_sum = cmd->argv_len_sum;
             listAddNodeTail(c->cmds, cmd);
+
+            // resetClientInternal(c, 0);
+
+            c->reqtype = 0;
+            c->multibulklen = 0;
+            c->bulklen = -1;
             // serverAssert(cmd->argc > 0);
             // c->argc = cmd->argc;
             // c->argv = cmd->argv;
             // c->argv_len = cmd->argv_len;
             // c->argv_len_sum = cmd->argv_len_sum;
             // zfree(cmd);
-            // printf("============cmd\n");
-            // for (int i = 0; i < c->argc; i++) {
-            //     printf("processInputBuffer, i: %d, cmd: %s \n", i, c->argv[i]->ptr);
-            // }
-            // printf("============cmd end\n");
+            printf("============cmd\n");
+            for (int i = 0; i < cmd->argc; i++) {
+                printf("processInputBuffer, i: %d, cmd: %s \n", i, cmd->argv[i]->ptr);
+            }
+            printf("============cmd end\n");
 
             // c->reqtype = 0;
             // c->multibulklen = 0;
@@ -2928,6 +2943,7 @@ int processInputBuffer(client *c) {
                 // }
                 // printf("============cmd end\n");
                 /* We are finally ready to execute the command. */
+                printf("processCommandAndResetClient\n");
                 if (processCommandAndResetClient(c) == C_ERR) {
                     /* If the client is no longer valid, we avoid exiting this
                         * loop and trimming the client buffer later. So we return
@@ -2970,6 +2986,7 @@ int processInputBuffer(client *c) {
     if (c->running_tid == IOTHREAD_MAIN_THREAD_ID)
         updateClientMemUsageAndBucket(c);
 
+    printf("<<<<<<<<<<< processInputBuffer end >>>>>>>>>>>>>>>>\n");
     return C_OK;
 }
 
