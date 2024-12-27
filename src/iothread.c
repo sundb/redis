@@ -354,10 +354,25 @@ void processClientsFromIOThread(IOThread *t) {
         /* Process the pending command and input buffer. */
         if (!c->read_error && c->io_flags & CLIENT_IO_PENDING_COMMAND) {
             c->flags |= CLIENT_PENDING_COMMAND;
-            if (processPendingCommandAndInputBuffer(c) == C_ERR) {
-                /* If the client is no longer valid, it must be freed safely. */
-                continue;
+
+            listIter li;
+            listNode *ln;
+            ClientCommand *cmd;
+            listRewind(c->cmds,&li);
+            while ((ln = listNext(&li))) {
+                cmd = listNodeValue(ln);
+                c->argc = cmd->argc;
+                c->argv = cmd->argv;
+                c->argv_len = cmd->argv_len;
+                c->argv_len_sum = cmd->argv_len_sum;
+                c->iolookedcmd = cmd->cmd;
+                // zfree(cmd);
+
+                if (processCommandAndResetClient(c) == C_ERR) {
+                    continue;
+                }
             }
+            // listEmpty(c->cmds);
         }
 
         /* We may have pending replies if io thread may not finish writing
@@ -471,6 +486,7 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
     listRewind(t->processing_clients, &li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
+        listEmpty(c->cmds);
         serverAssert(!(c->io_flags & (CLIENT_IO_READ_ENABLED | CLIENT_IO_WRITE_ENABLED)));
         /* Main thread must handle clients with CLIENT_CLOSE_ASAP flag, since
          * we only set io_flags when clients in io thread are freed ASAP. */

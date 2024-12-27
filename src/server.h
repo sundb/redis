@@ -1192,6 +1192,21 @@ typedef struct {
 } clientReqResInfo;
 #endif
 
+// typedef struct ClientArguments {
+//     int argc;               /* Num of arguments of current command. */
+//     robj **argv;            /* Arguments of current command. */
+//     int argv_len;           /* Size of argv array (may be more than argc) */
+//     size_t argv_len_sum;    /* Sum of lengths of objects in argv list. */
+// } ClientArguments;
+
+typedef struct ClientCommand {
+    struct redisCommand *cmd;
+    int argc;               /* Num of arguments of current command. */
+    robj **argv;            /* Arguments of current command. */
+    int argv_len;           /* Size of argv array (may be more than argc) */
+    size_t argv_len_sum;    /* Sum of lengths of objects in argv list. */
+} ClientCommand;
+
 typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
@@ -1211,9 +1226,15 @@ typedef struct client {
     int argc;               /* Num of arguments of current command. */
     robj **argv;            /* Arguments of current command. */
     int argv_len;           /* Size of argv array (may be more than argc) */
+    int argc_parsing;       /* */
+    robj **argv_parsing;    /* */
+    int argv_len_parsing;   /* */
+    list *cmds;
+    size_t argv_len_sum_parsing;
     int original_argc;      /* Num of arguments of original command if arguments were rewritten. */
     robj **original_argv;   /* Arguments of original command if arguments were rewritten. */
     size_t argv_len_sum;    /* Sum of lengths of objects in argv list. */
+    // ClientArguments *client_argv_parsing;
     struct redisCommand *cmd, *lastcmd;  /* Last command executed. */
     struct redisCommand *iolookedcmd;    /* Command looked up in IO threads. */
     struct redisCommand *realcmd; /* The original command that was executed by the client,

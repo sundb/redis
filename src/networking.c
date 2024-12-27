@@ -22,6 +22,8 @@
 #include <math.h>
 #include <ctype.h>
 
+
+
 static void setProtocolError(const char *errstr, client *c);
 static void pauseClientsByClient(mstime_t end, int isPauseClientAll);
 char *getClientSockname(client *c);
@@ -157,6 +159,14 @@ client *createClient(connection *conn) {
     c->argv = NULL;
     c->argv_len = 0;
     c->argv_len_sum = 0;
+
+    c->argc_parsing = 0;
+    c->argv_parsing = NULL;
+    c->argv_len_parsing = 0;
+    c->argv_len_sum_parsing = 0;
+    c->cmds = listCreate();
+    listSetFreeMethod(c->cmds, zfree);
+    
     c->original_argc = 0;
     c->original_argv = NULL;
     c->cmd = c->lastcmd = c->realcmd = c->iolookedcmd = NULL;
@@ -2273,6 +2283,7 @@ void unprotectClient(client *c) {
  * a protocol error: in such a case the client structure is setup to reply
  * with the error and close the connection. */
 int processInlineBuffer(client *c) {
+    // printf("processInlineBuffer\n");
     char *newline;
     int argc, j, linefeed_chars = 1;
     sds *argv, aux;
@@ -2328,19 +2339,19 @@ int processInlineBuffer(client *c) {
     /* Setup argv array on client structure */
     if (argc) {
         /* Create new argv if space is insufficient. */
-        if (unlikely(argc > c->argv_len)) {
-            zfree(c->argv);
-            c->argv = zmalloc(sizeof(robj*)*argc);
-            c->argv_len = argc;
+        if (unlikely(argc > c->argv_len_parsing)) {
+            zfree(c->argv_parsing);
+            c->argv_parsing = zmalloc(sizeof(robj*)*argc);
+            c->argv_len_parsing = argc;
         }
-        c->argv_len_sum = 0;
+        c->argv_len_sum_parsing = 0;
     }
 
     /* Create redis objects for all arguments. */
-    for (c->argc = 0, j = 0; j < argc; j++) {
-        c->argv[c->argc] = createObject(OBJ_STRING,argv[j]);
-        c->argc++;
-        c->argv_len_sum += sdslen(argv[j]);
+    for (c->argc_parsing = 0, j = 0; j < argc; j++) {
+        c->argv_parsing[c->argc_parsing] = createObject(OBJ_STRING,argv[j]);
+        c->argc_parsing++;
+        c->argv_len_sum_parsing += sdslen(argv[j]);
     }
     zfree(argv);
     return C_OK;
@@ -2391,13 +2402,14 @@ static void setProtocolError(const char *errstr, client *c) {
  * command is in RESP format, so the first byte in the command is found
  * to be '*'. Otherwise for inline commands processInlineBuffer() is called. */
 int processMultibulkBuffer(client *c) {
+    // printf("processMultibulkBuffer\n");
     char *newline = NULL;
     int ok;
     long long ll;
 
     if (c->multibulklen == 0) {
         /* The client should have been reset */
-        serverAssertWithInfo(c,NULL,c->argc == 0);
+        serverAssertWithInfo(c,NULL,c->argc_parsing == 0);
 
         /* Multi bulk length cannot be read without a \r\n */
         newline = strchr(c->querybuf+c->qb_pos,'\r');
@@ -2432,12 +2444,12 @@ int processMultibulkBuffer(client *c) {
 
         /* Setup argv array on client structure.
          * Create new argv if space is insufficient or if we need to allocate it gradually. */
-        if (unlikely(c->multibulklen > c->argv_len || c->multibulklen > 1024)) {
-            zfree(c->argv);
-            c->argv_len = min(c->multibulklen, 1024);
-            c->argv = zmalloc(sizeof(robj*)*c->argv_len);
+        if (unlikely(c->multibulklen > c->argv_len_parsing || c->multibulklen > 1024)) {
+            zfree(c->argv_parsing);
+            c->argv_len_parsing = min(c->multibulklen, 1024);
+            c->argv_parsing = zmalloc(sizeof(robj*)*c->argv_len_parsing);
         }
-        c->argv_len_sum = 0;
+        c->argv_len_sum_parsing = 0;
     }
 
     serverAssertWithInfo(c,NULL,c->multibulklen > 0);
@@ -2507,9 +2519,9 @@ int processMultibulkBuffer(client *c) {
             break;
         } else {
             /* Check if we have space in argv, grow if needed */
-            if (c->argc >= c->argv_len) {
-                c->argv_len = min(c->argv_len < INT_MAX/2 ? c->argv_len*2 : INT_MAX, c->argc+c->multibulklen);
-                c->argv = zrealloc(c->argv, sizeof(robj*)*c->argv_len);
+            if (c->argc_parsing >= c->argv_len_parsing) {
+                c->argv_len_parsing = min(c->argv_len_parsing < INT_MAX/2 ? c->argv_len_parsing*2 : INT_MAX, c->argc_parsing+c->multibulklen);
+                c->argv_parsing = zrealloc(c->argv_parsing, sizeof(robj*)*c->argv_len_parsing);
             }
 
             /* Optimization: if a non-master client's buffer contains JUST our bulk element
@@ -2520,17 +2532,17 @@ int processMultibulkBuffer(client *c) {
                 c->bulklen >= PROTO_MBULK_BIG_ARG &&
                 sdslen(c->querybuf) == (size_t)(c->bulklen+2))
             {
-                c->argv[c->argc++] = createObject(OBJ_STRING,c->querybuf);
-                c->argv_len_sum += c->bulklen;
+                c->argv_parsing[c->argc_parsing++] = createObject(OBJ_STRING,c->querybuf);
+                c->argv_len_sum_parsing += c->bulklen;
                 sdsIncrLen(c->querybuf,-2); /* remove CRLF */
                 /* Assume that if we saw a fat argument we'll see another one
                  * likely... */
                 c->querybuf = sdsnewlen(SDS_NOINIT,c->bulklen+2);
                 sdsclear(c->querybuf);
             } else {
-                c->argv[c->argc++] =
+                c->argv_parsing[c->argc_parsing++] =
                     createStringObject(c->querybuf+c->qb_pos,c->bulklen);
-                c->argv_len_sum += c->bulklen;
+                c->argv_len_sum_parsing += c->bulklen;
                 c->qb_pos += c->bulklen+2;
             }
             c->bulklen = -1;
@@ -2722,24 +2734,24 @@ int processInputBuffer(client *c) {
     /* Keep processing while there is something in the input buffer */
     while(c->qb_pos < sdslen(c->querybuf)) {
         /* Immediately abort if the client is in the middle of something. */
-        if (c->flags & CLIENT_BLOCKED) break;
+        // if (c->flags & CLIENT_BLOCKED) break;
 
         /* Don't process more buffers from clients that have already pending
          * commands to execute in c->argv. */
-        if (c->flags & CLIENT_PENDING_COMMAND) break;
+        // if (c->flags & CLIENT_PENDING_COMMAND) break;
 
         /* Don't process input from the master while there is a busy script
          * condition on the slave. We want just to accumulate the replication
          * stream (instead of replying -BUSY like we do with other clients) and
          * later resume the processing. */
-        if (c->flags & CLIENT_MASTER && isInsideYieldingLongCommand()) break;
+        // if (c->flags & CLIENT_MASTER && isInsideYieldingLongCommand()) break;
 
         /* CLIENT_CLOSE_AFTER_REPLY closes the connection once the reply is
          * written to the client. Make sure to not let the reply grow after
          * this flag has been set (i.e. don't process more commands).
          *
          * The same applies for clients we want to terminate ASAP. */
-        if (c->flags & (CLIENT_CLOSE_AFTER_REPLY|CLIENT_CLOSE_ASAP)) break;
+        // if (c->flags & (CLIENT_CLOSE_AFTER_REPLY|CLIENT_CLOSE_ASAP)) break;
 
         /* Determine request type when unknown. */
         if (!c->reqtype) {
@@ -2767,29 +2779,89 @@ int processInputBuffer(client *c) {
         }
 
         /* Multibulk processing could see a <= 0 length. */
-        if (c->argc == 0) {
-            freeClientArgvInternal(c, 0);
+        if (c->argc_parsing == 0) {
+            for (int j = 0; j < c->argc_parsing; j++)
+                decrRefCount(c->argv_parsing[j]);
+            c->argc_parsing = 0;
+            c->argv_len_sum_parsing = 0;
+            c->argv_len_parsing = 0;
+            zfree(c->argv_parsing);
+
             c->reqtype = 0;
             c->multibulklen = 0;
             c->bulklen = -1;
         } else {
-            /* If we are in the context of an I/O thread, we can't really
-             * execute the command here. All we can do is to flag the client
-             * as one that needs to process the command. */
-            if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-                c->io_flags |= CLIENT_IO_PENDING_COMMAND;
-                c->iolookedcmd = lookupCommand(c->argv, c->argc);
-                enqueuePendingClientsToMainThread(c, 0);
-                break;
-            }
+            ClientCommand *cmd = zcalloc(sizeof(*cmd));
+            cmd->argc = c->argc_parsing;
+            cmd->argv = c->argv_parsing;
+            cmd->argv_len = c->argv_len_parsing;
+            cmd->argv_len_sum = c->argv_len_sum_parsing;
+            cmd->cmd = lookupCommand(cmd->argv, cmd->argc);
+            
+            c->argc_parsing = 0;
+            c->argv_parsing = NULL;
+            c->argv_len_parsing = 0;
+            c->argv_len_sum_parsing = 0;
 
-            /* We are finally ready to execute the command. */
-            if (processCommandAndResetClient(c) == C_ERR) {
-                /* If the client is no longer valid, we avoid exiting this
-                 * loop and trimming the client buffer later. So we return
-                 * ASAP in that case. */
-                return C_ERR;
+            // c->argc = cmd->argc;
+            // c->argv = cmd->argv;
+            // c->argv_len = cmd->argv_len;
+            // c->argv_len_sum = cmd->argv_len_sum;
+            listAddNodeTail(c->cmds, cmd);
+            // serverAssert(cmd->argc > 0);
+            // c->argc = cmd->argc;
+            // c->argv = cmd->argv;
+            // c->argv_len = cmd->argv_len;
+            // c->argv_len_sum = cmd->argv_len_sum;
+            // zfree(cmd);
+            // printf("============cmd\n");
+            // for (int i = 0; i < c->argc; i++) {
+            //     printf("processInputBuffer, i: %d, cmd: %s \n", i, c->argv[i]->ptr);
+            // }
+            // printf("============cmd end\n");
+
+            // c->reqtype = 0;
+            // c->multibulklen = 0;
+            // c->bulklen = -1;
+        }
+    }
+    
+    /* If we are in the context of an I/O thread, we can't really
+     * execute the command here. All we can do is to flag the client
+     * as one that needs to process the command. */
+    if (listLength(c->cmds)) {
+        if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
+            c->io_flags |= CLIENT_IO_PENDING_COMMAND;
+            // c->iolookedcmd = lookupCommand(c->argv, c->argc);
+            enqueuePendingClientsToMainThread(c, 0);
+        } else {
+            listIter li;
+            listNode *ln;
+            ClientCommand *cmd;
+            listRewind(c->cmds,&li);
+            while ((ln = listNext(&li))) {
+                cmd = listNodeValue(ln);
+                c->argc = cmd->argc;
+                c->argv = cmd->argv;
+                c->argv_len = cmd->argv_len;
+                c->argv_len_sum = cmd->argv_len_sum;
+                // zfree(cmd);
+
+                // printf("============cmd\n");
+                // for (int i = 0; i < c->argc; i++) {
+                //     printf("processInputBuffer, i: %d, cmd: %s \n", i, c->argv[i]->ptr);
+                // }
+                // printf("============cmd end\n");
+                /* We are finally ready to execute the command. */
+                if (processCommandAndResetClient(c) == C_ERR) {
+                    /* If the client is no longer valid, we avoid exiting this
+                        * loop and trimming the client buffer later. So we return
+                        * ASAP in that case. */
+                    return C_ERR;
+                }
             }
+            listEmpty(c->cmds);
+
         }
     }
 
