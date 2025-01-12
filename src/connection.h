@@ -203,10 +203,10 @@ static inline int connGetType(connection *conn) {
     return conn->type->get_type(conn);
 }
 
-connection *connCreateSocket();
+connection *connCreateSocket(void);
 connection *connCreateAcceptedSocket(int fd);
 
-connection *connCreateTLS();
+connection *connCreateTLS(void);
 connection *connCreateAcceptedTLS(int fd, int require_auth);
 
 void connSetPrivateData(connection *conn, void *data);
@@ -231,7 +231,7 @@ const char *connGetInfo(connection *conn, char *buf, size_t buf_len);
 
 /* Helpers for tls special considerations */
 sds connTLSGetPeerCert(connection *conn);
-int tlsHasPendingData();
-int tlsProcessPendingData();
+int tlsHasPendingData(void);
+int tlsProcessPendingData(void);
 
 #endif  /* __REDIS_CONNECTION_H */

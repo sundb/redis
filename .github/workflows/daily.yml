@@ -204,9 +204,8 @@ jobs:
         apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 40976EAF437D05B5
         apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 3B4FE6ACC0B21F32
         apt-get update
-        apt-get install -y make gcc-4.8 g++-4.8
+        apt-get install -y make gcc-4.8
         update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-4.8 100
-        update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-4.8 100
         make CC=gcc REDIS_CFLAGS='-Werror'
     - name: testprep
       run: apt-get install -y tcl tcltls tclx
@@ -234,10 +233,9 @@ jobs:
         apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 40976EAF437D05B5
         apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 3B4FE6ACC0B21F32
         apt-get update
-        apt-get install -y make gcc-4.8 g++-4.8 openssl libssl-dev
+        apt-get install -y make gcc-4.8 openssl libssl-dev
         update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-4.8 100
-        update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-4.8 100
-        make CC=gcc CXX=g++ BUILD_TLS=module REDIS_CFLAGS='-Werror'
+        make CC=gcc BUILD_TLS=module REDIS_CFLAGS='-Werror'
     - name: test
       run: |
         apt-get install -y tcl tcltls tclx

@@ -113,13 +113,13 @@ void discardCommand(client *c) {
     addReply(c,shared.ok);
 }
 
-void beforePropagateMulti() {
+void beforePropagateMulti(void) {
     /* Propagating MULTI */
     serverAssert(!server.propagate_in_transaction);
     server.propagate_in_transaction = 1;
 }
 
-void afterPropagateExec() {
+void afterPropagateExec(void) {
     /* Propagating EXEC */
     serverAssert(server.propagate_in_transaction == 1);
     server.propagate_in_transaction = 0;

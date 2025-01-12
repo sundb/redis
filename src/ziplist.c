@@ -1693,7 +1693,7 @@ unsigned int ziplistRandomPairsUnique(unsigned char *zl, unsigned int count, zip
 
 #define debug(f, ...) { if (DEBUG) printf(f, __VA_ARGS__); }
 
-static unsigned char *createList() {
+static unsigned char *createList(void) {
     unsigned char *zl = ziplistNew();
     zl = ziplistPush(zl, (unsigned char*)"foo", 3, ZIPLIST_TAIL);
     zl = ziplistPush(zl, (unsigned char*)"quux", 4, ZIPLIST_TAIL);
@@ -1702,7 +1702,7 @@ static unsigned char *createList() {
     return zl;
 }
 
-static unsigned char *createIntList() {
+static unsigned char *createIntList(void) {
     unsigned char *zl = ziplistNew();
     char buf[32];
 

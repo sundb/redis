@@ -1826,9 +1826,9 @@ void dumpCodeAroundEIP(void *eip) {
     }
 }
 
-void invalidFunctionWasCalled() {}
+void invalidFunctionWasCalled(void) {}
 
-typedef void (*invalidFunctionWasCalledType)();
+typedef void (*invalidFunctionWasCalledType)(void);
 
 void sigsegvHandler(int sig, siginfo_t *info, void *secret) {
     UNUSED(secret);
