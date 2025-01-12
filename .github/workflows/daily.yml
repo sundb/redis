@@ -236,10 +236,12 @@ jobs:
         apt-get install -y make gcc-4.8 openssl libssl-dev
         update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-4.8 100
         make CC=gcc BUILD_TLS=yes REDIS_CFLAGS='-Werror'
-    - name: test
+    - name: testprep
       run: |
         apt-get install -y tcl tcltls tclx
         ./utils/gen-test-certs.sh
+    - name: test
+      run: |
         ./runtest --accurate --verbose --tls --dump-logs
         ./runtest --accurate --verbose --dump-logs
     - name: module api test
