@@ -41,7 +41,7 @@ if {$system_supported} {
             test "Crash report generated on SIGABRT" {
                 set pid [s process_id]
                 exec kill -SIGABRT $pid
-                set res [wait_for_log_messages 0 \"STACK TRACE\" 0 50 100]
+                set res [wait_for_log_messages 0 {"*STACK TRACE*"} 0 50 100]
                 if {$::verbose} { puts $res }
             }
         }
