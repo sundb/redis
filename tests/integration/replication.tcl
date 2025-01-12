@@ -36,6 +36,19 @@ start_server {tags {"repl network"}} {
             }
         }
 
+        test {Slave enters wait_bgsave} {
+            wait_for_condition 50 1000 {
+                [string match *state=wait_bgsave* [$master info replication]]
+            } else {
+                fail "Replica does not enter wait_bgsave state"
+            }
+        }
+
+        # Use a short replication timeout on the slave, so that if there
+        # are no bugs the timeout is triggered in a reasonable amount
+        # of time.
+        $slave config set repl-timeout 5
+
         # But make the master unable to send
         # the periodic newlines to refresh the connection. The slave
         # should detect the timeout.
