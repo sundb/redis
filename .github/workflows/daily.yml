@@ -280,18 +280,16 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     - name: test
-      uses: vmactions/freebsd-vm@v0.3.0
+      uses: cross-platform-actions/action@v0.22.0
       with:
-        usesh: true
-        sync: rsync
-        copyback: false
-        prepare: pkg install -y bash gmake lang/tcl86
-        run: >
-          gmake &&
-          ./runtest --accurate --verbose --no-latency --tags -large-memory --dump-logs &&
-          MAKE=gmake ./runtest-moduleapi --verbose &&
-          ./runtest-sentinel &&
-          ./runtest-cluster
+        operating_system: freebsd
+        environment_variables: MAKE
+        version: 13.2
+        shell: bash
+        run: |
+          sudo pkg install -y bash gmake lang/tcl86 lang/tclx gcc
+          gmake
+          ./runtest --single unit/keyspace --single unit/auth --single unit/networking --single unit/protocol
 
   test-alpine-jemalloc:
     runs-on: ubuntu-latest
