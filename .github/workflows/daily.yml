@@ -186,20 +186,32 @@ jobs:
     - name: module api test
       run: ./runtest-moduleapi --valgrind --no-latency --verbose --clients 1
 
-  test-centos7-jemalloc:
+  test-old-chain-jemalloc:
     runs-on: ubuntu-latest
-    container: centos:7
+    container: ubuntu:20.04
     timeout-minutes: 14400
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
+      with:
+        repository: ${{ env.GITHUB_REPOSITORY }}
+        ref: ${{ env.GITHUB_HEAD_REF }}
     - name: make
       run: |
-        yum -y install gcc make
-        make
+        apt-get update
+        apt-get install -y gnupg2
+        echo "deb http://dk.archive.ubuntu.com/ubuntu/ xenial main" >> /etc/apt/sources.list
+        echo "deb http://dk.archive.ubuntu.com/ubuntu/ xenial universe" >> /etc/apt/sources.list
+        apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 40976EAF437D05B5
+        apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 3B4FE6ACC0B21F32
+        apt-get update
+        apt-get install -y make gcc-4.8 g++-4.8
+        update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-4.8 100
+        update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-4.8 100
+        make CC=gcc REDIS_CFLAGS='-Werror'
+    - name: testprep
+      run: apt-get install -y tcl tcltls tclx
     - name: test
-      run: |
-        yum -y install which tcl
-        ./runtest --accurate --verbose --dump-logs
+      run: ./runtest --accurate --verbose --dump-logs
     - name: module api test
       run: ./runtest-moduleapi --verbose
     - name: sentinel tests
@@ -207,20 +219,28 @@ jobs:
     - name: cluster tests
       run: ./runtest-cluster
 
-  test-centos7-tls:
+  test-old-chain-tls:
     runs-on: ubuntu-latest
-    container: centos:7
+    container: ubuntu:20.04
     timeout-minutes: 14400
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: make
       run: |
-        yum -y install centos-release-scl epel-release
-        yum -y install devtoolset-7 openssl-devel openssl
-        scl enable devtoolset-7 "make BUILD_TLS=yes"
+        apt-get update
+        apt-get install -y gnupg2
+        echo "deb http://dk.archive.ubuntu.com/ubuntu/ xenial main" >> /etc/apt/sources.list
+        echo "deb http://dk.archive.ubuntu.com/ubuntu/ xenial universe" >> /etc/apt/sources.list
+        apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 40976EAF437D05B5
+        apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 3B4FE6ACC0B21F32
+        apt-get update
+        apt-get install -y make gcc-4.8 g++-4.8 openssl libssl-dev
+        update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-4.8 100
+        update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-4.8 100
+        make CC=gcc CXX=g++ BUILD_TLS=module REDIS_CFLAGS='-Werror'
     - name: test
       run: |
-        yum -y install tcl tcltls
+        apt-get install -y tcl tcltls tclx
         ./utils/gen-test-certs.sh
         ./runtest --accurate --verbose --tls --dump-logs
         ./runtest --accurate --verbose --dump-logs
