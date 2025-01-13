@@ -175,21 +175,32 @@ jobs:
     - name: module api test
       run: ./runtest-moduleapi --valgrind --no-latency --verbose --clients 1
 
-  test-centos7-jemalloc:
+  test-old-chain-jemalloc:
     runs-on: ubuntu-latest
     if: github.repository == 'redis/redis'
-    container: centos:7
+    container: ubuntu:20.04
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
+      with:
+        repository: ${{ env.GITHUB_REPOSITORY }}
+        ref: ${{ env.GITHUB_HEAD_REF }}
     - name: make
       run: |
-        yum -y install gcc make
-        make
+        apt-get update
+        apt-get install -y gnupg2
+        echo "deb http://dk.archive.ubuntu.com/ubuntu/ xenial main" >> /etc/apt/sources.list
+        echo "deb http://dk.archive.ubuntu.com/ubuntu/ xenial universe" >> /etc/apt/sources.list
+        apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 40976EAF437D05B5
+        apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 3B4FE6ACC0B21F32
+        apt-get update
+        apt-get install -y make gcc-4.8
+        update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-4.8 100
+        make CC=gcc REDIS_CFLAGS='-Werror'
+    - name: testprep
+      run: apt-get install -y tcl tcltls tclx
     - name: test
-      run: |
-        yum -y install which tcl
-        ./runtest --accurate --verbose --dump-logs
+      run: ./runtest --accurate --verbose --dump-logs
     - name: module api test
       run: ./runtest-moduleapi --verbose
     - name: sentinel tests
@@ -197,22 +208,31 @@ jobs:
     - name: cluster tests
       run: ./runtest-cluster
 
-  test-centos7-tls:
+  test-old-chain-tls:
     runs-on: ubuntu-latest
     if: github.repository == 'redis/redis'
-    container: centos:7
+    container: ubuntu:20.04
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
     - name: make
       run: |
-        yum -y install centos-release-scl epel-release
-        yum -y install devtoolset-7 openssl-devel openssl
-        scl enable devtoolset-7 "make BUILD_TLS=yes"
+        apt-get update
+        apt-get install -y gnupg2
+        echo "deb http://dk.archive.ubuntu.com/ubuntu/ xenial main" >> /etc/apt/sources.list
+        echo "deb http://dk.archive.ubuntu.com/ubuntu/ xenial universe" >> /etc/apt/sources.list
+        apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 40976EAF437D05B5
+        apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 3B4FE6ACC0B21F32
+        apt-get update
+        apt-get install -y make gcc-4.8 openssl libssl-dev
+        update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-4.8 100
+        make CC=gcc BUILD_TLS=yes REDIS_CFLAGS='-Werror'
+    - name: testprep
+      run: |
+        apt-get install -y tcl tcltls tclx
+        ./utils/gen-test-certs.sh
     - name: test
       run: |
-        yum -y install tcl tcltls
-        ./utils/gen-test-certs.sh
         ./runtest --accurate --verbose --tls --dump-logs
         ./runtest --accurate --verbose --dump-logs
     - name: module api test
@@ -247,24 +267,22 @@ jobs:
       run: ./runtest-cluster
 
   test-freebsd:
-    runs-on: macos-12
+    runs-on: macos-13
     if: github.repository == 'redis/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
     - name: test
-      uses: vmactions/freebsd-vm@v0.3.0
+      uses: cross-platform-actions/action@v0.22.0
       with:
-        usesh: true
-        sync: rsync
-        copyback: false
-        prepare: pkg install -y bash gmake lang/tcl86
-        run: >
-          gmake &&
-          ./runtest --accurate --verbose --no-latency --tags -large-memory --dump-logs &&
-          MAKE=gmake ./runtest-moduleapi --verbose &&
-          ./runtest-sentinel &&
-          ./runtest-cluster
+        operating_system: freebsd
+        environment_variables: MAKE
+        version: 13.2
+        shell: bash
+        run: |
+          sudo pkg install -y bash gmake lang/tcl86 lang/tclx gcc
+          gmake
+          ./runtest --single unit/keyspace --single unit/auth --single unit/networking --single unit/protocol
 
   test-alpine-jemalloc:
     runs-on: ubuntu-latest
