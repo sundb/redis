@@ -92,7 +92,7 @@ jobs:
       run: ./src/redis-server test all
 
   test-ubuntu-tls:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
