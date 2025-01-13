@@ -7,12 +7,12 @@ on:
       - '[0-9].[0-9]'
   schedule:
     - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
 
   test-ubuntu-jemalloc:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
@@ -33,7 +33,6 @@ jobs:
 
   test-ubuntu-libc-malloc:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
@@ -52,7 +51,6 @@ jobs:
 
   test-ubuntu-no-malloc-usable-size:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
@@ -71,7 +69,6 @@ jobs:
 
   test-ubuntu-32bit:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
@@ -96,7 +93,6 @@ jobs:
 
   test-ubuntu-tls:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
@@ -124,7 +120,6 @@ jobs:
 
   test-ubuntu-io-threads:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
@@ -141,7 +136,6 @@ jobs:
 
   test-valgrind:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
@@ -161,7 +155,6 @@ jobs:
 
   test-valgrind-no-malloc-usable-size:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
@@ -177,7 +170,6 @@ jobs:
 
   test-old-chain-jemalloc:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
     container: ubuntu:20.04
     timeout-minutes: 14400
     steps:
@@ -210,7 +202,6 @@ jobs:
 
   test-old-chain-tls:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
     container: ubuntu:20.04
     timeout-minutes: 14400
     steps:
@@ -250,7 +241,6 @@ jobs:
 
   test-macos-latest:
     runs-on: macos-latest
-    if: github.repository == 'redis/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
@@ -268,7 +258,6 @@ jobs:
 
   test-freebsd:
     runs-on: macos-13
-    if: github.repository == 'redis/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
@@ -286,7 +275,6 @@ jobs:
 
   test-alpine-jemalloc:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
     container: alpine:latest
     steps:
     - uses: actions/checkout@v2
@@ -307,7 +295,6 @@ jobs:
 
   test-alpine-libc-malloc:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
     container: alpine:latest
     steps:
     - uses: actions/checkout@v2
