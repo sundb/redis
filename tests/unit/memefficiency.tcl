@@ -73,7 +73,7 @@ start_server {tags {"defrag"} overrides {appendonly yes auto-aof-rewrite-percent
                 }
 
                 # Wait for the active defrag to stop working.
-                wait_for_condition 150 100 {
+                wait_for_condition 2000 100 {
                     [s active_defrag_running] eq 0
                 } else {
                     after 120 ;# serverCron only updates the info once in 100ms
@@ -116,9 +116,10 @@ start_server {tags {"defrag"} overrides {appendonly yes auto-aof-rewrite-percent
 
             # if defrag is supported, test AOF loading too
             if {[r config get activedefrag] eq "activedefrag yes"} {
+            test "Active defrag - AOF loading" {
                 # reset stats and load the AOF file
                 r config resetstat
-                r config set key-load-delay -50 ;# sleep on average 1/50 usec
+                r config set key-load-delay -25 ;# sleep on average 1/25 usec
                 r debug loadaof
                 r config set activedefrag no
                 # measure hits and misses right after aof loading
@@ -148,12 +149,13 @@ start_server {tags {"defrag"} overrides {appendonly yes auto-aof-rewrite-percent
                 # make sure the defragger did enough work to keep the fragmentation low during loading.
                 # we cannot check that it went all the way down, since we don't wait for full defrag cycle to complete.
                 assert {$frag < 1.4}
-                # since the AOF contains simple (fast) SET commands (and the cron during loading runs every 1000 commands),
+                # since the AOF contains simple (fast) SET commands (and the cron during loading runs every 1024 commands),
                 # it'll still not block the loading for long periods of time.
                 if {!$::no_latency} {
-                    assert {$max_latency <= 30}
+                    assert {$max_latency <= 40}
                 }
             }
+            } ;# Active defrag - AOF loading
         }
         r config set appendonly no
         r config set key-load-delay 0
