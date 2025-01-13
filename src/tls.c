@@ -979,7 +979,7 @@ int tlsHasPendingData() {
     return listLength(pending_list) > 0;
 }
 
-int tlsProcessPendingData() {
+int tlsProcessPendingData(void) {
     listIter li;
     listNode *ln;
 
@@ -1040,11 +1040,11 @@ connection *connCreateAcceptedTLS(int fd, int require_auth) {
     return NULL;
 }
 
-int tlsHasPendingData() {
+int tlsHasPendingData(void) {
     return 0;
 }
 
-int tlsProcessPendingData() {
+int tlsProcessPendingData(void) {
     return 0;
 }
 

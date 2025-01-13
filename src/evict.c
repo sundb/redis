@@ -468,7 +468,7 @@ static int isSafeToPerformEvictions(void) {
 }
 
 /* Algorithm for converting tenacity (0-100) to a time limit.  */
-static unsigned long evictionTimeLimitUs() {
+static unsigned long evictionTimeLimitUs(void) {
     serverAssert(server.maxmemory_eviction_tenacity >= 0);
     serverAssert(server.maxmemory_eviction_tenacity <= 100);
 

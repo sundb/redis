@@ -1787,7 +1787,7 @@ const char *sentinelCheckCreateInstanceErrors(int role) {
 }
 
 /* init function for server.sentinel_config */
-void initializeSentinelConfig() {
+void initializeSentinelConfig(void) {
     server.sentinel_config = zmalloc(sizeof(struct sentinelConfig));
     server.sentinel_config->monitor_cfg = listCreate();
     server.sentinel_config->pre_monitor_cfg = listCreate();
@@ -1798,7 +1798,7 @@ void initializeSentinelConfig() {
 }
 
 /* destroy function for server.sentinel_config */
-void freeSentinelConfig() {
+void freeSentinelConfig(void) {
     /* release these three config queues since we will not use it anymore */
     listRelease(server.sentinel_config->pre_monitor_cfg);
     listRelease(server.sentinel_config->monitor_cfg);

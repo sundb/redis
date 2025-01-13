@@ -503,7 +503,7 @@ void set_jemalloc_bg_thread(int enable) {
     je_mallctl("background_thread", NULL, 0, &val, 1);
 }
 
-int jemalloc_purge() {
+int jemalloc_purge(void) {
     /* return all unused (reserved) pages to the OS */
     char tmp[32];
     unsigned narenas = 0;
@@ -529,7 +529,7 @@ void set_jemalloc_bg_thread(int enable) {
     ((void)(enable));
 }
 
-int jemalloc_purge() {
+int jemalloc_purge(void) {
     return 0;
 }
 

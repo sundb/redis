@@ -74,7 +74,7 @@ ConnectionType CT_Socket;
  * be embedded in different structs, not just client.
  */
 
-connection *connCreateSocket() {
+connection *connCreateSocket(void) {
     connection *conn = zcalloc(sizeof(connection));
     conn->type = &CT_Socket;
     conn->fd = -1;

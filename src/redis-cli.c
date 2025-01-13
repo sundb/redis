@@ -927,7 +927,7 @@ static int cliConnect(int flags) {
 
 /* In cluster, if server replies ASK, we will redirect to a different node.
  * Before sending the real command, we need to send ASKING command first. */
-static int cliSendAsking() {
+static int cliSendAsking(void) {
     redisReply *reply;
 
     config.cluster_send_asking = 0;
@@ -1851,7 +1851,7 @@ static int parseOptions(int argc, char **argv) {
     return i;
 }
 
-static void parseEnv() {
+static void parseEnv(void) {
     /* Set auth from env, but do not overwrite CLI arguments if passed */
     char *auth = getenv(REDIS_CLI_AUTH_ENV);
     if (auth != NULL && config.auth == NULL) {
@@ -4638,7 +4638,7 @@ static clusterManagerNode * clusterManagerGetNodeWithMostKeysInSlot(list *nodes,
  * in the cluster. If there are multiple masters with the same smaller
  * number of replicas, one at random is returned. */
 
-static clusterManagerNode *clusterManagerNodeWithLeastReplicas() {
+static clusterManagerNode *clusterManagerNodeWithLeastReplicas(void) {
     clusterManagerNode *node = NULL;
     int lowest_count = 0;
     listIter li;
@@ -4657,7 +4657,7 @@ static clusterManagerNode *clusterManagerNodeWithLeastReplicas() {
 
 /* This function returns a random master node, return NULL if none */
 
-static clusterManagerNode *clusterManagerNodeMasterRandom() {
+static clusterManagerNode *clusterManagerNodeMasterRandom(void) {
     int master_count = 0;
     int idx;
     listIter li;
@@ -7070,7 +7070,7 @@ void sendReplconf(const char* arg1, const char* arg2) {
     freeReplyObject(reply);
 }
 
-void sendCapa() {
+void sendCapa(void) {
     sendReplconf("capa", "eof");
 }
 

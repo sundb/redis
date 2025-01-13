@@ -15,7 +15,7 @@ typedef struct {
 
 static RedisModuleType *fsltype = NULL;
 
-fsl_t *fsl_type_create() {
+fsl_t *fsl_type_create(void) {
     fsl_t *o;
     o = RedisModule_Alloc(sizeof(*o));
     o->length = 0;
