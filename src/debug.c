@@ -2,6 +2,9 @@
  * Copyright (c) 2009-Present, Redis Ltd.
  * All rights reserved.
  *
+ * Copyright (c) 2024-present, Valkey contributors.
+ * All rights reserved.
+ *
  * Licensed under your choice of the Redis Source Available License 2.0
  * (RSALv2) or the Server Side Public License v1 (SSPLv1).
  *
@@ -483,6 +486,8 @@ void debugCommand(client *c) {
 "    In case RESET is provided the peak reset time will be restored to the default value",
 "REPLYBUFFER RESIZING <0|1>",
 "    Enable or disable the reply buffer resize cron job",
+"REPL-PAUSE <clear|after-fork|before-rdb-channel|on-streaming-repl-buf>",
+"    Pause the server's main process during various replication steps.",
 "DICT-RESIZING <0|1>",
 "    Enable or disable the main dict and expire dict resizing.",
 "SCRIPT <LIST|<sha>>",
@@ -1013,6 +1018,20 @@ NULL
             }
         } else if(!strcasecmp(c->argv[2]->ptr,"resizing")) {
             server.reply_buffer_resizing_enabled = atoi(c->argv[3]->ptr);
+        } else {
+            addReplySubcommandSyntaxError(c);
+            return;
+        }
+        addReply(c, shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr, "repl-pause") && c->argc == 3) {
+        if (!strcasecmp(c->argv[2]->ptr, "clear")) {
+            server.repl_debug_pause = REPL_DEBUG_PAUSE_NONE;
+        } else if (!strcasecmp(c->argv[2]->ptr,"after-fork")) {
+            server.repl_debug_pause |= REPL_DEBUG_AFTER_FORK;
+        } else if (!strcasecmp(c->argv[2]->ptr,"before-rdb-channel")) {
+            server.repl_debug_pause |= REPL_DEBUG_BEFORE_RDB_CHANNEL;
+        } else if (!strcasecmp(c->argv[2]->ptr, "on-streaming-repl-buf")) {
+            server.repl_debug_pause |= REPL_DEBUG_ON_STREAMING_REPL_BUF;
         } else {
             addReplySubcommandSyntaxError(c);
             return;
@@ -2451,6 +2470,8 @@ void removeSigSegvHandlers(void) {
 }
 
 void printCrashReport(void) {
+    server.crashing = 1;
+
     /* Log INFO and CLIENT LIST */
     logServerInfo();
 
@@ -2579,6 +2600,12 @@ void applyWatchdogPeriod(void) {
         if (server.watchdog_period < min_period) server.watchdog_period = min_period;
         watchdogScheduleSignal(server.watchdog_period); /* Adjust the current timer. */
     }
+}
+
+void debugPauseProcess(void) {
+    serverLog(LL_NOTICE, "Process is about to stop.");
+    raise(SIGSTOP);
+    serverLog(LL_NOTICE, "Process has been continued.");
 }
 
 /* Positive input is sleep time in microseconds. Negative input is fractions

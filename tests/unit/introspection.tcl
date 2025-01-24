@@ -6,8 +6,13 @@ start_server {tags {"introspection"}} {
     }
 
     test {CLIENT LIST} {
-        r client list
-    } {id=* addr=*:* laddr=*:* fd=* name=* age=* idle=* flags=N db=* sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=26 qbuf-free=* argv-mem=* multi-mem=0 rbs=* rbp=* obl=0 oll=0 omem=0 tot-mem=* events=r cmd=client|list user=* redir=-1 resp=*}
+        set client_list [r client list]
+        if {[lindex [r config get io-threads] 1] == 1} {
+            assert_match {id=* addr=*:* laddr=*:* fd=* name=* age=* idle=* flags=N db=* sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=26 qbuf-free=* argv-mem=* multi-mem=0 rbs=* rbp=* obl=0 oll=0 omem=0 tot-mem=* events=r cmd=client|list user=* redir=-1 resp=*} $client_list
+        } else {
+            assert_match {id=* addr=*:* laddr=*:* fd=* name=* age=* idle=* flags=N db=* sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=0 qbuf-free=* argv-mem=* multi-mem=0 rbs=* rbp=* obl=0 oll=0 omem=0 tot-mem=* events=r cmd=client|list user=* redir=-1 resp=*} $client_list
+        }
+    }
 
     test {CLIENT LIST with IDs} {
         set myid [r client id]
@@ -16,8 +21,13 @@ start_server {tags {"introspection"}} {
     }
 
     test {CLIENT INFO} {
-        r client info
-    } {id=* addr=*:* laddr=*:* fd=* name=* age=* idle=* flags=N db=* sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=26 qbuf-free=* argv-mem=* multi-mem=0 rbs=* rbp=* obl=0 oll=0 omem=0 tot-mem=* events=r cmd=client|info user=* redir=-1 resp=*}
+        set client [r client info]
+        if {[lindex [r config get io-threads] 1] == 1} {
+            assert_match {id=* addr=*:* laddr=*:* fd=* name=* age=* idle=* flags=N db=* sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=26 qbuf-free=* argv-mem=* multi-mem=0 rbs=* rbp=* obl=0 oll=0 omem=0 tot-mem=* events=r cmd=client|info user=* redir=-1 resp=*} $client
+        } else {
+            assert_match {id=* addr=*:* laddr=*:* fd=* name=* age=* idle=* flags=N db=* sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=0 qbuf-free=* argv-mem=* multi-mem=0 rbs=* rbp=* obl=0 oll=0 omem=0 tot-mem=* events=r cmd=client|info user=* redir=-1 resp=*} $client
+        }
+    } 
 
     test {CLIENT KILL with illegal arguments} {
         assert_error "ERR wrong number of arguments for 'client|kill' command" {r client kill}
@@ -86,6 +96,11 @@ start_server {tags {"introspection"}} {
         assert {$connected_clients >= 3}
         set res [r client kill skipme yes]
         assert {$res == $connected_clients - 1}
+        wait_for_condition 1000 10 {
+            [s connected_clients] eq 1
+        } else {
+            fail "Can't kill all clients except the current one"
+        }
 
         # Kill all clients, including `me`
         set rd3 [redis_deferring_client]
@@ -304,6 +319,9 @@ start_server {tags {"introspection"}} {
         $rd read ; # Discard the OK
         
         $bc blpop mylist 0
+        # make sure the blpop arrives first
+        $bc flush
+        after 100
         wait_for_blocked_clients_count 1
         r lpush mylist 1
         wait_for_blocked_clients_count 0
@@ -904,3 +922,62 @@ test {CONFIG REWRITE handles alias config properly} {
         assert_equal [r config get hash-max-listpack-entries] {hash-max-listpack-entries 100}
     }
 } {} {external:skip}
+
+test {IO threads client number} {
+    start_server {overrides {io-threads 2} tags {external:skip}} {
+        set iothread_clients [get_io_thread_clients 1]
+        assert_equal $iothread_clients [s connected_clients]
+        assert_equal [get_io_thread_clients 0] 0
+
+        r script debug yes ; # Transfer to main thread
+        assert_equal [get_io_thread_clients 0] 1
+        assert_equal [get_io_thread_clients 1] [expr $iothread_clients - 1]
+
+        set iothread_clients [get_io_thread_clients 1]
+        set rd1 [redis_deferring_client]
+        set rd2 [redis_deferring_client]
+        assert_equal [get_io_thread_clients 1] [expr $iothread_clients + 2]
+        $rd1 close
+        $rd2 close
+        wait_for_condition 1000 10 {
+            [get_io_thread_clients 1] eq $iothread_clients
+        } else {
+            fail "Fail to close clients of io thread 1"
+        }
+        assert_equal [get_io_thread_clients 0] 1
+
+        r script debug no ; # Transfer to io thread
+        assert_equal [get_io_thread_clients 0] 0
+        assert_equal [get_io_thread_clients 1] [expr $iothread_clients + 1]
+    }
+}
+
+test {Clients are evenly distributed among io threads} {
+    start_server {overrides {io-threads 4} tags {external:skip}} {
+        set cur_clients [s connected_clients]
+        assert_equal $cur_clients 1
+        global rdclients
+        for {set i 1} {$i < 9} {incr i} {
+            set rdclients($i) [redis_deferring_client]
+        }
+        for {set i 1} {$i <= 3} {incr i} {
+            assert_equal [get_io_thread_clients $i] 3
+        }
+
+        $rdclients(3) close
+        $rdclients(4) close
+        wait_for_condition 1000 10 {
+            [get_io_thread_clients 1] eq 2 &&
+            [get_io_thread_clients 2] eq 2 &&
+            [get_io_thread_clients 3] eq 3
+        } else {
+            fail "Fail to close clients"
+        }
+
+        set  $rdclients(3) [redis_deferring_client]
+        set  $rdclients(4) [redis_deferring_client]
+        for {set i 1} {$i <= 3} {incr i} {
+            assert_equal [get_io_thread_clients $i] 3
+        }
+    }
+}

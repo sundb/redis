@@ -1100,6 +1100,11 @@ foreach {pop} {BLPOP BLMPOP_LEFT} {
         $watching_client get somekey{t}
         $watching_client read
         $watching_client exec
+        wait_for_condition 100 10 {
+            [regexp {cmd=exec} [r client list]] eq 1
+        } else {
+            fail "exec did not arrive"
+        }
         # Blocked BLPOPLPUSH may create problems, unblock it.
         r lpush srclist{t} element
         set res [$watching_client read]

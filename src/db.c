@@ -1256,7 +1256,7 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
      * The exception to the above is ZSET, where we do allocate temporary
      * strings even when scanning a dict. */
     if (o && (!ht || o->type == OBJ_ZSET)) {
-        listSetFreeMethod(keys, (void (*)(void*))sdsfree);
+        listSetFreeMethod(keys, sdsfreegeneric);
     }
 
     /* For main dictionary scan or data structure using hashtable. */

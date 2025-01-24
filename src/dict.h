@@ -53,15 +53,19 @@ typedef struct dictType {
     /* Flags */
     /* The 'no_value' flag, if set, indicates that values are not used, i.e. the
      * dict is a set. When this flag is set, it's not possible to access the
-     * value of a dictEntry and it's also impossible to use dictSetKey(). Entry
-     * metadata can also not be used. */
+     * value of a dictEntry and it's also impossible to use dictSetKey(). It 
+     * enables an optimization to store a key directly without an allocating 
+     * dictEntry in between, if it is the only key in the bucket. */
     unsigned int no_value:1;
-    /* If no_value = 1 and all keys are odd (LSB=1), setting keys_are_odd = 1
-     * enables one more optimization: to store a key without an allocated
-     * dictEntry. */
+    /* This flag is required for `no_value` optimization since the optimization
+     * reuses LSB bits as metadata */ 
     unsigned int keys_are_odd:1;
     /* TODO: Add a 'keys_are_even' flag and use a similar optimization if that
      * flag is set. */
+
+    /* Ensures that the entire hash table is rehashed at once if set. */
+    unsigned int force_full_rehash:1;
+
     /* Sometimes we want the ability to store a key in a given way inside the hash
      * function, and lookup it in some other way without resorting to any kind of
      * conversion. For instance the key may be stored as a structure also
@@ -196,6 +200,7 @@ int dictTryExpand(dict *d, unsigned long size);
 int dictShrink(dict *d, unsigned long size);
 int dictAdd(dict *d, void *key, void *val);
 dictEntry *dictAddRaw(dict *d, void *key, dictEntry **existing);
+dictEntry *dictAddNonExistsByHash(dict *d, void *key, const uint64_t hash);
 void *dictFindPositionForInsert(dict *d, const void *key, dictEntry **existing);
 dictEntry *dictInsertAtPosition(dict *d, void *key, void *position);
 dictEntry *dictAddOrFind(dict *d, void *key);
@@ -207,6 +212,8 @@ dictEntry *dictTwoPhaseUnlinkFind(dict *d, const void *key, dictEntry ***plink, 
 void dictTwoPhaseUnlinkFree(dict *d, dictEntry *he, dictEntry **plink, int table_index);
 void dictRelease(dict *d);
 dictEntry * dictFind(dict *d, const void *key);
+dictEntry *dictFindByHash(dict *d, const void *key, const uint64_t hash);
+dictEntry *dictFindByHashAndPtr(dict *d, const void *oldptr, const uint64_t hash);
 void *dictFetchValue(dict *d, const void *key);
 int dictShrinkIfNeeded(dict *d);
 int dictExpandIfNeeded(dict *d);
@@ -249,7 +256,6 @@ uint8_t *dictGetHashFunctionSeed(void);
 unsigned long dictScan(dict *d, unsigned long v, dictScanFunction *fn, void *privdata);
 unsigned long dictScanDefrag(dict *d, unsigned long v, dictScanFunction *fn, dictDefragFunctions *defragfns, void *privdata);
 uint64_t dictGetHash(dict *d, const void *key);
-dictEntry *dictFindEntryByPtrAndHash(dict *d, const void *oldptr, uint64_t hash);
 void dictRehashingInfo(dict *d, unsigned long long *from_size, unsigned long long *to_size);
 
 size_t dictGetStatsMsg(char *buf, size_t bufsize, dictStats *stats, int full);

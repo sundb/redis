@@ -420,7 +420,10 @@ run_solo {defrag} {
                 $rd_pubsub read ; # Discard subscribe replies
                 $rd_pubsub ssubscribe $channel_name
                 $rd_pubsub read ; # Discard ssubscribe replies
-                $rd set k$j $channel_name
+                # Pub/Sub clients are handled in the main thread, so their memory is
+                # allocated there. Using the SETBIT command avoids the main thread
+                # referencing argv from IO threads.
+                $rd setbit k$j [expr {[string length $channel_name] * 8}] 1
                 $rd read ; # Discard set replies
             }
 
@@ -580,6 +583,123 @@ run_solo {defrag} {
                     puts "frag_bytes [s allocator_frag_bytes]"
                 }
                 assert_lessthan_equal [s allocator_frag_ratio] 1.5
+            }
+        }
+
+        test "Active defrag for argv retained by the main thread from IO thread: $type" {
+            r flushdb
+            r config set hz 100
+            r config set activedefrag no
+            wait_for_defrag_stop 500 100
+            r config resetstat
+            set io_threads [lindex [r config get io-threads] 1]
+            if {$io_threads == 1} {
+                r config set active-defrag-threshold-lower 5
+            } else {
+                r config set active-defrag-threshold-lower 10
+            }
+            r config set active-defrag-cycle-min 65
+            r config set active-defrag-cycle-max 75
+            r config set active-defrag-ignore-bytes 1000kb
+            r config set maxmemory 0
+
+            # Create some clients so that they are distributed among different io threads.
+            set clients {}
+            for {set i 0} {$i < 8} {incr i} {
+                lappend clients [redis_client]
+            }
+
+            # Populate memory with interleaving key pattern of same size
+            set dummy "[string repeat x 400]"
+            set n 10000
+            for {set i 0} {$i < [llength $clients]} {incr i} {
+                set rr [lindex $clients $i]
+                for {set j 0} {$j < $n} {incr j} {
+                    $rr set "k$i-$j" $dummy
+                }
+            }
+
+            # If io-threads is enable, verify that memory allocation is not from the main thread.
+            if {$io_threads != 1} {
+                # At least make sure that bin 448 is created in the main thread's arena.
+                r set k dummy
+                r del k
+
+                # We created 10000 string keys of 400 bytes each for each client, so when the memory
+                # allocation for the 448 bin in the main thread is significantly smaller than this,
+                # we can conclude that the memory allocation is not coming from it.
+                set malloc_stats [r memory malloc-stats]
+                if {[regexp {(?s)arenas\[0\]:.*?448[ ]+[\d]+[ ]+([\d]+)[ ]} $malloc_stats - allocated]} {
+                    # Ensure the allocation for bin 448 in the main thread’s arena
+                    # is far less than 4375k (10000 * 448 bytes).
+                    assert_lessthan $allocated 200000
+                } else {
+                    fail "Failed to get the main thread's malloc stats."
+                }
+            }
+
+            after 120 ;# serverCron only updates the info once in 100ms
+            if {$::verbose} {
+                puts "used [s allocator_allocated]"
+                puts "rss [s allocator_active]"
+                puts "frag [s allocator_frag_ratio]"
+                puts "frag_bytes [s allocator_frag_bytes]"
+            }
+            assert_lessthan [s allocator_frag_ratio] 1.05
+
+            # Delete keys with even indices to create fragmentation.
+            for {set i 0} {$i < [llength $clients]} {incr i} {
+                set rd [lindex $clients $i]
+                for {set j 0} {$j < $n} {incr j 2} {
+                    $rd del "k$i-$j"
+                }
+            }
+            for {set i 0} {$i < [llength $clients]} {incr i} {
+                [lindex $clients $i] close
+            }
+
+            after 120 ;# serverCron only updates the info once in 100ms
+            if {$::verbose} {
+                puts "used [s allocator_allocated]"
+                puts "rss [s allocator_active]"
+                puts "frag [s allocator_frag_ratio]"
+                puts "frag_bytes [s allocator_frag_bytes]"
+            }
+            assert_morethan [s allocator_frag_ratio] 1.4
+
+            catch {r config set activedefrag yes} e
+            if {[r config get activedefrag] eq "activedefrag yes"} {
+            
+                # wait for the active defrag to start working (decision once a second)
+                wait_for_condition 50 100 {
+                    [s total_active_defrag_time] ne 0
+                } else {
+                    after 120 ;# serverCron only updates the info once in 100ms
+                    puts [r info memory]
+                    puts [r info stats]
+                    puts [r memory malloc-stats]
+                    fail "defrag not started."
+                }
+
+                # wait for the active defrag to stop working
+                wait_for_defrag_stop 500 100
+
+                # test the fragmentation is lower
+                after 120 ;# serverCron only updates the info once in 100ms
+                if {$::verbose} {
+                    puts "used [s allocator_allocated]"
+                    puts "rss [s allocator_active]"
+                    puts "frag [s allocator_frag_ratio]"
+                    puts "frag_bytes [s allocator_frag_bytes]"
+                }
+
+                if {$io_threads == 1} {
+                    assert_lessthan_equal [s allocator_frag_ratio] 1.05
+                } else {
+                    # TODO: When multithreading is enabled, argv may be created in the io thread
+                    # and kept in the main thread, which can cause fragmentation to become worse.
+                    assert_lessthan_equal [s allocator_frag_ratio] 1.1
+                }
             }
         }
 

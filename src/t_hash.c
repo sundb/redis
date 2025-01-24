@@ -966,27 +966,25 @@ int hashTypeSet(redisDb *db, robj *o, sds field, sds value, int flags) {
             hashTypeConvert(o, OBJ_ENCODING_HT, &db->hexpires);
 
     } else if (o->encoding == OBJ_ENCODING_HT) {
-        hfield newField = hfieldNew(field, sdslen(field), 0);
         dict *ht = o->ptr;
         dictEntry *de, *existing;
-
-        /* stored key is different than lookup key */
-        dictUseStoredKeyApi(ht, 1);
-        de = dictAddRaw(ht, newField, &existing);
-        dictUseStoredKeyApi(ht, 0);
-
-        /* If field already exists, then update "field". "Value" will be set afterward */
-        if (de == NULL) {
-            if (flags & HASH_SET_KEEP_TTL) {
-                /* keep old field along with TTL */
-                hfieldFree(newField);
-            } else {
-                /* If attached TTL to the old field, then remove it from hash's private ebuckets */
+        const uint64_t hash = dictGetHash(ht,field);
+        /* check if field already exists */
+        existing = dictFindByHash(ht, field, hash);
+        /* check if field already exists */
+        if (existing == NULL) {
+            hfield newField = hfieldNew(field, sdslen(field), 0);
+            dictUseStoredKeyApi(ht, 1);
+            de = dictAddNonExistsByHash(ht, newField, hash);
+            dictUseStoredKeyApi(ht, 0);
+        } else {
+            /* If attached TTL to the old field, then remove it from hash's
+             * private ebuckets when HASH_SET_KEEP_TTL is not set. */
+            if (!(flags & HASH_SET_KEEP_TTL)) {
                 hfield oldField = dictGetKey(existing);
                 hfieldPersist(o, oldField);
-                hfieldFree(oldField);
-                dictSetKey(ht, existing, newField);
             }
+            /* Free the old value */
             sdsfree(dictGetVal(existing));
             update = 1;
             de = existing;

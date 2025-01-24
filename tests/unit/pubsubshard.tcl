@@ -46,6 +46,11 @@ start_server {tags {"pubsubshard external:skip"}} {
         assert_equal {2} [ssubscribe $rd1 {chan2}]
         assert_equal {3} [ssubscribe $rd1 {chan3}]
         sunsubscribe $rd1
+        wait_for_condition 100 10 {
+            [regexp {cmd=sunsubscribe} [r client list]] eq 1
+        } else {
+            fail "sunsubscribe did not arrive"
+        }
         assert_equal 0 [r SPUBLISH chan1 hello]
         assert_equal 0 [r SPUBLISH chan2 hello]
         assert_equal 0 [r SPUBLISH chan3 hello]

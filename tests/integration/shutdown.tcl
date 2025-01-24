@@ -156,6 +156,11 @@ test "Shutting down master waits for replica then fails" {
             set rd2 [redis_deferring_client -1]
             $rd1 shutdown
             $rd2 shutdown
+            wait_for_condition 100 10 {
+                [llength [regexp -all -inline {cmd=shutdown} [$master client list]]] eq 2
+            } else {
+                fail "shutdown did not arrive"
+            }
             set info_clients [$master info clients]
             assert_match "*connected_clients:3*" $info_clients
             assert_match "*blocked_clients:2*" $info_clients
@@ -209,6 +214,11 @@ test "Shutting down master waits for replica then aborted" {
             set rd2 [redis_deferring_client -1]
             $rd1 shutdown
             $rd2 shutdown
+            wait_for_condition 100 10 {
+                [llength [regexp -all -inline {cmd=shutdown} [$master client list]]] eq 2
+            } else {
+                fail "shutdown did not arrive"
+            }
             set info_clients [$master info clients]
             assert_match "*connected_clients:3*" $info_clients
             assert_match "*blocked_clients:2*" $info_clients

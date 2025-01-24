@@ -85,6 +85,11 @@ start_server {tags {"pubsub network"}} {
         set rd1 [redis_deferring_client]
         assert_equal {1 2 3} [subscribe $rd1 {chan1 chan2 chan3}]
         unsubscribe $rd1
+        wait_for_condition 100 10 {
+            [regexp {cmd=unsubscribe} [r client list]] eq 1
+        } else {
+            fail "unsubscribe did not arrive"
+        }
         assert_equal 0 [r publish chan1 hello]
         assert_equal 0 [r publish chan2 hello]
         assert_equal 0 [r publish chan3 hello]
@@ -158,6 +163,11 @@ start_server {tags {"pubsub network"}} {
         set rd1 [redis_deferring_client]
         assert_equal {1 2 3} [psubscribe $rd1 {chan1.* chan2.* chan3.*}]
         punsubscribe $rd1
+        wait_for_condition 100 10 {
+            [regexp {cmd=punsubscribe} [r client list]] eq 1
+        } else {
+            fail "punsubscribe did not arrive"
+        }
         assert_equal 0 [r publish chan1.hi hello]
         assert_equal 0 [r publish chan2.hi hello]
         assert_equal 0 [r publish chan3.hi hello]

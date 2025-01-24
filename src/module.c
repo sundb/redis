@@ -664,7 +664,7 @@ void moduleReleaseTempClient(client *c) {
     c->bufpos = 0;
     c->flags = CLIENT_MODULE;
     c->user = NULL; /* Root user */
-    c->cmd = c->lastcmd = c->realcmd = NULL;
+    c->cmd = c->lastcmd = c->realcmd = c->iolookedcmd = NULL;
     if (c->bstate.async_rm_call_handle) {
         RedisModuleAsyncRMCallPromise *promise = c->bstate.async_rm_call_handle;
         promise->c = NULL; /* Remove the client from the promise so it will no longer be possible to abort it. */
@@ -1276,8 +1276,11 @@ int RM_CreateCommand(RedisModuleCtx *ctx, const char *name, RedisModuleCmdFunc c
     RedisModuleCommand *cp = moduleCreateCommandProxy(ctx->module, declared_name, sdsdup(declared_name), cmdfunc, flags, firstkey, lastkey, keystep);
     cp->rediscmd->arity = cmdfunc ? -1 : -2; /* Default value, can be changed later via dedicated API */
 
+    pauseAllIOThreads();
     serverAssert(dictAdd(server.commands, sdsdup(declared_name), cp->rediscmd) == DICT_OK);
     serverAssert(dictAdd(server.orig_commands, sdsdup(declared_name), cp->rediscmd) == DICT_OK);
+    resumeAllIOThreads();
+
     cp->rediscmd->id = ACLGetCommandID(declared_name); /* ID used for ACL. */
     return REDISMODULE_OK;
 }
@@ -10554,7 +10557,7 @@ RedisModuleServerInfoData *RM_GetServerInfo(RedisModuleCtx *ctx, const char *sec
  * context instead of passing NULL. */
 void RM_FreeServerInfo(RedisModuleCtx *ctx, RedisModuleServerInfoData *data) {
     if (ctx != NULL) autoMemoryFreed(ctx,REDISMODULE_AM_INFO,data);
-    raxFreeWithCallback(data->rax, (void(*)(void*))sdsfree);
+    raxFreeWithCallback(data->rax, sdsfreegeneric);
     zfree(data);
 }
 
@@ -10904,6 +10907,10 @@ void moduleCallCommandFilters(client *c) {
         /* Call filter */
         f->callback(&filter);
     }
+
+    /* If the filter sets a new command, including command or subcommand,
+     * the command looked up in IO threads will be invalid. */
+    c->iolookedcmd = NULL;
 
     c->argv = filter.argv;
     c->argv_len = filter.argv_len;
@@ -12321,6 +12328,7 @@ int moduleFreeCommand(struct RedisModule *module, struct redisCommand *cmd) {
 }
 
 void moduleUnregisterCommands(struct RedisModule *module) {
+    pauseAllIOThreads();
     /* Unregister all the commands registered by this module. */
     dictIterator *di = dictGetSafeIterator(server.commands);
     dictEntry *de;
@@ -12335,6 +12343,7 @@ void moduleUnregisterCommands(struct RedisModule *module) {
         zfree(cmd);
     }
     dictReleaseIterator(di);
+    resumeAllIOThreads();
 }
 
 /* We parse argv to add sds "NAME VALUE" pairs to the server.module_configs_queue list of configs.

@@ -50,7 +50,20 @@ start_server {tags {"modules acl"}} {
         catch {r aclcheck.set.check.prefixkey "~" ESCAPED_STAR* ESCAPED_STAR* 5} e
         assert_match "*DENIED KEY*" $e        
         assert_equal [r aclcheck.set.check.prefixkey "~" NON_ESCAPED_STAR\\ NON_ESCAPED_STAR\\clothes 5] OK
-    }    
+    }
+    
+    test {check ACL permissions versus empty string prefix} {
+        # The empty string should should match all keys permissions
+        r acl setuser default +set resetkeys %R~* %W~* ~*
+        assert_equal [r aclcheck.set.check.prefixkey "~" "" CART_BOOKS_12 5] OK
+        assert_equal [r aclcheck.set.check.prefixkey "W" "" ORDER_2024_564879 5] OK
+        assert_equal [r aclcheck.set.check.prefixkey "R" "" PRODUCT_BOOKS_753376 5] OK
+        
+        # The empty string prefix should not match if cannot access all keys 
+        r acl setuser default +set resetkeys %R~x* %W~x* ~x*
+        catch {r aclcheck.set.check.prefixkey "~" "" CART_BOOKS_12 5} e
+        assert_match "*DENIED KEY*" $e
+    }
 
     test {test module check acl for key perm} {
         # give permission for SET and block all keys but x(READ+WRITE), y(WRITE), z(READ)

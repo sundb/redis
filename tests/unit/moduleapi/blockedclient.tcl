@@ -130,7 +130,12 @@ foreach call_type {nested normal} {
         $rd flush
 
         # make sure we get BUSY error, and that we didn't get it too early
-        assert_error {*BUSY Slow module operation*} {r ping}
+        wait_for_condition 50 100 {
+            ([catch {r ping} reply] == 1) &&
+            ([string match {*BUSY Slow module operation*} $reply])
+        } else {
+            fail "Failed waiting for busy slow response"
+        }
         assert_morethan_equal [expr [clock clicks -milliseconds]-$start] $busy_time_limit
 
         # abort the blocking operation

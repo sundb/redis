@@ -253,6 +253,7 @@ void trackingRememberKeys(client *tracking, client *executing) {
  * - Following a flush command, to send a single RESP NULL to indicate
  *   that all keys are now invalid. */
 void sendTrackingMessage(client *c, char *keyname, size_t keylen, int proto) {
+    int paused = 0;
     uint64_t old_flags = c->flags;
     c->flags |= CLIENT_PUSHING;
 
@@ -275,6 +276,11 @@ void sendTrackingMessage(client *c, char *keyname, size_t keylen, int proto) {
         if (!(old_flags & CLIENT_PUSHING)) c->flags &= ~CLIENT_PUSHING;
         c = redir;
         using_redirection = 1;
+        /* Start to touch another client data. */
+        if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
+            pauseIOThread(c->running_tid);
+            paused = 1;
+        }
         old_flags = c->flags;
         c->flags |= CLIENT_PUSHING;
     }
@@ -296,7 +302,7 @@ void sendTrackingMessage(client *c, char *keyname, size_t keylen, int proto) {
          * it since RESP2 does not support push messages in the same
          * connection. */
         if (!(old_flags & CLIENT_PUSHING)) c->flags &= ~CLIENT_PUSHING;
-        return;
+        goto done;
     }
 
     /* Send the "value" part, which is the array of keys. */
@@ -308,6 +314,17 @@ void sendTrackingMessage(client *c, char *keyname, size_t keylen, int proto) {
     }
     updateClientMemUsageAndBucket(c);
     if (!(old_flags & CLIENT_PUSHING)) c->flags &= ~CLIENT_PUSHING;
+
+done:
+    if (paused) {
+        if (clientHasPendingReplies(c)) {
+            serverAssert(!(c->flags & CLIENT_PENDING_WRITE));
+            /* Actually we install write handler of client which is in IO thread
+             * event loop, it is safe since the io thread is paused */
+            connSetWriteHandler(c->conn, sendReplyToClient);
+        }
+        resumeIOThread(c->running_tid);
+    }
 }
 
 /* This function is called when a key is modified in Redis and in the case

@@ -109,23 +109,23 @@ static int stringmatchlen_impl(const char *pattern, int patternLen,
 
             pattern++;
             patternLen--;
-            not = pattern[0] == '^';
+            not = patternLen && pattern[0] == '^';
             if (not) {
                 pattern++;
                 patternLen--;
             }
             match = 0;
             while(1) {
-                if (pattern[0] == '\\' && patternLen >= 2) {
+                if (patternLen >= 2 && pattern[0] == '\\') {
                     pattern++;
                     patternLen--;
                     if (pattern[0] == string[0])
                         match = 1;
-                } else if (pattern[0] == ']') {
-                    break;
                 } else if (patternLen == 0) {
                     pattern--;
                     patternLen++;
+                    break;
+                } else if (pattern[0] == ']') {
                     break;
                 } else if (patternLen >= 3 && pattern[1] == '-') {
                     int start = pattern[0];
@@ -186,7 +186,7 @@ static int stringmatchlen_impl(const char *pattern, int patternLen,
         pattern++;
         patternLen--;
         if (stringLen == 0) {
-            while(*pattern == '*') {
+            while(patternLen && *pattern == '*') {
                 pattern++;
                 patternLen--;
             }
@@ -217,7 +217,7 @@ int prefixmatch(const char *pattern, int patternLen,
      * it can match any suffix of the string beyond the prefix. This check
      * remains outside stringmatchlen_impl() to keep its complexity manageable.
      */
-    if (pattern[patternLen - 1] != '*' || patternLen == 0)
+    if (patternLen == 0 || pattern[patternLen - 1] != '*' )
         return 0;
 
     /* Count backward the number of consecutive backslashes preceding the '*'

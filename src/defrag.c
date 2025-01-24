@@ -14,6 +14,7 @@
 
 #include "server.h"
 #include <stddef.h>
+#include <math.h>
 
 #ifdef HAVE_DEFRAG
 
@@ -296,7 +297,7 @@ void activeDefragHfieldDictCallback(void *privdata, const dictEntry *de) {
         dictUseStoredKeyApi(d, 1);
         uint64_t hash = dictGetHash(d, newhf);
         dictUseStoredKeyApi(d, 0);
-        dictEntry *de = dictFindEntryByPtrAndHash(d, hf, hash);
+        dictEntry *de = dictFindByHashAndPtr(d, hf, hash);
         serverAssert(de);
         dictSetKey(d, de, newhf);
     }
@@ -753,7 +754,7 @@ void defragKey(defragCtx *ctx, dictEntry *de) {
              * the pointer it holds, since it won't be able to do the string
              * compare, but we can find the entry using key hash and pointer. */
             uint64_t hash = kvstoreGetHash(db->expires, newsds);
-            dictEntry *expire_de = kvstoreDictFindEntryByPtrAndHash(db->expires, slot, keysds, hash);
+            dictEntry *expire_de = kvstoreDictFindByHashAndPtr(db->expires, slot, keysds, hash);
             if (expire_de) kvstoreDictSetKey(db->expires, slot, expire_de, newsds);
         }
 
@@ -1024,7 +1025,7 @@ int defragLaterStep(redisDb *db, int slot, long long endtime) {
 #define LIMIT(y, min, max) ((y)<(min)? min: ((y)>(max)? max: (y)))
 
 /* decide if defrag is needed, and at what CPU effort to invest in it */
-void computeDefragCycles(void) {
+void computeDefragCycles(float decay_rate) {
     size_t frag_bytes;
     float frag_pct = getAllocatorFragmentation(&frag_bytes);
     /* If we're not already running, and below the threshold, exit. */
@@ -1040,6 +1041,7 @@ void computeDefragCycles(void) {
             server.active_defrag_threshold_upper,
             server.active_defrag_cycle_min,
             server.active_defrag_cycle_max);
+    cpu_pct *= decay_rate;
     cpu_pct = LIMIT(cpu_pct,
             server.active_defrag_cycle_min,
             server.active_defrag_cycle_max);
@@ -1068,7 +1070,9 @@ void activeDefragCycle(void) {
     static int defrag_stage = 0;
     static unsigned long defrag_cursor = 0;
     static redisDb *db = NULL;
-    static long long start_scan, start_stat;
+    static long long start_scan, start_hits, start_misses;
+    static float start_frag_pct;
+    static float decay_rate = 1.0f;
     unsigned int iterations = 0;
     unsigned long long prev_defragged = server.stat_active_defrag_hits;
     unsigned long long prev_scanned = server.stat_active_defrag_scanned;
@@ -1104,13 +1108,13 @@ void activeDefragCycle(void) {
     /* Once a second, check if the fragmentation justfies starting a scan
      * or making it more aggressive. */
     run_with_period(1000) {
-        computeDefragCycles();
+        computeDefragCycles(decay_rate);
     }
 
     /* Normally it is checked once a second, but when there is a configuration
      * change, we want to check it as soon as possible. */
     if (server.active_defrag_configuration_changed) {
-        computeDefragCycles();
+        computeDefragCycles(decay_rate);
         server.active_defrag_configuration_changed = 0;
     }
 
@@ -1148,7 +1152,7 @@ void activeDefragCycle(void) {
                 float frag_pct = getAllocatorFragmentation(&frag_bytes);
                 serverLog(LL_VERBOSE,
                     "Active defrag done in %dms, reallocated=%d, frag=%.0f%%, frag_bytes=%zu",
-                    (int)((now - start_scan)/1000), (int)(server.stat_active_defrag_hits - start_stat), frag_pct, frag_bytes);
+                    (int)((now - start_scan)/1000), (int)(server.stat_active_defrag_hits - start_hits), frag_pct, frag_bytes);
 
                 start_scan = now;
                 current_db = -1;
@@ -1159,9 +1163,26 @@ void activeDefragCycle(void) {
                 db = NULL;
                 server.active_defrag_running = 0;
 
+                long long last_hits = server.stat_active_defrag_hits - start_hits;
+                long long last_misses = server.stat_active_defrag_misses - start_misses;
+                float last_frag_pct_change = start_frag_pct - frag_pct;
+                /* When defragmentation efficiency is low, we gradually reduce the
+                 * speed for the next cycle to avoid CPU waste. However, in the
+                 * following two cases, we keep the normal speed:
+                 * 1) If the fragmentation percentage has increased or decreased by more than 2%.
+                 * 2) If the fragmentation percentage decrease is small, but hits are above 1%,
+                 *    we still keep the normal speed. */
+                if (fabs(last_frag_pct_change) > 2 ||
+                    (last_frag_pct_change < 0 && last_hits >= (last_hits + last_misses) * 0.01))
+                {
+                    decay_rate = 1.0f;
+                } else {
+                    decay_rate *= 0.9;
+                }
+
                 moduleDefragEnd();
 
-                computeDefragCycles(); /* if another scan is needed, start it right away */
+                computeDefragCycles(decay_rate); /* if another scan is needed, start it right away */
                 if (server.active_defrag_running != 0 && ustime() < endtime)
                     continue;
                 break;
@@ -1169,7 +1190,9 @@ void activeDefragCycle(void) {
             else if (current_db==0) {
                 /* Start a scan from the first database. */
                 start_scan = ustime();
-                start_stat = server.stat_active_defrag_hits;
+                start_hits = server.stat_active_defrag_hits;
+                start_misses = server.stat_active_defrag_misses;
+                start_frag_pct = getAllocatorFragmentation(NULL);
             }
 
             db = &server.db[current_db];
