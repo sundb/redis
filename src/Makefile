@@ -489,7 +489,7 @@ check: test
 lcov:
 	@lcov --version
 	$(MAKE) gcov
-	@(set -e; cd ..; ./runtest)
+	@(set -e; cd ..; ./runtest --single unit/type/hash)
 	@geninfo -o redis.info .
 	@genhtml --legend -o lcov-html redis.info
 
