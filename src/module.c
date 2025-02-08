@@ -296,6 +296,8 @@ typedef int (*RedisModuleNotificationFunc) (RedisModuleCtx *ctx, int type, const
 /* Function pointer type for post jobs */
 typedef void (*RedisModulePostNotificationJobFunc) (RedisModuleCtx *ctx, void *pd);
 
+typedef void *(*RedisModuleDictDefragFunc)(RedisModuleDefragCtx *ctx, void *ptr, void *privdata);
+
 /* Keyspace notification subscriber information.
  * See RM_SubscribeToKeyspaceEvents() for more information. */
 typedef struct RedisModuleKeyspaceSubscriber {
@@ -13889,6 +13891,44 @@ RedisModuleString *RM_DefragRedisModuleString(RedisModuleDefragCtx *ctx, RedisMo
     return activeDefragStringOb(str);
 }
 
+int moduleDefragRaxNode(raxNode **noderef) {
+    raxNode *newnode = activeDefragAlloc(*noderef);
+    if (newnode) {
+        *noderef = newnode;
+        return 1;
+    }
+    return 0;
+}
+
+/* */
+RedisModuleDict *RM_DefragRedisModuleDict(RedisModuleDefragCtx *ctx, RedisModuleDict *d, RedisModuleDictDefragFunc defragfn, void *privdate) {
+    UNUSED(ctx);
+
+    RedisModuleDict *ret = NULL;
+    if ((ret = activeDefragAlloc(d)))
+        d = ret;
+
+    raxIterator ri;
+    rax* newrax;
+    if ((newrax = activeDefragAlloc(d->rax)))
+        d->rax = newrax;
+    newrax = d->rax;
+
+    raxStart(&ri,newrax);
+    ri.node_cb = moduleDefragRaxNode;
+    moduleDefragRaxNode(&newrax->head);
+    raxSeek(&ri,"^",NULL,0);
+    while (raxNext(&ri)) {
+        void *newdata = NULL;
+        if (defragfn)
+            newdata = defragfn(ctx, d, privdate);
+        if (newdata)
+            raxSetData(ri.node, ri.data=newdata);
+    }
+    raxStop(&ri);
+
+    return ret;
+}
 
 /* Perform a late defrag of a module datatype key.
  *
@@ -14347,6 +14387,7 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(DefragAllocRaw);
     REGISTER_API(DefragFreeRaw);
     REGISTER_API(DefragRedisModuleString);
+    REGISTER_API(DefragRedisModuleDict);
     REGISTER_API(DefragShouldStop);
     REGISTER_API(DefragCursorSet);
     REGISTER_API(DefragCursorGet);

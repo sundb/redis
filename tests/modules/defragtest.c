@@ -28,6 +28,8 @@ unsigned long int global_defragged = 0;
 
 int global_strings_len = 0;
 RedisModuleString **global_strings = NULL;
+int global_dicts_len = 0;
+RedisModuleDict **global_dicts = NULL;
 
 static void createGlobalStrings(RedisModuleCtx *ctx, int count)
 {
@@ -36,6 +38,15 @@ static void createGlobalStrings(RedisModuleCtx *ctx, int count)
 
     for (int i = 0; i < count; i++) {
         global_strings[i] = RedisModule_CreateStringFromLongLong(ctx, i);
+    }
+}
+
+static void createGlobalDicts(RedisModuleCtx *ctx, int count) {
+    global_dicts_len = count;
+    global_dicts = RedisModule_Alloc(sizeof(RedisModuleDict *) * count);
+
+    for (int i = 0; i < count; i++) {
+        global_dicts[i] = RedisModule_CreateDict(ctx);
     }
 }
 
@@ -49,6 +60,23 @@ static void defragGlobalStrings(RedisModuleDefragCtx *ctx)
             global_defragged++;
         }
     }
+}
+
+static void defragGlobalDicts(RedisModuleDefragCtx *ctx)
+{
+    for (int i = 0; i < global_dicts_len; i++) {
+        RedisModuleDict *new = RedisModule_DefragRedisModuleDict(ctx, global_dicts[i]);
+        global_attempts++;
+        if (new != NULL) {
+            global_dicts[i] = new;
+            global_defragged++;
+        }
+    }
+}
+
+static void defragGlobal(RedisModuleDefragCtx *ctx) {
+    defragGlobalStrings(ctx);
+    defragGlobalDicts(ctx);
 }
 
 static void defragStart(RedisModuleDefragCtx *ctx) {
@@ -238,6 +266,7 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
     }
 
     createGlobalStrings(ctx, glen);
+    createGlobalDicts(ctx, glen);
 
     RedisModuleTypeMethods tm = {
             .version = REDISMODULE_TYPE_METHOD_VERSION,
@@ -258,7 +287,7 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
         return REDISMODULE_ERR;
 
     RedisModule_RegisterInfoFunc(ctx, FragInfo);
-    RedisModule_RegisterDefragFunc(ctx, defragGlobalStrings);
+    RedisModule_RegisterDefragFunc(ctx, defragGlobal);
     RedisModule_RegisterDefragCallbacks(ctx, defragStart, defragEnd);
 
     return REDISMODULE_OK;
