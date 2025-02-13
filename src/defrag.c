@@ -1213,6 +1213,18 @@ static doneStatus defragStageExpiresKvstore(monotime endtime, void *target, void
         scanCallbackCountScanned, NULL, &defragfns, NULL);
 }
 
+static doneStatus defragStageHFE(monotime endtime, void *target, void *privdata) {
+    UNUSED(privdata);
+    int dbid = (uintptr_t)target;
+    redisDb *db = &server.db[dbid];
+    static dictDefragFunctions defragfns = {
+        .defragAlloc = activeDefragAlloc,
+        .defragKey = NULL, /* Not needed for expires (just a ref) */
+        .defragVal = NULL, /* Not needed for expires (no value) */
+    };
+    return defragStageKvstoreHelper(endtime, db->expires,
+        scanCallbackCountScanned, NULL, &defragfns, NULL);
+}
 
 static doneStatus defragStagePubsubKvstore(monotime endtime, void *target, void *privdata) {
     /* target is server.pubsub_channels or server.pubsubshard_channels */
@@ -1500,6 +1512,7 @@ static void beginDefragCycle(void) {
     for (int dbid = 0; dbid < server.dbnum; dbid++) {
         addDefragStage(defragStageDbKeys, (void *)(uintptr_t)dbid, NULL);
         addDefragStage(defragStageExpiresKvstore, (void *)(uintptr_t)dbid, NULL);
+        addDefragStage(defragStageHFE, (void *)(uintptr_t)dbid, NULL);
     }
 
     static getClientChannelsFnWrapper getClientPubSubChannelsFn = {getClientPubSubChannels};
