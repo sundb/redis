@@ -143,8 +143,8 @@ start_server {tags {"modules"}} {
             r config set hz 100
             r config set activedefrag no
             r config set active-defrag-threshold-lower 5
-            r config set active-defrag-cycle-min 50
-            r config set active-defrag-cycle-max 99
+            r config set active-defrag-cycle-min 25
+            r config set active-defrag-cycle-max 75
             r config set active-defrag-ignore-bytes 100kb
 
             # Populate memory with interleaving field of same size.
@@ -184,7 +184,7 @@ start_server {tags {"modules"}} {
 
                 # The cpu usage of defragment will drop to active-defrag-cycle-min
                 wait_for_condition 1000 50 {
-                    [s active_defrag_running] == 50
+                    [s active_defrag_running] == 25
                 } else {
                     fail "Unable to reduce the defragmentation speed."
                 }
@@ -217,7 +217,7 @@ start_server {tags {"modules"}} {
                     }
 
                     # Wait for defragmentation speed to restore.
-                    if {[s active_defrag_running] > 50} {
+                    if {[s active_defrag_running] > 25} {
                         set speed_restored 1
                         break;
                     }
@@ -226,7 +226,7 @@ start_server {tags {"modules"}} {
 
                 # After the traffic disappears, the defragmentation speed will decrease again.
                 wait_for_condition 1000 50 {
-                    [s active_defrag_running] == 50
+                    [s active_defrag_running] == 25
                 } else {
                     fail "Unable to reduce the defragmentation speed after traffic disappears."
                 } 

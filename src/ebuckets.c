@@ -1868,6 +1868,28 @@ eItem ebDefragItem(ebuckets *eb, EbucketsType *type, eItem item, ebDefragFunctio
     redis_unreachable();
 }
 
+unsigned long ebDefrag(ebuckets *eb, EbucketsType *type, unsigned long cursor, ebDefragFunction1 *defragfn, void *privdata) {
+    UNUSED(cursor);
+    assert(!ebIsEmpty(*eb));
+    if (ebIsList(*eb)) {
+        ExpireMeta *prevem = NULL;
+        eItem curitem = ebGetListPtr(type, *eb);
+        while (curitem != NULL) {
+            if ((curitem = defragfn(curitem, privdata))) {
+                if (prevem)
+                    prevem->next = curitem;
+                else
+                    *eb = ebMarkAsList(curitem);
+            }
+            /* Move to the next item in the list. */
+            prevem = type->getExpireMeta(curitem);
+            curitem = prevem->next;
+        }
+        return 0;
+    }
+    return 0;
+}
+
 /* Retrieves the expiration time associated with the given item. If associated
  * ExpireMeta is marked as trash, then return EB_EXPIRE_TIME_INVALID */
 uint64_t ebGetExpireTime(EbucketsType *type, eItem item) {

@@ -63,7 +63,7 @@ struct DefragContext {
 
     long long timeproc_id;      /* Eventloop ID of the timerproc (or AE_DELETED_EVENT_ID) */
     monotime timeproc_end_time; /* Ending time of previous timerproc execution */
-    long timeproc_overage_us;   /* A correction value if over target CPU percent */
+    // long timeproc_overage_us;   /* A correction value if over target CPU percent */
 };
 static struct DefragContext defrag = {0, 0, 0, 0, 1.0f};
 
@@ -1091,7 +1091,7 @@ void computeDefragCycles(void) {
             serverLog(LL_VERBOSE, "Changing active defrag CPU, frag=%.0f%%, frag_bytes=%zu, cpu=%d%%",
                       frag_pct, frag_bytes, cpu_pct);
         } else {
-            serverLog(LL_VERBOSE,
+            serverLog(LL_NOTICE,
                 "Starting active defrag, frag=%.0f%%, frag_bytes=%zu, cpu=%d%%",
                 frag_pct, frag_bytes, cpu_pct);
         }
@@ -1215,6 +1215,13 @@ static doneStatus defragModuleGlobals(monotime endtime, void *ctx) {
     return DEFRAG_DONE;
 }
 
+static doneStatus defragStageHFE(monotime endtime, void *ctx) {
+    UNUSED(endtime);
+    UNUSED(ctx);
+    // moduleDefragGlobals();
+    return DEFRAG_DONE;
+}
+
 static void addDefragStage(defragStageFn stage_fn, void *ctx) {
     StageDescriptor *stage = zmalloc(sizeof(StageDescriptor));
     stage->stage_fn = stage_fn;
@@ -1278,7 +1285,7 @@ static void endDefragCycle(int normal_termination) {
 
     size_t frag_bytes;
     float frag_pct = getAllocatorFragmentation(&frag_bytes);
-    serverLog(LL_VERBOSE, "Active defrag done in %dms, reallocated=%d, frag=%.0f%%, frag_bytes=%zu",
+    serverLog(LL_NOTICE, "Active defrag done in %dms, reallocated=%d, frag=%.0f%%, frag_bytes=%zu",
               (int)elapsedMs(defrag.start_cycle), (int)(server.stat_active_defrag_hits - defrag.start_defrag_hits),
               frag_pct, frag_bytes);
 
@@ -1301,48 +1308,27 @@ static int computeDefragCycleUs(void) {
     int targetCpuPercent = server.active_defrag_running;
     serverAssert(targetCpuPercent > 0 && targetCpuPercent < 100);
 
-    static int prevCpuPercent = 0; /* STATIC - this persists */
-    if (targetCpuPercent != prevCpuPercent) {
-        /* If the targetCpuPercent changes, the value might be different from when the last wait
-         * time was computed. In this case, don't consider wait time. (This is really only an
-         * issue in crazy tests that dramatically increase CPU while defrag is running.) */
-        defrag.timeproc_end_time = 0;
-        prevCpuPercent = targetCpuPercent;
-    }
+    long waitedUs = getMonotonicUs() - defrag.timeproc_end_time;
+    /* Given the elapsed wait time between calls, compute the necessary duty time needed to
+        * achieve the desired CPU percentage.
+        * With:  D = duty time, W = wait time, P = percent
+        * Solve:    D          P
+        *         -----   =  -----
+        *         D + W       100
+        * Solving for D:
+        *     D = P * W / (100 - P)
+        *
+        * Note that dutyCycleUs addresses starvation. If the wait time was long, we will compensate
+        * with a proportionately long duty-cycle. This won't significantly affect perceived
+        * latency, because clients are already being impacted by the long cycle time which caused
+        * the starvation of the timer. */
+    dutyCycleUs = targetCpuPercent * waitedUs / (100 - targetCpuPercent);
 
-    /* Given when the last duty cycle ended, compute time needed to achieve the desired percentage. */
-    if (defrag.timeproc_end_time == 0) {
-        /* Either the first call to the timeProc, or we were paused for some reason. */
-        defrag.timeproc_overage_us = 0;
+    if (dutyCycleUs > server.active_defrag_cycle_us) {
+        /* If we've been waiting a long time, we may need to adjust the duty cycle. */
         dutyCycleUs = server.active_defrag_cycle_us;
-    } else {
-        long waitedUs = getMonotonicUs() - defrag.timeproc_end_time;
-        /* Given the elapsed wait time between calls, compute the necessary duty time needed to
-         * achieve the desired CPU percentage.
-         * With:  D = duty time, W = wait time, P = percent
-         * Solve:    D          P
-         *         -----   =  -----
-         *         D + W       100
-         * Solving for D:
-         *     D = P * W / (100 - P)
-         *
-         * Note that dutyCycleUs addresses starvation. If the wait time was long, we will compensate
-         * with a proportionately long duty-cycle. This won't significantly affect perceived
-         * latency, because clients are already being impacted by the long cycle time which caused
-         * the starvation of the timer. */
-        dutyCycleUs = targetCpuPercent * waitedUs / (100 - targetCpuPercent);
-
-        /* Also adjust for any accumulated overage. */
-        dutyCycleUs -= defrag.timeproc_overage_us;
-        defrag.timeproc_overage_us = 0;
-
-        if (dutyCycleUs < server.active_defrag_cycle_us) {
-            /* We never reduce our cycle time, that would increase overhead. Instead, we track this
-             * as part of the overage, and increase wait time between cycles. */
-            defrag.timeproc_overage_us = server.active_defrag_cycle_us - dutyCycleUs;
-            dutyCycleUs = server.active_defrag_cycle_us;
-        }
     }
+
     return dutyCycleUs;
 }
 
@@ -1351,10 +1337,6 @@ static int computeDefragCycleUs(void) {
 static int computeDelayMs(monotime intendedEndtime) {
     defrag.timeproc_end_time = getMonotonicUs();
     long overage = defrag.timeproc_end_time - intendedEndtime;
-    defrag.timeproc_overage_us += overage; /* track over/under desired CPU */
-    /* Allow negative overage (underage) to count against existing overage, but don't allow
-     * underage (from short stages) to be accumulated. */
-    if (defrag.timeproc_overage_us < 0) defrag.timeproc_overage_us = 0;
 
     int targetCpuPercent = server.active_defrag_running;
     serverAssert(targetCpuPercent > 0 && targetCpuPercent < 100);
@@ -1366,7 +1348,7 @@ static int computeDelayMs(monotime intendedEndtime) {
     long totalCycleTimeUs = server.active_defrag_cycle_us * 100 / targetCpuPercent;
     long delayUs = totalCycleTimeUs - server.active_defrag_cycle_us;
     /* Only increase delay by the fraction of the overage that would be non-duty-cycle */
-    delayUs += defrag.timeproc_overage_us * (100 - targetCpuPercent) / 100;
+    delayUs += overage * (100 - targetCpuPercent) / 100;
     if (delayUs < 0) delayUs = 0;
     long delayMs = delayUs / 1000; /* round down */
     return delayMs;
@@ -1498,6 +1480,7 @@ static void beginDefragCycle(void) {
 
     addDefragStage(defragLuaScripts, NULL);
     addDefragStage(defragModuleGlobals, NULL);
+    addDefragStage(defragStageHFE, NULL);
 
     defrag.current_stage = NULL;
     defrag.start_cycle = getMonotonicUs();
@@ -1505,7 +1488,6 @@ static void beginDefragCycle(void) {
     defrag.start_defrag_misses = server.stat_active_defrag_misses;
     defrag.start_frag_pct = getAllocatorFragmentation(NULL);
     defrag.timeproc_end_time = 0;
-    defrag.timeproc_overage_us = 0;
     defrag.timeproc_id = aeCreateTimeEvent(server.el, 0, activeDefragTimeProc, NULL, NULL);
 
     elapsedStart(&server.stat_last_active_defrag_time);
