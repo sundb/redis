@@ -124,6 +124,12 @@ typedef struct {
 } defragPubSubCtx;
 static_assert(offsetof(defragPubSubCtx, kvstate) == 0, "defragStageKvstoreHelper requires this");
 
+typedef struct {
+    sds module_name;
+    RedisModuleDefragCtx *module_ctx;
+    unsigned long cursor;
+} defragModuleCtx;
+
 /* this method was added to jemalloc in order to help us understand which
  * pointers are worthwhile moving and which aren't */
 int je_get_defrag_hint(void* ptr);
@@ -1211,11 +1217,33 @@ static doneStatus defragLuaScripts(void *ctx, monotime endtime) {
     return DEFRAG_DONE;
 }
 
+/* Handles defragmentation of module global data. This is a stage function
+ * that gets called periodically during the active defragmentation process. */
 static doneStatus defragModuleGlobals(void *ctx, monotime endtime) {
-    UNUSED(endtime);
-    UNUSED(ctx);
-    moduleDefragGlobals();
-    return DEFRAG_DONE;
+    defragModuleCtx *defrag_module_ctx = ctx;
+
+    RedisModule *module = moduleGetHandleByName(defrag_module_ctx->module_name);
+    if (!module) {
+        /* Module has been unloaded, nothing to defrag. */
+        return DEFRAG_DONE;
+    }
+
+    /* Set up context for the module's defrag callback. */
+    defrag_module_ctx->module_ctx->endtime = endtime;
+    defrag_module_ctx->module_ctx->cursor = &defrag_module_ctx->cursor;
+
+    /* Call appropriate version of module's defrag callback:
+     * 1. Version 2 (defrag_cb_2): Supports incremental defrag and returns whether more work is needed
+     * 2. Version 1 (defrag_cb): Legacy version, performs all work in one call.
+     *    Note: V1 doesn't support incremental defragmentation, may block for longer periods. */
+    if (module->defrag_cb_2) {
+        return module->defrag_cb_2(defrag_module_ctx->module_ctx) ? DEFRAG_NOT_DONE : DEFRAG_DONE;
+    } else if (module->defrag_cb) {
+        module->defrag_cb(defrag_module_ctx->module_ctx);
+        return DEFRAG_DONE;
+    } else {
+        redis_unreachable();
+    }
 }
 
 static void freeDefragKeysContext(void *ctx) {
@@ -1224,6 +1252,13 @@ static void freeDefragKeysContext(void *ctx) {
         listRelease(defrag_keys_ctx->defrag_later);
     }
     zfree(defrag_keys_ctx);
+}
+
+static void freeDefragModelContext(void *ctx) {
+    defragModuleCtx *defrag_model_ctx = ctx;
+    sdsfree(defrag_model_ctx->module_name);
+    zfree(defrag_model_ctx->module_ctx);
+    zfree(defrag_model_ctx);
 }
 
 static void freeDefragContext(void *ptr) {
@@ -1508,7 +1543,21 @@ static void beginDefragCycle(void) {
     addDefragStage(defragStagePubsubKvstore, zfree, defrag_pubsubshard_ctx);
 
     addDefragStage(defragLuaScripts, NULL, NULL);
-    addDefragStage(defragModuleGlobals, NULL, NULL);
+
+    /* Add stages for modules. */
+    dictIterator *di = dictGetIterator(modules);
+    dictEntry *de;
+    while ((de = dictNext(di)) != NULL) {
+        struct RedisModule *module = dictGetVal(de);
+        if (module->defrag_cb || module->defrag_cb_2) {
+            defragModuleCtx *ctx = zmalloc(sizeof(defragModuleCtx));
+            ctx->cursor = 0;
+            ctx->module_name = sdsnew(module->name);
+            ctx->module_ctx = zcalloc(sizeof(RedisModuleDefragCtx));
+            addDefragStage(defragModuleGlobals, freeDefragModelContext, ctx);
+        }
+    }
+    dictReleaseIterator(di);
 
     defrag.current_stage = NULL;
     defrag.start_cycle = getMonotonicUs();

@@ -2016,6 +2016,7 @@ void createSharedObjects(void) {
     shared.set = createStringObject("SET",3);
     shared.eval = createStringObject("EVAL",4);
     shared.hpexpireat = createStringObject("HPEXPIREAT",10);
+    shared.hpersist = createStringObject("HPERSIST",8);
     shared.hdel = createStringObject("HDEL",4);
 
     /* Shared command argument */
@@ -2174,6 +2175,7 @@ void initServerConfig(void) {
     server.repl_down_since = 0; /* Never connected, repl is down since EVER. */
     server.master_repl_offset = 0;
     server.fsynced_reploff_pending = 0;
+    server.repl_stream_lastio = server.unixtime;
 
     /* Replication partial resync backlog */
     server.repl_backlog = NULL;
@@ -4579,6 +4581,9 @@ int finishShutdown(void) {
         }
     }
 
+    /* Update the end offset of current INCR AOF if possible. */
+    updateCurIncrAofEndOffset();
+
     /* Free the AOF manifest. */
     if (server.aof_manifest) aofManifestFree(server.aof_manifest);
 
@@ -6843,6 +6848,7 @@ void loadDataFromDisk(void) {
             exit(1);
         if (ret != AOF_NOT_EXIST)
             serverLog(LL_NOTICE, "DB loaded from append only file: %.3f seconds", (float)(ustime()-start)/1000000);
+        updateReplOffsetAndResetEndOffset();
     } else {
         rdbSaveInfo rsi = RDB_SAVE_INFO_INIT;
         int rsi_is_valid = 0;

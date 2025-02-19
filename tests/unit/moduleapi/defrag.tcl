@@ -1,7 +1,7 @@
 set testmodule [file normalize tests/modules/defragtest.so]
 
 start_server {tags {"modules"} overrides {{save ""}}} {
-    r module load $testmodule 10000
+    r module load $testmodule 50000
     r config set hz 100
     r config set active-defrag-ignore-bytes 1
     r config set active-defrag-threshold-lower 0
@@ -46,7 +46,8 @@ start_server {tags {"modules"} overrides {{save ""}}} {
 
             after 2000
             set info [r info defragtest_stats]
-            assert {[getInfoProperty $info defragtest_global_attempts] > 0}
+            assert {[getInfoProperty $info defragtest_global_strings_attempts] > 0}
+            assert {[getInfoProperty $info defragtest_global_strings_pauses] > 0}
             assert_morethan [getInfoProperty $info defragtest_defrag_started] 0
             assert_morethan [getInfoProperty $info defragtest_defrag_ended] 0
         }

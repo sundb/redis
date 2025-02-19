@@ -334,6 +334,31 @@ proc test_all_keysizes { {replMode 0} } {
             run_cmd_verify_hist {$server HSET h2 2 2} {db0_HASH:2=1}
             run_cmd_verify_hist {$server HDEL h2 1}   {db0_HASH:1=1}
             run_cmd_verify_hist {$server HDEL h2 2}   {}
+            # HGETDEL
+            run_cmd_verify_hist {$server FLUSHALL} {}
+            run_cmd_verify_hist {$server HSETEX h2 FIELDS 1 1 1} {db0_HASH:1=1}
+            run_cmd_verify_hist {$server HSETEX h2 FIELDS 1 2 2} {db0_HASH:2=1}
+            run_cmd_verify_hist {$server HGETDEL h2 FIELDS 1 1}  {db0_HASH:1=1}
+            run_cmd_verify_hist {$server HGETDEL h2 FIELDS 1 3}  {db0_HASH:1=1}
+            run_cmd_verify_hist {$server HGETDEL h2 FIELDS 1 2}  {}
+            # HGETEX
+            run_cmd_verify_hist {$server FLUSHALL} {}
+            run_cmd_verify_hist {$server HSETEX h1 FIELDS 2 f1 1 f2 1} {db0_HASH:2=1}
+            run_cmd_verify_hist {$server HGETEX h1 PXAT 1 FIELDS 1 f1} {db0_HASH:1=1}
+            run_cmd_verify_hist {$server HSETEX h1 FIELDS 1 f3 1} {db0_HASH:2=1}
+            run_cmd_verify_hist {$server HGETEX h1 PX 50 FIELDS 1 f2} {db0_HASH:2=1}
+            run_cmd_verify_hist {} {db0_HASH:1=1} 1
+            run_cmd_verify_hist {$server HGETEX h1 PX 50 FIELDS 1 f3} {db0_HASH:1=1}
+            run_cmd_verify_hist {} {} 1
+            # HSETEX
+            run_cmd_verify_hist {$server FLUSHALL} {}
+            run_cmd_verify_hist {$server HSETEX h1 FIELDS 2 f1 1 f2 1} {db0_HASH:2=1}
+            run_cmd_verify_hist {$server HSETEX h1 PXAT 1 FIELDS 1 f1 v1} {db0_HASH:1=1}
+            run_cmd_verify_hist {$server HSETEX h1 FIELDS 1 f3 1} {db0_HASH:2=1}
+            run_cmd_verify_hist {$server HSETEX h1 PX 50 FIELDS 1 f2 v2} {db0_HASH:2=1}
+            run_cmd_verify_hist {} {db0_HASH:1=1} 1
+            run_cmd_verify_hist {$server HSETEX h1 PX 50 FIELDS 1 f3 v3} {db0_HASH:1=1}
+            run_cmd_verify_hist {} {} 1
             # HMSET
             run_cmd_verify_hist {$server FLUSHALL} {}
             run_cmd_verify_hist {$server HMSET h1 1 1 2 2 3 3} {db0_HASH:2=1}

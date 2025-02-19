@@ -2309,6 +2309,7 @@ void RM_SetModuleAttribs(RedisModuleCtx *ctx, const char *name, int ver, int api
     module->options = 0;
     module->info_cb = 0;
     module->defrag_cb = 0;
+    module->defrag_cb_2 = 0;
     module->defrag_start_cb = 0;
     module->defrag_end_cb = 0;
     module->loadmod = NULL;
@@ -11263,7 +11264,7 @@ static void moduleScanKeyCallback(void *privdata, const dictEntry *de) {
  * The way it should be used:
  *
  *      RedisModuleScanCursor *c = RedisModule_ScanCursorCreate();
- *      RedisModuleKey *key = RedisModule_OpenKey(...)
+ *      RedisModuleKey *key = RedisModule_OpenKey(...);
  *      while(RedisModule_ScanKey(key, c, callback, privateData));
  *      RedisModule_CloseKey(key);
  *      RedisModule_ScanCursorDestroy(c);
@@ -11273,13 +11274,13 @@ static void moduleScanKeyCallback(void *privdata, const dictEntry *de) {
  *
  *      RedisModuleScanCursor *c = RedisModule_ScanCursorCreate();
  *      RedisModule_ThreadSafeContextLock(ctx);
- *      RedisModuleKey *key = RedisModule_OpenKey(...)
+ *      RedisModuleKey *key = RedisModule_OpenKey(...);
  *      while(RedisModule_ScanKey(ctx, c, callback, privateData)){
  *          RedisModule_CloseKey(key);
  *          RedisModule_ThreadSafeContextUnlock(ctx);
  *          // do some background job
  *          RedisModule_ThreadSafeContextLock(ctx);
- *          RedisModuleKey *key = RedisModule_OpenKey(...)
+ *          key = RedisModule_OpenKey(...);
  *      }
  *      RedisModule_CloseKey(key);
  *      RedisModule_ScanCursorDestroy(c);
@@ -13783,21 +13784,22 @@ const char *RM_GetCurrentCommandName(RedisModuleCtx *ctx) {
  * ## Defrag API
  * -------------------------------------------------------------------------- */
 
-/* The defrag context, used to manage state during calls to the data type
- * defrag callback.
- */
-struct RedisModuleDefragCtx {
-    monotime endtime;
-    unsigned long *cursor;
-    struct redisObject *key; /* Optional name of key processed, NULL when unknown. */
-    int dbid;                /* The dbid of the key being processed, -1 when unknown. */
-};
-
 /* Register a defrag callback for global data, i.e. anything that the module
  * may allocate that is not tied to a specific data type.
  */
 int RM_RegisterDefragFunc(RedisModuleCtx *ctx, RedisModuleDefragFunc cb) {
     ctx->module->defrag_cb = cb;
+    return REDISMODULE_OK;
+}
+
+/* Register a defrag callback for global data, i.e. anything that the module
+ * may allocate that is not tied to a specific data type.
+ * This is a more advanced version of RM_RegisterDefragFunc, in that it takes
+ * a callbacks that has a return value, and can use RM_DefragShouldStop
+ * in and indicate that it should be called again later, or is it done (returned 0).
+ */
+int RM_RegisterDefragFunc2(RedisModuleCtx *ctx, RedisModuleDefragFunc2 cb) {
+    ctx->module->defrag_cb_2 = cb;
     return REDISMODULE_OK;
 }
 
@@ -13990,16 +13992,6 @@ int moduleDefragValue(robj *key, robj *value, int dbid) {
     RedisModuleDefragCtx defrag_ctx = { 0, NULL, key, dbid };
     mt->defrag(&defrag_ctx, key, &mv->value);
     return 1;
-}
-
-/* Call registered module API defrag functions */
-void moduleDefragGlobals(void) {
-    dictForEach(modules, struct RedisModule, module, 
-        if (module->defrag_cb) {
-            RedisModuleDefragCtx defrag_ctx = { 0, NULL, NULL, -1};
-            module->defrag_cb(&defrag_ctx);
-        }
-    );
 }
 
 /* Call registered module API defrag start functions */
@@ -14381,6 +14373,7 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(GetCurrentCommandName);
     REGISTER_API(GetTypeMethodVersion);
     REGISTER_API(RegisterDefragFunc);
+    REGISTER_API(RegisterDefragFunc2);
     REGISTER_API(RegisterDefragCallbacks);
     REGISTER_API(DefragAlloc);
     REGISTER_API(DefragAllocRaw);
