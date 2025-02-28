@@ -1881,86 +1881,95 @@ int ebDefragRaxNode(raxNode **noderef) {
     return 0;
 }
 
+void ebDefragList(ebuckets *eb, EbucketsType *type) {
+    ExpireMeta *prevem = NULL;
+    eItem curitem = ebGetListPtr(type, *eb);
+    while (curitem != NULL) {
+        if ((curitem = defragAlloc(curitem))) {
+            if (prevem) {
+                prevem->next = curitem;
+            } else {
+                *eb = ebMarkAsList(curitem);
+            }
+        }
+        /* Move to the next item in the list. */
+        prevem = type->getExpireMeta(curitem);
+        curitem = prevem->next;
+    }
+}
+
+int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor) {
+    rax *rax = ebGetRaxPtr(*eb);
+    raxIterator ri;
+    static unsigned char last[EB_KEY_SIZE];
+
+    raxStart(&ri,rax);
+    if (*cursor) {
+        /* assign the iterator node callback before the seek, so that the
+         * initial nodes that are processed till the first item are covered */
+        ri.node_cb = ebDefragRaxNode;
+        raxSeek(&ri,"^",NULL,0);
+    } else {
+        /* if cursor is non-zero, we seek to the static 'last' */
+        if (!raxSeek(&ri,">", last, EB_KEY_SIZE)) {
+            *cursor = 0;
+            raxStop(&ri);
+            return 0;
+        }
+        /* assign the iterator node callback after the seek, so that the
+        * initial nodes that are processed till now aren't covered */
+        ri.node_cb = ebDefragRaxNode;
+    }
+
+    (*cursor)++;
+    if (raxNext(&ri)) {
+        FirstSegHdr *newSegHdr, *currentSegHdr = ri.data;
+        eItem iter = currentSegHdr->head;
+        ExpireMeta *mIter, *mHead;
+
+        mHead = type->getExpireMeta(iter);
+        while (1) {
+            for (int i = 0; i < mHead->numItems ; ++i) {
+                mIter = type->getExpireMeta(iter);
+                iter = mIter->next;
+            }
+
+            if (mIter->lastItemBucket) {
+                break;
+            }
+
+            if ((newSegHdr = defragAlloc(currentSegHdr))) {
+                if (currentSegHdr == ri.data)
+                    raxSetData(ri.node, ri.data=newSegHdr); /* Update the data of rax node */
+                currentSegHdr = newSegHdr;
+            }
+
+            NextSegHdr *nextSegHdr = mIter->next;
+            nextSegHdr->prevSeg = (CommonSegHdr *)currentSegHdr; /* Update the preview of last seg */
+            iter = nextSegHdr->head;
+            mHead = type->getExpireMeta(iter);
+        }
+
+        assert(ri.key_len==sizeof(last));
+        memcpy(last,ri.key,ri.key_len);
+        raxStop(&ri);
+        return 1;
+    }
+    raxStop(&ri);
+    *cursor = 0;
+    return 0; 
+}
+
 int ebDefrag(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragAllocFunction *defragfn) {
     assert(!ebIsEmpty(*eb));
     defragAlloc = defragfn;
 
     if (ebIsList(*eb)) {
-        ExpireMeta *prevem = NULL;
-        eItem curitem = ebGetListPtr(type, *eb);
-        while (curitem != NULL) {
-            if ((curitem = defragfn(curitem))) {
-                if (prevem) {
-                    prevem->next = curitem;
-                } else {
-                    *eb = ebMarkAsList(curitem);
-                }
-            }
-            /* Move to the next item in the list. */
-            prevem = type->getExpireMeta(curitem);
-            curitem = prevem->next;
-        }
+        ebDefragList(eb, type);
+        return 0;
     } else {
-        rax *rax = ebGetRaxPtr(*eb);
-        raxIterator ri;
-        static unsigned char last[EB_KEY_SIZE];
-
-        raxStart(&ri,rax);
-        if (*cursor) {
-            /* assign the iterator node callback before the seek, so that the
-             * initial nodes that are processed till the first item are covered */
-            ri.node_cb = ebDefragRaxNode;
-            raxSeek(&ri,"^",NULL,0);
-        } else {
-            /* if cursor is non-zero, we seek to the static 'last' */
-            if (!raxSeek(&ri,">", last, EB_KEY_SIZE)) {
-                *cursor = 0;
-                raxStop(&ri);
-                return 0;
-            }
-            /* assign the iterator node callback after the seek, so that the
-            * initial nodes that are processed till now aren't covered */
-            ri.node_cb = ebDefragRaxNode;
-        }
-
-        (*cursor)++;
-        if (raxNext(&ri)) {
-            FirstSegHdr *newSegHdr, *currentSegHdr = ri.data;
-            eItem iter = currentSegHdr->head;
-            ExpireMeta *mIter, *mHead;
-
-            mHead = type->getExpireMeta(iter);
-            while (1) {
-                for (int i = 0; i < mHead->numItems ; ++i) {
-                    mIter = type->getExpireMeta(iter);
-                    iter = mIter->next;
-                }
-
-                if (mIter->lastItemBucket) {
-                    break;
-                }
-
-                if ((newSegHdr = defragfn(currentSegHdr))) {
-                    if (currentSegHdr == ri.data)
-                        raxSetData(ri.node, ri.data=newSegHdr); /* Update the data of rax node */
-                    currentSegHdr = newSegHdr;
-                }
-
-                NextSegHdr *nextSegHdr = mIter->next;
-                nextSegHdr->prevSeg = (CommonSegHdr *)currentSegHdr; /* Update the preview of last seg */
-                iter = nextSegHdr->head;
-                mHead = type->getExpireMeta(iter);
-            }
-
-            assert(ri.key_len==sizeof(last));
-            memcpy(last,ri.key,ri.key_len);
-            raxStop(&ri);
-            return 1;
-        }
-        raxStop(&ri);
+        return ebDefragRax(eb, type, cursor);
     }
-    *cursor = 0;
-    return 0;
 }
 
 /* Retrieves the expiration time associated with the given item. If associated
