@@ -306,6 +306,10 @@ int ebNextBucket(EbucketsIterator *iter);
 typedef eItem (ebDefragFunction)(const eItem item);
 eItem ebDefragItem(ebuckets *eb, EbucketsType *type, eItem item, ebDefragFunction *fn);
 
+typedef eItem (ebDefragFunction1)(const eItem item, void *privdata);
+typedef void *(ebDefragAllocFunction)(void *ptr);
+int ebDefrag(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragAllocFunction *defragfn);
+
 static inline uint64_t ebGetMetaExpTime(ExpireMeta *expMeta) {
     return (((uint64_t)(expMeta)->expireTimeHi << 32) | (expMeta)->expireTimeLo);
 }
