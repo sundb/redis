@@ -1904,7 +1904,8 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
     static unsigned char last[EB_KEY_SIZE];
 
     raxStart(&ri,rax);
-    if (*cursor) {
+    printf("cursor: %d\n", *cursor);
+    if (!*cursor) {
         /* assign the iterator node callback before the seek, so that the
          * initial nodes that are processed till the first item are covered */
         ri.node_cb = ebDefragRaxNode;
@@ -1925,6 +1926,7 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
 
     (*cursor)++;
     if (raxNext(&ri)) {
+        printf("ri.node: %p\n", ri.node);
         FirstSegHdr *newSegHdr, *currentSegHdr = ri.data;
         eItem newiter, iter = currentSegHdr->head;
         ExpireMeta *mIter, *mHead;
@@ -1950,11 +1952,11 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
                 iter = mIter->next;
             }
 
-            if ((newSegHdr = defragfns->defragAlloc(currentSegHdr))) {
-                if (currentSegHdr == ri.data)
-                    raxSetData(ri.node, ri.data=newSegHdr); /* 如果第一个更新了, 需要更新rax的data */
-                currentSegHdr = newSegHdr;
-            }
+            // if ((newSegHdr = defragfns->defragAlloc(currentSegHdr))) {
+            //     if (currentSegHdr == ri.data)
+            //         raxSetData(ri.node, ri.data=newSegHdr); /* 如果第一个更新了, 需要更新rax的data */
+            //     currentSegHdr = newSegHdr;
+            // }
 
             if (mIter->lastItemBucket) {
                 mIter->next = (eItem)currentSegHdr; /* 最后一个eitem需要指向前一个的seg */
@@ -1969,6 +1971,7 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
 
         assert(ri.key_len==sizeof(last));
         memcpy(last,ri.key,ri.key_len);
+        printf("sssssssss: %.*s\n", (int)ri.key_len, ri.key);
         raxStop(&ri);
         return 1;
     }
@@ -2684,6 +2687,8 @@ int ebucketsTest(int argc, char **argv, int flags) {
 
     TEST("item defragmentation") {
         for (int s = 1; s <= EB_LIST_MAX_ITEMS * 3; s++) {
+            // int s = EB_LIST_MAX_ITEMS * 3;
+            printf("start\n");
             ebuckets eb = NULL;
             MyItem *items[s];
             for (int i = 0; i < s; i++) {
@@ -2692,6 +2697,8 @@ int ebucketsTest(int argc, char **argv, int flags) {
                 printf("items: %p\n", items[i]);
                 ebAdd(&eb, &myEbucketsType, items[i], i);
             }
+            // printf("raxsize: %d\n", raxSize(ebGetRaxPtr(eb)));
+            // exit(0);
             assert((s <= EB_LIST_MAX_ITEMS) ? ebIsList(eb) : !ebIsList(eb));
             /* Defrag all the items. */
             // for (int i = 0; i < s; i++) {
@@ -2703,8 +2710,9 @@ int ebucketsTest(int argc, char **argv, int flags) {
                 .defragAlloc = defragCallback,
                 .defragItem = defragItemCallback,
             };
-            if (ebDefrag(&eb, &myEbucketsType, &cursor, &defragfns, items)) {}
+            while (ebDefrag(&eb, &myEbucketsType, &cursor, &defragfns, items)) {}
             ebValidate(eb, &myEbucketsType);
+            printf("end\n");
             // ebDestroy(&eb, &myEbucketsType, NULL);
         }
     }
