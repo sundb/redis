@@ -1869,11 +1869,11 @@ eItem ebDefragItem(ebuckets *eb, EbucketsType *type, eItem item, ebDefragFunctio
     redis_unreachable();
 }
 
-static ebDefragFunctions *eb_defragfns = NULL;
 /* Defrag callback for radix tree iterator, called for each node,
  * used in order to defrag the nodes allocations. */
-int ebDefragRaxNode(raxNode **noderef) {
-    raxNode *newnode = eb_defragfns->defragAlloc(*noderef);
+int ebDefragRaxNode(raxNode **noderef, void *privdata) {
+    ebDefragFunctions *defragfns = privdata;
+    raxNode *newnode = defragfns->defragAlloc(*noderef);
     if (newnode) {
         *noderef = newnode;
         return 1;
@@ -1881,11 +1881,11 @@ int ebDefragRaxNode(raxNode **noderef) {
     return 0;
 }
 
-void ebDefragList(ebuckets *eb, EbucketsType *type, ebDefragFunctions *defragfns) {
+void ebDefragList(ebuckets *eb, EbucketsType *type, ebDefragFunctions *defragfns, void *privdata) {
     ExpireMeta *prevem = NULL;
     eItem curitem = ebGetListPtr(type, *eb);
     while (curitem != NULL) {
-        if ((curitem = defragfns->defragItem(curitem))) {
+        if ((curitem = defragfns->defragItem(curitem, privdata))) {
             if (prevem) {
                 prevem->next = curitem;
             } else {
@@ -1898,7 +1898,7 @@ void ebDefragList(ebuckets *eb, EbucketsType *type, ebDefragFunctions *defragfns
     }
 }
 
-int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragFunctions *defragfns) {
+int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragFunctions *defragfns, void *privdata) {
     rax *rax = ebGetRaxPtr(*eb);
     raxIterator ri;
     static unsigned char last[EB_KEY_SIZE];
@@ -1908,6 +1908,7 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
         /* assign the iterator node callback before the seek, so that the
          * initial nodes that are processed till the first item are covered */
         ri.node_cb = ebDefragRaxNode;
+        ri.privdata = defragfns;
         raxSeek(&ri,"^",NULL,0);
     } else {
         /* if cursor is non-zero, we seek to the static 'last' */
@@ -1919,6 +1920,7 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
         /* assign the iterator node callback after the seek, so that the
         * initial nodes that are processed till now aren't covered */
         ri.node_cb = ebDefragRaxNode;
+        ri.privdata = defragfns;
     }
 
     (*cursor)++;
@@ -1932,7 +1934,7 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
             for (int i = 0; i < mHead->numItems; ++i) {
                 mIter = type->getExpireMeta(iter);
                 iter = mIter->next;
-                if ((newiter = defragfns->defragItem(iter))) {
+                if ((newiter = defragfns->defragItem(iter, privdata))) {
                     mIter->next = newiter;
                     iter = newiter;
                 }
@@ -1965,15 +1967,14 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
     return 0; 
 }
 
-int ebDefrag(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragFunctions *defragfns) {
+int ebDefrag(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragFunctions *defragfns, void *privdata) {
     assert(!ebIsEmpty(*eb));
-    eb_defragfns = defragfns;
 
     if (ebIsList(*eb)) {
-        ebDefragList(eb, type, defragfns);
+        ebDefragList(eb, type, defragfns, privdata);
         return 0;
     } else {
-        return ebDefragRax(eb, type, cursor, defragfns);
+        return ebDefragRax(eb, type, cursor, defragfns, privdata);
     }
 }
 
@@ -2282,12 +2283,9 @@ void *defragCallback(void *ptr) {
     return newitem;
 }
 
-void *defragItemCallback(void *ptr) {
-    size_t size = zmalloc_usable_size(ptr);
-    void *newitem = zmalloc(size);
-    memcpy(newitem, ptr, size);
-    zfree(ptr);
-    return newitem;
+void *defragItemCallback(void *ptr, void *privdata) {
+    UNUSED(privdata);
+    return defragCallback(ptr);
 }
 
 int ebucketsTest(int argc, char **argv, int flags) {
@@ -2683,10 +2681,10 @@ int ebucketsTest(int argc, char **argv, int flags) {
             // }
             unsigned long cursor;
             ebDefragFunctions defragfns = {
-                .defragAlloc = defragItemCallback,
+                .defragAlloc = defragCallback,
                 .defragItem = defragItemCallback,
             };
-            if (ebDefrag(&eb, &myEbucketsType, &cursor, &defragfns)) {}
+            if (ebDefrag(&eb, &myEbucketsType, &cursor, &defragfns, NULL)) {}
             ebValidate(eb, &myEbucketsType);
             // ebDestroy(&eb, &myEbucketsType, NULL);
         }
