@@ -643,7 +643,8 @@ void defragSet(defragKeysCtx *ctx, dictEntry *kde) {
 
 /* Defrag callback for radix tree iterator, called for each node,
  * used in order to defrag the nodes allocations. */
-int defragRaxNode(raxNode **noderef) {
+int defragRaxNode(raxNode **noderef, void *privdata) {
+    UNUSED(privdata);
     raxNode *newnode = activeDefragAlloc(*noderef);
     if (newnode) {
         *noderef = newnode;
@@ -666,7 +667,7 @@ int scanLaterStreamListpacks(robj *ob, unsigned long *cursor, monotime endtime) 
     raxStart(&ri,s->rax);
     if (*cursor == 0) {
         /* if cursor is 0, we start new iteration */
-        defragRaxNode(&s->rax->head);
+        defragRaxNode(&s->rax->head, NULL);
         /* assign the iterator node callback before the seek, so that the
          * initial nodes that are processed till the first item are covered */
         ri.node_cb = defragRaxNode;
@@ -720,7 +721,7 @@ void defragRadixTree(rax **raxref, int defrag_data, raxDefragFunction *element_c
     rax = *raxref;
     raxStart(&ri,rax);
     ri.node_cb = defragRaxNode;
-    defragRaxNode(&rax->head);
+    defragRaxNode(&rax->head, NULL);
     raxSeek(&ri,"^",NULL,0);
     while (raxNext(&ri)) {
         void *newdata = NULL;

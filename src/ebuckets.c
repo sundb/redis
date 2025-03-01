@@ -1931,13 +1931,23 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
 
         mHead = type->getExpireMeta(iter);
         while (1) {
-            for (int i = 0; i < mHead->numItems; ++i) {
-                mIter = type->getExpireMeta(iter);
-                iter = mIter->next;
+//            printf("mHead->numItems: %d\n", mHead->numItems);
+            ExpireMeta *prevIter = NULL;
+            unsigned int numItems = mHead->numItems;
+            for (int i = 0; i < numItems; ++i) {
                 if ((newiter = defragfns->defragItem(iter, privdata))) {
                     mIter->next = newiter;
                     iter = newiter;
+
+                    if (prevIter == NULL) {
+                        currentSegHdr->head = iter;
+                    } else {
+                        prevIter->next = iter;
+                    }
                 }
+                mIter = type->getExpireMeta(iter);
+                prevIter = mIter;
+                iter = mIter->next;
             }
 
             if ((newSegHdr = defragfns->defragAlloc(currentSegHdr))) {
@@ -1971,9 +1981,11 @@ int ebDefrag(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragFu
     assert(!ebIsEmpty(*eb));
 
     if (ebIsList(*eb)) {
+        printf("list\n");
         ebDefragList(eb, type, defragfns, privdata);
         return 0;
     } else {
+        printf("rax\n");
         return ebDefragRax(eb, type, cursor, defragfns, privdata);
     }
 }
@@ -2284,8 +2296,14 @@ void *defragCallback(void *ptr) {
 }
 
 void *defragItemCallback(void *ptr, void *privdata) {
-    UNUSED(privdata);
-    return defragCallback(ptr);
+    printf("defrag item: %p\n", ptr);
+    MyItem *item = ptr;
+    MyItem **items = privdata;
+    int index = item->index;
+    void *newitem = defragCallback(ptr);
+    if (newitem)
+        items[index] = newitem;
+    return newitem;
 }
 
 int ebucketsTest(int argc, char **argv, int flags) {
@@ -2671,6 +2689,7 @@ int ebucketsTest(int argc, char **argv, int flags) {
             for (int i = 0; i < s; i++) {
                 items[i] = zmalloc(sizeof(MyItem));
                 items[i]->index = i;
+                printf("items: %p\n", items[i]);
                 ebAdd(&eb, &myEbucketsType, items[i], i);
             }
             assert((s <= EB_LIST_MAX_ITEMS) ? ebIsList(eb) : !ebIsList(eb));
@@ -2684,7 +2703,7 @@ int ebucketsTest(int argc, char **argv, int flags) {
                 .defragAlloc = defragCallback,
                 .defragItem = defragItemCallback,
             };
-            if (ebDefrag(&eb, &myEbucketsType, &cursor, &defragfns, NULL)) {}
+            if (ebDefrag(&eb, &myEbucketsType, &cursor, &defragfns, items)) {}
             ebValidate(eb, &myEbucketsType);
             // ebDestroy(&eb, &myEbucketsType, NULL);
         }
