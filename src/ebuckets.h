@@ -269,6 +269,12 @@ typedef struct EbucketsIterator {
     uint64_t itemsCurrBucket;     /* Number of items in current bucket. */
 } EbucketsIterator;
 
+typedef void *(ebDefragAllocFunction)(void *ptr);
+typedef struct {
+    ebDefragAllocFunction *defragAlloc; /* Used for entries etc. */
+    ebDefragAllocFunction *defragItem;  /* Defrag-realloc keys (optional) */
+} ebDefragFunctions;
+
 /* ebuckets API */
 
 static inline ebuckets ebCreate(void) { return NULL; } /* Empty ebuckets */
@@ -308,7 +314,8 @@ eItem ebDefragItem(ebuckets *eb, EbucketsType *type, eItem item, ebDefragFunctio
 
 typedef eItem (ebDefragFunction1)(const eItem item, void *privdata);
 typedef void *(ebDefragAllocFunction)(void *ptr);
-int ebDefrag(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragAllocFunction *defragfn);
+typedef void *(ebDefragAllocItemFunction)(void *ptr);
+int ebDefrag(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragFunctions *defragfns);
 
 static inline uint64_t ebGetMetaExpTime(ExpireMeta *expMeta) {
     return (((uint64_t)(expMeta)->expireTimeHi << 32) | (expMeta)->expireTimeLo);
