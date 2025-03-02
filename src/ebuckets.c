@@ -1274,7 +1274,9 @@ void ebRaxDeleteCb(void *item, void *context) {
             eItem toDelete = itemIter;
             mIter->trash = 1;
             itemIter = mIter->next;
-            if (ctx->type->onDeleteItem) ctx->type->onDeleteItem(toDelete, &ctx->userCtx);
+            if (ctx->type->onDeleteItem) {
+                ctx->type->onDeleteItem(toDelete, &ctx->userCtx);
+            }
         }
         nextSegHdr = itemIter;
 
@@ -1872,6 +1874,7 @@ eItem ebDefragItem(ebuckets *eb, EbucketsType *type, eItem item, ebDefragFunctio
 /* Defrag callback for radix tree iterator, called for each node,
  * used in order to defrag the nodes allocations. */
 int ebDefragRaxNode(raxNode **noderef, void *privdata) {
+    printf("ebDefragRaxNode: %p\n", *noderef);
     ebDefragFunctions *defragfns = privdata;
     raxNode *newnode = defragfns->defragAlloc(*noderef);
     if (newnode) {
@@ -1900,12 +1903,13 @@ void ebDefragList(ebuckets *eb, EbucketsType *type, ebDefragFunctions *defragfns
 
 int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragFunctions *defragfns, void *privdata) {
     rax *rax = ebGetRaxPtr(*eb);
+    printf("raxsize: %d\n", rax->numele);
     raxIterator ri;
     static unsigned char last[EB_KEY_SIZE];
 
     raxStart(&ri,rax);
-    printf("cursor: %d\n", *cursor);
     if (!*cursor) {
+        ebDefragRaxNode(&rax->head, defragfns);
         /* assign the iterator node callback before the seek, so that the
          * initial nodes that are processed till the first item are covered */
         ri.node_cb = ebDefragRaxNode;
@@ -1924,54 +1928,62 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
         ri.privdata = defragfns;
     }
 
+    // while (raxNext(&ri)) {
+    // }
+
     (*cursor)++;
     if (raxNext(&ri)) {
-        printf("ri.node: %p\n", ri.node);
-        FirstSegHdr *newSegHdr, *currentSegHdr = ri.data;
-        eItem newiter, iter = currentSegHdr->head;
+        // printf("ri.node: %p\n", ri.node);
+        FirstSegHdr *newSegHdr, *firstSegHdr = ri.data;
+        eItem newiter, iter = firstSegHdr->head;;
         ExpireMeta *mIter, *mHead;
 
         mHead = type->getExpireMeta(iter);
+        CommonSegHdr *currentSegHdr = (CommonSegHdr*)firstSegHdr;
+        ExpireMeta *preLastIter = NULL;
         while (1) {
 //            printf("mHead->numItems: %d\n", mHead->numItems);
-            ExpireMeta *prevIter = NULL;
             unsigned int numItems = mHead->numItems;
+            ExpireMeta *prevIter = NULL;
             for (int i = 0; i < numItems; ++i) {
-                if ((newiter = defragfns->defragItem(iter, privdata))) {
-                    mIter->next = newiter;
-                    iter = newiter;
+                // if ((newiter = defragfns->defragItem(iter, privdata))) {
+                //     mIter->next = newiter;
+                //     iter = newiter;
 
-                    if (prevIter == NULL) {
-                        currentSegHdr->head = iter;
-                    } else {
-                        prevIter->next = iter;
-                    }
-                }
+                //     if (prevIter == NULL) {
+                //         currentSegHdr->head = iter;
+                //     } else {
+                //         prevIter->next = iter;
+                //     }
+                // }
                 mIter = type->getExpireMeta(iter);
                 prevIter = mIter;
                 iter = mIter->next;
             }
 
-            // if ((newSegHdr = defragfns->defragAlloc(currentSegHdr))) {
-            //     if (currentSegHdr == ri.data)
-            //         raxSetData(ri.node, ri.data=newSegHdr); /* 如果第一个更新了, 需要更新rax的data */
-            //     currentSegHdr = newSegHdr;
-            // }
+            if ((newSegHdr = defragfns->defragAlloc(currentSegHdr))) {
+                if (currentSegHdr == ri.data) {
+                    raxSetData(ri.node, ri.data=newSegHdr); /* 如果第一个更新了, 需要更新rax的data */
+                } else {
+                    preLastIter->next = newSegHdr;
+                }
+                currentSegHdr = newSegHdr;
+            }
 
+            preLastIter = mIter;
             if (mIter->lastItemBucket) {
-                mIter->next = (eItem)currentSegHdr; /* 最后一个eitem需要指向前一个的seg */
+                mIter->next = currentSegHdr; /* 最后一个eitem需要指向前一个的seg */
                 break;
             }
 
             NextSegHdr *nextSegHdr = mIter->next;
-            nextSegHdr->prevSeg = (CommonSegHdr *)currentSegHdr; /* 如果不是最后一个, 则需要更新当前seg的前一个为更新后的 */
+            nextSegHdr->prevSeg = currentSegHdr; /* 如果不是最后一个, 则需要更新当前seg的前一个为更新后的 */
             iter = nextSegHdr->head;
             mHead = type->getExpireMeta(iter);
         }
 
         assert(ri.key_len==sizeof(last));
         memcpy(last,ri.key,ri.key_len);
-        printf("sssssssss: %.*s\n", (int)ri.key_len, ri.key);
         raxStop(&ri);
         return 1;
     }
@@ -1984,11 +1996,11 @@ int ebDefrag(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragFu
     assert(!ebIsEmpty(*eb));
 
     if (ebIsList(*eb)) {
-        printf("list\n");
+        // printf("list\n");
         ebDefragList(eb, type, defragfns, privdata);
         return 0;
     } else {
-        printf("rax\n");
+        // printf("rax\n");
         return ebDefragRax(eb, type, cursor, defragfns, privdata);
     }
 }
@@ -2686,8 +2698,8 @@ int ebucketsTest(int argc, char **argv, int flags) {
     }
 
     TEST("item defragmentation") {
-        for (int s = 1; s <= EB_LIST_MAX_ITEMS * 3; s++) {
-            // int s = EB_LIST_MAX_ITEMS * 3;
+        // for (int s = 1; s <= EB_LIST_MAX_ITEMS * 3; s++) {
+            int s = EB_LIST_MAX_ITEMS * 3;
             printf("start\n");
             ebuckets eb = NULL;
             MyItem *items[s];
@@ -2712,9 +2724,9 @@ int ebucketsTest(int argc, char **argv, int flags) {
             };
             while (ebDefrag(&eb, &myEbucketsType, &cursor, &defragfns, items)) {}
             ebValidate(eb, &myEbucketsType);
-            printf("end\n");
-            // ebDestroy(&eb, &myEbucketsType, NULL);
-        }
+            // printf("end\n");
+            ebDestroy(&eb, &myEbucketsType, NULL);
+        // }
     }
 
 //    TEST("segment - Add smaller item to full segment that all share same ebucket-key")
