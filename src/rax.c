@@ -1269,6 +1269,7 @@ void raxStart(raxIterator *it, rax *rt) {
     it->key_max = RAX_ITER_STATIC_LEN;
     it->data = NULL;
     it->node_cb = NULL;
+    it->privdata = NULL;
     raxStackInit(&it->stack);
 }
 
