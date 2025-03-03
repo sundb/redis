@@ -189,12 +189,24 @@ sds activeDefragSds(sds sdsptr) {
  * returns NULL in case the allocation wasn't moved.
  * when it returns a non-null value, the old pointer was already released
  * and should NOT be accessed. */
-hfield activeDefragHfield(hfield hf) {
+hfield activeDefragHfield(hfield hf, void *privdata) {
+    dict *d = privdata;
     void *ptr = hfieldGetAllocPtr(hf);
     void *newptr = activeDefragAlloc(ptr);
     if (newptr) {
         size_t offset = hf - (char*)ptr;
         hf = (char*)newptr + offset;
+
+        /* We can't search in dict for that key after we've released
+         * the pointer it holds, since it won't be able to do the string
+         * compare, but we can find the entry using key hash and pointer. */
+        dictUseStoredKeyApi(d, 1);
+        uint64_t hash = dictGetHash(d, hf);
+        dictUseStoredKeyApi(d, 0);
+        dictEntry *de = dictFindByHashAndPtr(d, hf, hash);
+        serverAssert(de);
+        dictSetKey(d, de, hf);
+
         return hf;
     }
     return NULL;
@@ -382,26 +394,11 @@ void activeDefragSdsDictCallback(void *privdata, const dictEntry *de) {
 
 void activeDefragHfieldDictCallback(void *privdata, const dictEntry *de) {
     dict *d = privdata;
-    hfield newhf, hf = dictGetKey(de);
+    hfield hf = dictGetKey(de);
 
     if (hfieldGetExpireTime(hf) == EB_EXPIRE_TIME_INVALID) {
         /* If the hfield does not have TTL, we directly defrag it. */
-        newhf = activeDefragHfield(hf);
-    } else {
-        /* Update its reference in the ebucket while defragging it. */
-        ebuckets *eb = hashTypeGetDictMetaHFE(d);
-        newhf = ebDefragItem(eb, &hashFieldExpireBucketsType, hf, (ebDefragFunction *)activeDefragHfield);
-    }
-    if (newhf) {
-        /* We can't search in dict for that key after we've released
-         * the pointer it holds, since it won't be able to do the string
-         * compare, but we can find the entry using key hash and pointer. */
-        dictUseStoredKeyApi(d, 1);
-        uint64_t hash = dictGetHash(d, newhf);
-        dictUseStoredKeyApi(d, 0);
-        dictEntry *de = dictFindByHashAndPtr(d, hf, hash);
-        serverAssert(de);
-        dictSetKey(d, de, newhf);
+        activeDefragHfield(hf, d);
     }
 }
 
@@ -435,6 +432,13 @@ void activeDefragHfieldDict(dict *d) {
         cursor = dictScanDefrag(d, cursor, activeDefragHfieldDictCallback,
                                 &defragfns, d);
     } while (cursor != 0);
+
+    // ebDefragFunctions eb_defragfns = {
+    //     .defragAlloc = activeDefragAlloc,
+    //     .defragItem = activeDefragHfield
+    // };
+    // ebuckets *eb = hashTypeGetDictMetaHFE(d);
+    // while (ebDefrag(eb, &hashFieldExpireBucketsType, &cursor, &defragfns, d)) {}
 }
 
 /* Defrag a list of ptr, sds or robj string values */
