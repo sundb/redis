@@ -189,27 +189,35 @@ sds activeDefragSds(sds sdsptr) {
  * returns NULL in case the allocation wasn't moved.
  * when it returns a non-null value, the old pointer was already released
  * and should NOT be accessed. */
-hfield activeDefragHfield(hfield hf, void *privdata) {
-    dict *d = privdata;
+hfield activeDefragHfield(hfield hf) {
     void *ptr = hfieldGetAllocPtr(hf);
     void *newptr = activeDefragAlloc(ptr);
     if (newptr) {
         size_t offset = hf - (char*)ptr;
         hf = (char*)newptr + offset;
+        return hf;
+    }
+    return NULL;
+}
 
+void *activeDefragHfield1(void *hfptr, void *privdata) {
+    printf("activeDefragHfield, %s\n", hfptr);
+    hfield hf = hfptr, newhf;
+    dict *d = privdata;
+
+    newhf = activeDefragHfield(hf);
+    if (newhf) {
         /* We can't search in dict for that key after we've released
          * the pointer it holds, since it won't be able to do the string
          * compare, but we can find the entry using key hash and pointer. */
         dictUseStoredKeyApi(d, 1);
-        uint64_t hash = dictGetHash(d, hf);
+        uint64_t hash = dictGetHash(d, newhf);
         dictUseStoredKeyApi(d, 0);
         dictEntry *de = dictFindByHashAndPtr(d, hf, hash);
         serverAssert(de);
-        dictSetKey(d, de, hf);
-
-        return hf;
+        dictSetKey(d, de, newhf);
     }
-    return NULL;
+    return newhf;
 }
 
 /* Defrag helper for robj and/or string objects with expected refcount.
@@ -398,7 +406,9 @@ void activeDefragHfieldDictCallback(void *privdata, const dictEntry *de) {
 
     if (hfieldGetExpireTime(hf) == EB_EXPIRE_TIME_INVALID) {
         /* If the hfield does not have TTL, we directly defrag it. */
-        activeDefragHfield(hf, d);
+        // activeDefragHfield(hf, d);
+    } else {
+        /* do other place */
     }
 }
 
@@ -433,12 +443,13 @@ void activeDefragHfieldDict(dict *d) {
                                 &defragfns, d);
     } while (cursor != 0);
 
-    // ebDefragFunctions eb_defragfns = {
-    //     .defragAlloc = activeDefragAlloc,
-    //     .defragItem = activeDefragHfield
-    // };
-    // ebuckets *eb = hashTypeGetDictMetaHFE(d);
-    // while (ebDefrag(eb, &hashFieldExpireBucketsType, &cursor, &defragfns, d)) {}
+    cursor = 0;
+    ebDefragFunctions eb_defragfns = {
+        .defragAlloc = activeDefragAlloc,
+        .defragItem = activeDefragHfield1
+    };
+    ebuckets *eb = hashTypeGetDictMetaHFE(d);
+    while (ebDefrag(eb, &hashFieldExpireBucketsType, &cursor, &eb_defragfns, d)) {}
 }
 
 /* Defrag a list of ptr, sds or robj string values */

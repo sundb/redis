@@ -1886,9 +1886,10 @@ int ebDefragRaxNode(raxNode **noderef, void *privdata) {
 
 void ebDefragList(ebuckets *eb, EbucketsType *type, ebDefragFunctions *defragfns, void *privdata) {
     ExpireMeta *prevem = NULL;
-    eItem curitem = ebGetListPtr(type, *eb);
+    eItem newitem, curitem = ebGetListPtr(type, *eb);
     while (curitem != NULL) {
-        if ((curitem = defragfns->defragItem(curitem, privdata))) {
+        if ((newitem = defragfns->defragItem(curitem, privdata))) {
+            curitem = newitem;
             if (prevem) {
                 prevem->next = curitem;
             } else {
@@ -1944,37 +1945,37 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
             unsigned int numItems = mHead->numItems;
             ExpireMeta *prevIter = NULL;
             for (unsigned int i = 0; i < numItems; ++i) {
-                if ((newiter = defragfns->defragItem(iter, privdata))) {
-                    iter = newiter;
+                // if ((newiter = defragfns->defragItem(iter, privdata))) {
+                //     iter = newiter;
 
-                    if (prevIter == NULL) {
-                        currentSegHdr->head = iter;
-                    } else {
-                        prevIter->next = iter;
-                    }
-                }
+                //     if (prevIter == NULL) {
+                //         currentSegHdr->head = iter;
+                //     } else {
+                //         prevIter->next = iter;
+                //     }
+                // }
                 mIter = type->getExpireMeta(iter);
                 prevIter = mIter;
                 iter = mIter->next;
             }
 
-            if ((newSegHdr = defragfns->defragAlloc(currentSegHdr))) {
-                if (currentSegHdr == ri.data) {
-                    raxSetData(ri.node, ri.data=newSegHdr); /* 如果第一个更新了, 需要更新rax的data */
-                } else {
-                    preLastIter->next = newSegHdr;
-                }
-                currentSegHdr = newSegHdr;
-            }
+            // if ((newSegHdr = defragfns->defragAlloc(currentSegHdr))) {
+            //     if (currentSegHdr == ri.data) {
+            //         raxSetData(ri.node, ri.data=newSegHdr); /* 如果第一个更新了, 需要更新rax的data */
+            //     } else {
+            //         preLastIter->next = newSegHdr;
+            //     }
+            //     currentSegHdr = newSegHdr;
+            // }
 
             preLastIter = mIter;
             if (mIter->lastItemBucket) {
-                mIter->next = currentSegHdr; /* 最后一个eitem需要指向前一个的seg */
+                // mIter->next = currentSegHdr; /* 最后一个eitem需要指向前一个的seg */
                 break;
             }
 
             NextSegHdr *nextSegHdr = mIter->next;
-            nextSegHdr->prevSeg = currentSegHdr; /* 如果不是最后一个, 则需要更新当前seg的前一个为更新后的 */
+            // nextSegHdr->prevSeg = currentSegHdr; /* 如果不是最后一个, 则需要更新当前seg的前一个为更新后的 */
             iter = nextSegHdr->head;
             mHead = type->getExpireMeta(iter);
         }
@@ -2000,7 +2001,8 @@ int ebDefrag(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragFu
         return 0;
     } else {
         // printf("rax\n");
-        return ebDefragRax(eb, type, cursor, defragfns, privdata);
+        // return ebDefragRax(eb, type, cursor, defragfns, privdata);
+        return 0;
     }
 }
 
