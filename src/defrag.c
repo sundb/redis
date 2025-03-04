@@ -860,8 +860,7 @@ void defragKey(defragKeysCtx *ctx, dictEntry *de) {
     /* Try to defrag robj and / or string value. */
     if (!(ob->type == OBJ_HASH && hashTypeGetMinExpire(ob, 0) != EB_EXPIRE_TIME_INVALID)) {
         /* If the dict doesn't have metadata, we directly defrag it. */
-        newob = activeDefragStringOb(ob);
-        if (newob) {
+        if ((newob = activeDefragStringOb(ob))) {
             kvstoreDictSetVal(db->keys, slot, de, newob);
             ob = newob;
         }
@@ -1212,7 +1211,7 @@ static doneStatus defragStageExpiresKvstore(void *ctx, monotime endtime) {
 
 void *activeDefragHExpiresStringOB(void *ptr, void *privdata) {
     robj *ob = ptr;
-    redisDb* db = privdata;
+    redisDb *db = privdata;
     serverAssert(ob->type == OBJ_HASH);
 
     if ((ob = activeDefragStringObEx(ob, 1))) {
@@ -1250,8 +1249,8 @@ static doneStatus defragStageHExpires(void *ctx, monotime endtime) {
     };
     while (1) {
         if (++iterations > 16 && getMonotonicUs() >= endtime) break;
-        int ret = ebDefrag(&db->hexpires, &hashExpireBucketsType, &defrag_hexpires_ctx->cursor, &eb_defragfns, db);
-        if (!ret) return DEFRAG_DONE;
+        if (!ebDefrag(&db->hexpires, &hashExpireBucketsType, &defrag_hexpires_ctx->cursor, &eb_defragfns, db))
+            return DEFRAG_DONE;
     }
 
     return DEFRAG_NOT_DONE;

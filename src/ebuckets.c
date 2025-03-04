@@ -1810,7 +1810,6 @@ void ebValidate(ebuckets eb, EbucketsType *type) {
 /* Defrag callback for radix tree iterator, called for each node,
  * used in order to defrag the nodes allocations. */
 int ebDefragRaxNode(raxNode **noderef, void *privdata) {
-    // printf("ebDefragRaxNode: %p\n", *noderef);
     ebDefragFunctions *defragfns = privdata;
     raxNode *newnode = defragfns->defragAlloc(*noderef);
     if (newnode) {
@@ -1840,7 +1839,6 @@ void ebDefragList(ebuckets *eb, EbucketsType *type, ebDefragFunctions *defragfns
 
 int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragFunctions *defragfns, void *privdata) {
     rax *rax = ebGetRaxPtr(*eb);
-    // printf("ebDefragRax start raxsize: %d\n", rax->numnodes);
     raxIterator ri;
     static unsigned char last[EB_KEY_SIZE];
 
@@ -1860,15 +1858,13 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
             return 0;
         }
         /* assign the iterator node callback after the seek, so that the
-        * initial nodes that are processed till now aren't covered */
+         * initial nodes that are processed till now aren't covered */
         ri.node_cb = ebDefragRaxNode;
         ri.privdata = defragfns;
     }
 
     (*cursor)++;
-    // printf("before next ri.node_cb: %p\n", ri.node_cb);
     if (raxNext(&ri)) {
-        // printf("ri.node: %p\n", ri.node);
         FirstSegHdr *firstSegHdr = ri.data;
         eItem newiter, iter = firstSegHdr->head;;
         ExpireMeta *mIter, *mHead;
@@ -1877,7 +1873,6 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
         CommonSegHdr *newSegHdr, *currentSegHdr = (CommonSegHdr*)firstSegHdr;
         ExpireMeta *preLastIter = NULL;
         while (1) {
-//            printf("mHead->numItems: %d\n", mHead->numItems);
             unsigned int numItems = mHead->numItems;
             ExpireMeta *prevIter = NULL;
             for (unsigned int i = 0; i < numItems; ++i) {
@@ -1919,10 +1914,8 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
         assert(ri.key_len==sizeof(last));
         memcpy(last,ri.key,ri.key_len);
         raxStop(&ri);
-        // printf("ebDefragRax end 1 raxsize: %d\n", rax->numnodes);
         return 1;
     }
-    // printf("ebDefragRax end 2 raxsize: %d\n", rax->numnodes);
     raxStop(&ri);
     *cursor = 0;
     return 0; 
@@ -2643,14 +2636,8 @@ int ebucketsTest(int argc, char **argv, int flags) {
                 printf("items: %p\n", (void*)items[i]);
                 ebAdd(&eb, &myEbucketsType, items[i], i);
             }
-            // printf("raxsize: %d\n", raxSize(ebGetRaxPtr(eb)));
-            // exit(0);
             assert((s <= EB_LIST_MAX_ITEMS) ? ebIsList(eb) : !ebIsList(eb));
             /* Defrag all the items. */
-            // for (int i = 0; i < s; i++) {
-            //     MyItem *newitem = ebDefragItem(&eb, &myEbucketsType, items[i], defragCallback);
-            //     if (newitem) items[i] = newitem;
-            // }
             unsigned long cursor;
             ebDefragFunctions defragfns = {
                 .defragAlloc = defragCallback,
