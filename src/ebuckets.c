@@ -1929,16 +1929,13 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
 }
 
 int ebDefrag(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragFunctions *defragfns, void *privdata) {
-    assert(!ebIsEmpty(*eb));
+    if (ebIsEmpty(*eb)) return 0;
 
     if (ebIsList(*eb)) {
-        // printf("list\n");
         ebDefragList(eb, type, defragfns, privdata);
         return 0;
     } else {
-        // printf("rax\n");
         return ebDefragRax(eb, type, cursor, defragfns, privdata);
-        return 0;
     }
 }
 

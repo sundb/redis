@@ -116,6 +116,13 @@ typedef struct {
 } defragKeysCtx;
 static_assert(offsetof(defragKeysCtx, kvstate) == 0, "defragStageKvstoreHelper requires this");
 
+/* Context for hexpires */
+typedef struct {
+    int dbid;
+    ebuckets hexpires;
+    unsigned long cursor;
+} defragHExpiresCtx;
+
 /* Context for pubsub kvstores */
 typedef dict *(*getClientChannelsFn)(client *);
 typedef struct {
@@ -1210,6 +1217,34 @@ static doneStatus defragStageExpiresKvstore(void *ctx, monotime endtime) {
         scanCallbackCountScanned, NULL, &defragfns);
 }
 
+void *activeDefragHExpiresStringOB(void *ptr, void *privdata) {
+    return ptr;
+    // robj *ob = ptr;
+    // return activeDefragStringObEx(ob, 1);
+}
+
+static doneStatus defragStageHExpires(void *ctx, monotime endtime) {
+    unsigned int iterations = 0;
+    defragHExpiresCtx *defrag_hexpires_ctx = ctx;
+    redisDb *db = &server.db[defrag_hexpires_ctx->dbid];
+    if (db->hexpires != defrag_hexpires_ctx->hexpires) {
+        /* There has been a change of the kvs (flushdb, swapdb, etc.). Just complete the stage. */
+        return DEFRAG_DONE;
+    }
+
+    ebDefragFunctions eb_defragfns = {
+        .defragAlloc = activeDefragAlloc,
+        .defragItem = activeDefragHExpiresStringOB
+    };
+    while (1) {
+        if (++iterations > 16 && getMonotonicUs() >= endtime) break;
+        int ret = ebDefrag(&db->hexpires, &hashExpireBucketsType, &defrag_hexpires_ctx->cursor, &eb_defragfns, db->hexpires);
+        if (!ret) return DEFRAG_DONE;
+    }
+
+    return DEFRAG_NOT_DONE;
+}
+
 static doneStatus defragStagePubsubKvstore(void *ctx, monotime endtime) {
     static dictDefragFunctions defragfns = {
         .defragAlloc = activeDefragAlloc,
@@ -1541,6 +1576,12 @@ static void beginDefragCycle(void) {
         defrag_expires_ctx->kvstate = INIT_KVSTORE_STATE(db->expires);
         defrag_expires_ctx->dbid = dbid;
         addDefragStage(defragStageExpiresKvstore, freeDefragKeysContext, defrag_expires_ctx);
+
+        /* Add stage for hexpires. */
+        defragHExpiresCtx *defrag_hexpires_ctx = zcalloc(sizeof(defragHExpiresCtx));
+        defrag_hexpires_ctx->hexpires = db->hexpires;
+        defrag_hexpires_ctx->dbid = dbid;
+        addDefragStage(defragStageHExpires, zfree, defrag_hexpires_ctx);
     }
 
     /* Add stage for pubsub channels. */
