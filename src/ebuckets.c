@@ -2268,373 +2268,373 @@ int ebucketsTest(int argc, char **argv, int flags) {
     int verbose = (flags & REDIS_TEST_VERBOSE) ? 2 : 1;
     UNUSED(verbose);
 
-// #ifdef EB_TEST_BENCHMARK
-//     TEST("ebuckets - benchmark 10 million items: alloc + add + activeExpire") {
+#ifdef EB_TEST_BENCHMARK
+    TEST("ebuckets - benchmark 10 million items: alloc + add + activeExpire") {
 
-//         struct TestParams {
-//             uint64_t minExpire;
-//             uint64_t maxExpire;
-//             int items;
-//             const char *description;
-//         } testCases[] = {
-//             { 1805092100000, 1805092100000 + (uint64_t) 1,                10000000, "1 msec distribution"  },
-//             { 1805092100000, 1805092100000 + (uint64_t) 1000,             10000000, "1 sec distribution"   },
-//             { 1805092100000, 1805092100000 + (uint64_t) 1000*60,          10000000, "1 min distribution"   },
-//             { 1805092100000, 1805092100000 + (uint64_t) 1000*60*60,       10000000, "1 hour distribution"  },
-//             { 1805092100000, 1805092100000 + (uint64_t) 1000*60*60*24,    10000000, "1 day distribution"   },
-//             { 1805092100000, 1805092100000 + (uint64_t) 1000*60*60*24*7,  10000000, "1 week distribution"  },
-//             { 1805092100000, 1805092100000 + (uint64_t) 1000*60*60*24*30, 10000000, "1 month distribution" }
-//         };
+        struct TestParams {
+            uint64_t minExpire;
+            uint64_t maxExpire;
+            int items;
+            const char *description;
+        } testCases[] = {
+            { 1805092100000, 1805092100000 + (uint64_t) 1,                10000000, "1 msec distribution"  },
+            { 1805092100000, 1805092100000 + (uint64_t) 1000,             10000000, "1 sec distribution"   },
+            { 1805092100000, 1805092100000 + (uint64_t) 1000*60,          10000000, "1 min distribution"   },
+            { 1805092100000, 1805092100000 + (uint64_t) 1000*60*60,       10000000, "1 hour distribution"  },
+            { 1805092100000, 1805092100000 + (uint64_t) 1000*60*60*24,    10000000, "1 day distribution"   },
+            { 1805092100000, 1805092100000 + (uint64_t) 1000*60*60*24*7,  10000000, "1 week distribution"  },
+            { 1805092100000, 1805092100000 + (uint64_t) 1000*60*60*24*30, 10000000, "1 month distribution" }
+        };
 
-//         /* selected test */
-//         uint32_t tid = EB_TEST_BENCHMARK;
+        /* selected test */
+        uint32_t tid = EB_TEST_BENCHMARK;
 
-//         printf("\n------ TEST EBUCKETS: %s ------\n", testCases[tid].description);
-//         uint64_t expireRanges[] = { testCases[tid].minExpire, testCases[tid].maxExpire };
-//         int itemsPerRange[] = { 0, testCases[tid].items };
+        printf("\n------ TEST EBUCKETS: %s ------\n", testCases[tid].description);
+        uint64_t expireRanges[] = { testCases[tid].minExpire, testCases[tid].maxExpire };
+        int itemsPerRange[] = { 0, testCases[tid].items };
 
-//         /* expireRanges[] is provided to distributeTest() as bucket-key values */
-//         for (uint32_t j = 0; j < ARRAY_SIZE(expireRanges); ++j) {
-//             expireRanges[j] = expireRanges[j] >> EB_BUCKET_KEY_PRECISION;
-//         }
+        /* expireRanges[] is provided to distributeTest() as bucket-key values */
+        for (uint32_t j = 0; j < ARRAY_SIZE(expireRanges); ++j) {
+            expireRanges[j] = expireRanges[j] >> EB_BUCKET_KEY_PRECISION;
+        }
 
-//         distributeTest(0, expireRanges, itemsPerRange, ARRAY_SIZE(expireRanges), 1, 1);
-//         return 0;
-//     }
-// #endif
+        distributeTest(0, expireRanges, itemsPerRange, ARRAY_SIZE(expireRanges), 1, 1);
+        return 0;
+    }
+#endif
 
-//     TEST("basic iterator test") {
-//         MyItem *items[100];
-//         for (uint32_t numItems = 0 ; numItems < ARRAY_SIZE(items) ; ++numItems) {
-//             ebuckets eb = NULL;
-//             EbucketsIterator iter;
+    TEST("basic iterator test") {
+        MyItem *items[100];
+        for (uint32_t numItems = 0 ; numItems < ARRAY_SIZE(items) ; ++numItems) {
+            ebuckets eb = NULL;
+            EbucketsIterator iter;
 
-//             /* Create and add items to ebuckets */
-//             for (uint32_t i = 0; i < numItems; i++) {
-//                 items[i] = zmalloc(sizeof(MyItem));
-//                 ebAdd(&eb, &myEbucketsType, items[i], i);
-//             }
+            /* Create and add items to ebuckets */
+            for (uint32_t i = 0; i < numItems; i++) {
+                items[i] = zmalloc(sizeof(MyItem));
+                ebAdd(&eb, &myEbucketsType, items[i], i);
+            }
 
-//             /* iterate items */
-//             ebStart(&iter, eb, &myEbucketsType);
-//             for (uint32_t i = 0; i < numItems; i++) {
-//                 assert(iter.currItem == items[i]);
-//                 int res = ebNext(&iter);
-//                 if (i+1<numItems) {
-//                     assert(res == 1);
-//                     assert(iter.currItem != NULL);
-//                 } else {
-//                     assert(res == 0);
-//                     assert(iter.currItem == NULL);
-//                 }
-//             }
-//             ebStop(&iter);
+            /* iterate items */
+            ebStart(&iter, eb, &myEbucketsType);
+            for (uint32_t i = 0; i < numItems; i++) {
+                assert(iter.currItem == items[i]);
+                int res = ebNext(&iter);
+                if (i+1<numItems) {
+                    assert(res == 1);
+                    assert(iter.currItem != NULL);
+                } else {
+                    assert(res == 0);
+                    assert(iter.currItem == NULL);
+                }
+            }
+            ebStop(&iter);
 
-//             /* iterate buckets */
-//             ebStart(&iter, eb, &myEbucketsType);
-//             uint32_t countItems = 0;
+            /* iterate buckets */
+            ebStart(&iter, eb, &myEbucketsType);
+            uint32_t countItems = 0;
 
-//             uint32_t countBuckets = 0;
-//             while (1) {
-//                 countItems += iter.itemsCurrBucket;
-//                 if (!ebNextBucket(&iter)) break;
-//                 countBuckets++;
-//             }
-//             ebStop(&iter);
-//             assert(countItems == numItems);
-//             if (numItems>=8) assert(numItems/8 >= countBuckets);
-//             ebDestroy(&eb, &myEbucketsType, NULL);
-//         }
-//     }
+            uint32_t countBuckets = 0;
+            while (1) {
+                countItems += iter.itemsCurrBucket;
+                if (!ebNextBucket(&iter)) break;
+                countBuckets++;
+            }
+            ebStop(&iter);
+            assert(countItems == numItems);
+            if (numItems>=8) assert(numItems/8 >= countBuckets);
+            ebDestroy(&eb, &myEbucketsType, NULL);
+        }
+    }
 
-//     TEST("list - Create a single item, get TTL, and remove") {
-//         MyItem *singleItem = zmalloc(sizeof(MyItem));
-//         ebuckets eb = NULL;
-//         ebAdd(&eb, &myEbucketsType, singleItem, 1000);
-//         assert(ebGetExpireTime(&myEbucketsType, singleItem) == 1000 );
+    TEST("list - Create a single item, get TTL, and remove") {
+        MyItem *singleItem = zmalloc(sizeof(MyItem));
+        ebuckets eb = NULL;
+        ebAdd(&eb, &myEbucketsType, singleItem, 1000);
+        assert(ebGetExpireTime(&myEbucketsType, singleItem) == 1000 );
 
-//         /* remove the item */
-//         assert(ebRemove(&eb, &myEbucketsType, singleItem));
-//         /* now the ebuckets is empty */
-//         assert(ebRemove(&eb, &myEbucketsType, singleItem) == 0);
+        /* remove the item */
+        assert(ebRemove(&eb, &myEbucketsType, singleItem));
+        /* now the ebuckets is empty */
+        assert(ebRemove(&eb, &myEbucketsType, singleItem) == 0);
 
-//         zfree(singleItem);
+        zfree(singleItem);
 
-//         ebDestroy(&eb, &myEbucketsType, NULL);
-//     }
+        ebDestroy(&eb, &myEbucketsType, NULL);
+    }
 
-//     TEST("list - Create few items on different times, get TTL, and then remove") {
-//         MyItem *items[EB_LIST_MAX_ITEMS];
-//         ebuckets eb = NULL;
-//         for (int i = 0 ; i < EB_LIST_MAX_ITEMS  ; i++) {
-//             items[i] = zmalloc(sizeof(MyItem));
-//             ebAdd(&eb, &myEbucketsType, items[i], i);
-//         }
+    TEST("list - Create few items on different times, get TTL, and then remove") {
+        MyItem *items[EB_LIST_MAX_ITEMS];
+        ebuckets eb = NULL;
+        for (int i = 0 ; i < EB_LIST_MAX_ITEMS  ; i++) {
+            items[i] = zmalloc(sizeof(MyItem));
+            ebAdd(&eb, &myEbucketsType, items[i], i);
+        }
 
-//         for (uint64_t i = 0 ; i < EB_LIST_MAX_ITEMS ; i++) {
-//             assert(ebGetExpireTime(&myEbucketsType, items[i]) == i );
-//             assert(ebRemove(&eb, &myEbucketsType, items[i]));
-//         }
+        for (uint64_t i = 0 ; i < EB_LIST_MAX_ITEMS ; i++) {
+            assert(ebGetExpireTime(&myEbucketsType, items[i]) == i );
+            assert(ebRemove(&eb, &myEbucketsType, items[i]));
+        }
 
-//         for (int i = 0 ; i < EB_LIST_MAX_ITEMS  ; i++)
-//             zfree(items[i]);
+        for (int i = 0 ; i < EB_LIST_MAX_ITEMS  ; i++)
+            zfree(items[i]);
 
-//         ebDestroy(&eb, &myEbucketsType, NULL);
-//     }
+        ebDestroy(&eb, &myEbucketsType, NULL);
+    }
 
-//     TEST("list - Create few items on different times, get TTL, and then delete") {
-//         MyItem *items[EB_LIST_MAX_ITEMS];
-//         ebuckets eb = NULL;
-//         for (int i = 0 ; i < EB_LIST_MAX_ITEMS  ; i++) {
-//             items[i] = zmalloc(sizeof(MyItem));
-//             ebAdd(&eb, &myEbucketsType, items[i], i);
-//         }
+    TEST("list - Create few items on different times, get TTL, and then delete") {
+        MyItem *items[EB_LIST_MAX_ITEMS];
+        ebuckets eb = NULL;
+        for (int i = 0 ; i < EB_LIST_MAX_ITEMS  ; i++) {
+            items[i] = zmalloc(sizeof(MyItem));
+            ebAdd(&eb, &myEbucketsType, items[i], i);
+        }
 
-//         for (uint64_t i = 0 ; i < EB_LIST_MAX_ITEMS ; i++) {
-//             assert(ebGetExpireTime(&myEbucketsType, items[i]) == i );
-//         }
+        for (uint64_t i = 0 ; i < EB_LIST_MAX_ITEMS ; i++) {
+            assert(ebGetExpireTime(&myEbucketsType, items[i]) == i );
+        }
 
-//         ebDestroy(&eb, &myEbucketsType, NULL);
-//     }
+        ebDestroy(&eb, &myEbucketsType, NULL);
+    }
 
-//     TEST_COND("ebuckets - Add items with increased/decreased expiration time and then expire",
-//               EB_BUCKET_KEY_PRECISION > 0)
-//     {
-//         ebuckets eb = NULL;
+    TEST_COND("ebuckets - Add items with increased/decreased expiration time and then expire",
+              EB_BUCKET_KEY_PRECISION > 0)
+    {
+        ebuckets eb = NULL;
 
-//         for (int isDecr = 0; isDecr < 2; ++isDecr) {
-//             for (uint32_t numItems = 1; numItems < 64; ++numItems) {
-//                 uint64_t step = 1 << EB_BUCKET_KEY_PRECISION;
+        for (int isDecr = 0; isDecr < 2; ++isDecr) {
+            for (uint32_t numItems = 1; numItems < 64; ++numItems) {
+                uint64_t step = 1 << EB_BUCKET_KEY_PRECISION;
 
-//                 if (isDecr == 0)
-//                     addItems(&eb, 0, step, numItems, NULL);
-//                 else
-//                     addItems(&eb, (numItems - 1) * step, -step, numItems, NULL);
+                if (isDecr == 0)
+                    addItems(&eb, 0, step, numItems, NULL);
+                else
+                    addItems(&eb, (numItems - 1) * step, -step, numItems, NULL);
 
-//                 for (uint32_t i = 1; i <= numItems; i++) {
-//                     TimeRange range = {EB_BUCKET_EXP_TIME(i - 1), EB_BUCKET_EXP_TIME(i)};
-//                     ExpireInfo info = {
-//                             .maxToExpire = 1,
-//                             .onExpireItem = expireItemCb,
-//                             .ctx = &range,
-//                             .now = EB_BUCKET_EXP_TIME(i),
-//                             .itemsExpired = 0};
+                for (uint32_t i = 1; i <= numItems; i++) {
+                    TimeRange range = {EB_BUCKET_EXP_TIME(i - 1), EB_BUCKET_EXP_TIME(i)};
+                    ExpireInfo info = {
+                            .maxToExpire = 1,
+                            .onExpireItem = expireItemCb,
+                            .ctx = &range,
+                            .now = EB_BUCKET_EXP_TIME(i),
+                            .itemsExpired = 0};
 
-//                     ebExpire(&eb, &myEbucketsType, &info);
-//                     assert(info.itemsExpired == 1);
-//                     if (i == numItems) { /* if last item */
-//                         assert(eb == NULL);
-//                         assert(info.nextExpireTime == EB_EXPIRE_TIME_INVALID);
-//                     } else {
-//                         assert(info.nextExpireTime == EB_BUCKET_EXP_TIME(i));
-//                     }
-//                 }
-//             }
-//         }
-//     }
+                    ebExpire(&eb, &myEbucketsType, &info);
+                    assert(info.itemsExpired == 1);
+                    if (i == numItems) { /* if last item */
+                        assert(eb == NULL);
+                        assert(info.nextExpireTime == EB_EXPIRE_TIME_INVALID);
+                    } else {
+                        assert(info.nextExpireTime == EB_BUCKET_EXP_TIME(i));
+                    }
+                }
+            }
+        }
+    }
 
-//     TEST_COND("ebuckets - Create items with same expiration time and then expire",
-//               EB_BUCKET_KEY_PRECISION > 0)
-//     {
-//         ebuckets eb = NULL;
-//         uint64_t expirePerIter = 2;
-//         for (uint32_t numIterations = 1; numIterations < 100; ++numIterations) {
-//             uint32_t numItems = numIterations * expirePerIter;
-//             uint64_t expireTime = (1 << EB_BUCKET_KEY_PRECISION) + 1;
-//             addItems(&eb, expireTime, 0, numItems, NULL);
+    TEST_COND("ebuckets - Create items with same expiration time and then expire",
+              EB_BUCKET_KEY_PRECISION > 0)
+    {
+        ebuckets eb = NULL;
+        uint64_t expirePerIter = 2;
+        for (uint32_t numIterations = 1; numIterations < 100; ++numIterations) {
+            uint32_t numItems = numIterations * expirePerIter;
+            uint64_t expireTime = (1 << EB_BUCKET_KEY_PRECISION) + 1;
+            addItems(&eb, expireTime, 0, numItems, NULL);
 
-//             for (uint32_t i = 1; i <= numIterations; i++) {
-//                 ExpireInfo info = {
-//                         .maxToExpire = expirePerIter,
-//                         .onExpireItem = expireItemCb,
-//                         .ctx = NULL,
-//                         .now = (2 << EB_BUCKET_KEY_PRECISION),
-//                         .itemsExpired = 0};
-//                 ebExpire(&eb, &myEbucketsType, &info);
-//                 assert(info.itemsExpired == expirePerIter);
-//                 if (i == numIterations) { /* if last item */
-//                     assert(eb == NULL);
-//                     assert(info.nextExpireTime == EB_EXPIRE_TIME_INVALID);
-//                 } else {
-//                     assert(info.nextExpireTime == expireTime);
-//                 }
-//             }
-//         }
-//     }
+            for (uint32_t i = 1; i <= numIterations; i++) {
+                ExpireInfo info = {
+                        .maxToExpire = expirePerIter,
+                        .onExpireItem = expireItemCb,
+                        .ctx = NULL,
+                        .now = (2 << EB_BUCKET_KEY_PRECISION),
+                        .itemsExpired = 0};
+                ebExpire(&eb, &myEbucketsType, &info);
+                assert(info.itemsExpired == expirePerIter);
+                if (i == numIterations) { /* if last item */
+                    assert(eb == NULL);
+                    assert(info.nextExpireTime == EB_EXPIRE_TIME_INVALID);
+                } else {
+                    assert(info.nextExpireTime == expireTime);
+                }
+            }
+        }
+    }
 
-//     TEST("list - Create few items on random times and then expire/delete ") {
-//         for (int isExpire = 0 ; isExpire <= 1 ; ++isExpire ) {
-//             uint64_t expireRanges[] = {1000};   /* bucket-keys */
-//             int itemsPerRange[] = {EB_LIST_MAX_ITEMS};
-//             distributeTest(0, expireRanges, itemsPerRange,
-//                            ARRAY_SIZE(expireRanges), isExpire, 0);
-//         }
-//     }
+    TEST("list - Create few items on random times and then expire/delete ") {
+        for (int isExpire = 0 ; isExpire <= 1 ; ++isExpire ) {
+            uint64_t expireRanges[] = {1000};   /* bucket-keys */
+            int itemsPerRange[] = {EB_LIST_MAX_ITEMS};
+            distributeTest(0, expireRanges, itemsPerRange,
+                           ARRAY_SIZE(expireRanges), isExpire, 0);
+        }
+    }
 
-//     TEST("list - Create few items (list) on same time and then active expire/delete ") {
-//         for (int isExpire = 0 ; isExpire <= 1 ; ++isExpire ) {
-//             uint64_t expireRanges[] = {1, 2};  /* bucket-keys */
-//             int itemsPerRange[] = {0, EB_LIST_MAX_ITEMS};
+    TEST("list - Create few items (list) on same time and then active expire/delete ") {
+        for (int isExpire = 0 ; isExpire <= 1 ; ++isExpire ) {
+            uint64_t expireRanges[] = {1, 2};  /* bucket-keys */
+            int itemsPerRange[] = {0, EB_LIST_MAX_ITEMS};
 
-//             distributeTest(0, expireRanges, itemsPerRange,
-//                            ARRAY_SIZE(expireRanges), isExpire, 0);
-//         }
-//     }
+            distributeTest(0, expireRanges, itemsPerRange,
+                           ARRAY_SIZE(expireRanges), isExpire, 0);
+        }
+    }
 
-//     TEST("ebuckets - Create many items on same time and then active expire/delete ") {
-//         for (int isExpire = 1 ; isExpire <= 1 ; ++isExpire ) {
-//             uint64_t expireRanges[] = {1, 2}; /* bucket-keys */
-//             int itemsPerRange[] = {0, 20};
+    TEST("ebuckets - Create many items on same time and then active expire/delete ") {
+        for (int isExpire = 1 ; isExpire <= 1 ; ++isExpire ) {
+            uint64_t expireRanges[] = {1, 2}; /* bucket-keys */
+            int itemsPerRange[] = {0, 20};
 
-//             distributeTest(0, expireRanges, itemsPerRange,
-//                            ARRAY_SIZE(expireRanges), isExpire, 0);
-//         }
-//     }
+            distributeTest(0, expireRanges, itemsPerRange,
+                           ARRAY_SIZE(expireRanges), isExpire, 0);
+        }
+    }
 
-//     TEST("ebuckets - Create items on different times and then expire/delete ") {
-//         for (int isExpire = 0 ; isExpire <= 0 ; ++isExpire ) {
-//             for (int numItems = 1 ; numItems < 100 ; ++numItems ) {
-//                 uint64_t expireRanges[] = {1000000}; /* bucket-keys */
-//                 int itemsPerRange[] = {numItems};
-//                 distributeTest(0, expireRanges, itemsPerRange,
-//                                ARRAY_SIZE(expireRanges), 1, 0);
-//             }
-//         }
-//     }
+    TEST("ebuckets - Create items on different times and then expire/delete ") {
+        for (int isExpire = 0 ; isExpire <= 0 ; ++isExpire ) {
+            for (int numItems = 1 ; numItems < 100 ; ++numItems ) {
+                uint64_t expireRanges[] = {1000000}; /* bucket-keys */
+                int itemsPerRange[] = {numItems};
+                distributeTest(0, expireRanges, itemsPerRange,
+                               ARRAY_SIZE(expireRanges), 1, 0);
+            }
+        }
+    }
 
-//     TEST("ebuckets - Create items on different times and then ebRemove() ") {
-//         ebuckets eb = NULL;
+    TEST("ebuckets - Create items on different times and then ebRemove() ") {
+        ebuckets eb = NULL;
 
-//         for (int step = -1 ; step <= 1 ; ++step) {
-//             for (int numItems = 1; numItems <= EB_SEG_MAX_ITEMS*3; ++numItems) {
-//                 for (int offset = 0; offset < numItems; offset++) {
-//                     MyItem *items[numItems];
-//                     uint64_t startValue = 1000 << EB_BUCKET_KEY_PRECISION;
-//                     int stepValue = step * (1 << EB_BUCKET_KEY_PRECISION);
-//                     addItems(&eb, startValue, stepValue, numItems, items);
-//                     for (int i = 0; i < numItems; i++) {
-//                         int at = (i + offset) % numItems;
-//                         assert(ebRemove(&eb, &myEbucketsType, items[at]));
-//                         zfree(items[at]);
-//                     }
-//                     assert(eb == NULL);
-//                 }
-//             }
-//         }
-//     }
+        for (int step = -1 ; step <= 1 ; ++step) {
+            for (int numItems = 1; numItems <= EB_SEG_MAX_ITEMS*3; ++numItems) {
+                for (int offset = 0; offset < numItems; offset++) {
+                    MyItem *items[numItems];
+                    uint64_t startValue = 1000 << EB_BUCKET_KEY_PRECISION;
+                    int stepValue = step * (1 << EB_BUCKET_KEY_PRECISION);
+                    addItems(&eb, startValue, stepValue, numItems, items);
+                    for (int i = 0; i < numItems; i++) {
+                        int at = (i + offset) % numItems;
+                        assert(ebRemove(&eb, &myEbucketsType, items[at]));
+                        zfree(items[at]);
+                    }
+                    assert(eb == NULL);
+                }
+            }
+        }
+    }
 
-//     TEST("ebuckets - test min/max expire time") {
-//         ebuckets eb = NULL;
-//         MyItem items[3*EB_SEG_MAX_ITEMS];
-//         for (int numItems = 1 ; numItems < (int)ARRAY_SIZE(items) ; numItems++) {
-//             uint64_t minExpTime = RAND_MAX, maxExpTime = 0;
-//             for (int i = 0; i < numItems; i++) {
-//                  /* generate random expiration time */
-//                 uint64_t expireTime = rand();
-//                 if (expireTime < minExpTime) minExpTime = expireTime;
-//                 if (expireTime > maxExpTime) maxExpTime = expireTime;
-//                 ebAdd(&eb, &myEbucketsType2, items + i, expireTime);
-//                 assert(ebGetNextTimeToExpire(eb, &myEbucketsType2) == minExpTime);
-//                 assert(ebGetMaxExpireTime(eb, &myEbucketsType2, 0) == maxExpTime);
-//             }
-//             ebDestroy(&eb, &myEbucketsType2, NULL);
-//         }
-//     }
+    TEST("ebuckets - test min/max expire time") {
+        ebuckets eb = NULL;
+        MyItem items[3*EB_SEG_MAX_ITEMS];
+        for (int numItems = 1 ; numItems < (int)ARRAY_SIZE(items) ; numItems++) {
+            uint64_t minExpTime = RAND_MAX, maxExpTime = 0;
+            for (int i = 0; i < numItems; i++) {
+                 /* generate random expiration time */
+                uint64_t expireTime = rand();
+                if (expireTime < minExpTime) minExpTime = expireTime;
+                if (expireTime > maxExpTime) maxExpTime = expireTime;
+                ebAdd(&eb, &myEbucketsType2, items + i, expireTime);
+                assert(ebGetNextTimeToExpire(eb, &myEbucketsType2) == minExpTime);
+                assert(ebGetMaxExpireTime(eb, &myEbucketsType2, 0) == maxExpTime);
+            }
+            ebDestroy(&eb, &myEbucketsType2, NULL);
+        }
+    }
 
-//     TEST_COND("ebuckets - test min/max expire time, with extended-segment",
-//               (1<<EB_BUCKET_KEY_PRECISION) > 2*EB_SEG_MAX_ITEMS) {
-//         ebuckets eb = NULL;
-//         MyItem items[(2*EB_SEG_MAX_ITEMS)-1];
-//         for (int numItems = EB_SEG_MAX_ITEMS+1 ; numItems < (int)ARRAY_SIZE(items) ; numItems++) {
-//             /* First reach extended-segment (two chained segments in a bucket) */
-//             for (int i = 0; i <= EB_SEG_MAX_ITEMS; i++) {
-//                 uint64_t itemExpireTime = (1<<EB_BUCKET_KEY_PRECISION) + i;
-//                 ebAdd(&eb, &myEbucketsType2, items + i, itemExpireTime);
-//             }
+    TEST_COND("ebuckets - test min/max expire time, with extended-segment",
+              (1<<EB_BUCKET_KEY_PRECISION) > 2*EB_SEG_MAX_ITEMS) {
+        ebuckets eb = NULL;
+        MyItem items[(2*EB_SEG_MAX_ITEMS)-1];
+        for (int numItems = EB_SEG_MAX_ITEMS+1 ; numItems < (int)ARRAY_SIZE(items) ; numItems++) {
+            /* First reach extended-segment (two chained segments in a bucket) */
+            for (int i = 0; i <= EB_SEG_MAX_ITEMS; i++) {
+                uint64_t itemExpireTime = (1<<EB_BUCKET_KEY_PRECISION) + i;
+                ebAdd(&eb, &myEbucketsType2, items + i, itemExpireTime);
+            }
 
-//             /* Now start adding more items to extended-segment and verify min/max */
-//             for (int i = EB_SEG_MAX_ITEMS+1; i < numItems; i++) {
-//                 uint64_t itemExpireTime = (1<<EB_BUCKET_KEY_PRECISION) + i;
-//                 ebAdd(&eb, &myEbucketsType2, items + i, itemExpireTime);
-//                 assert(ebGetNextTimeToExpire(eb, &myEbucketsType2) == (uint64_t)(2<<EB_BUCKET_KEY_PRECISION));
-//                 assert(ebGetMaxExpireTime(eb, &myEbucketsType2, 0) == (uint64_t)(2<<EB_BUCKET_KEY_PRECISION));
-//                 assert(ebGetMaxExpireTime(eb, &myEbucketsType2, 1) == (uint64_t)((1<<EB_BUCKET_KEY_PRECISION) + i));
-//             }
-//             ebDestroy(&eb, &myEbucketsType2, NULL);
-//         }
-//     }
+            /* Now start adding more items to extended-segment and verify min/max */
+            for (int i = EB_SEG_MAX_ITEMS+1; i < numItems; i++) {
+                uint64_t itemExpireTime = (1<<EB_BUCKET_KEY_PRECISION) + i;
+                ebAdd(&eb, &myEbucketsType2, items + i, itemExpireTime);
+                assert(ebGetNextTimeToExpire(eb, &myEbucketsType2) == (uint64_t)(2<<EB_BUCKET_KEY_PRECISION));
+                assert(ebGetMaxExpireTime(eb, &myEbucketsType2, 0) == (uint64_t)(2<<EB_BUCKET_KEY_PRECISION));
+                assert(ebGetMaxExpireTime(eb, &myEbucketsType2, 1) == (uint64_t)((1<<EB_BUCKET_KEY_PRECISION) + i));
+            }
+            ebDestroy(&eb, &myEbucketsType2, NULL);
+        }
+    }
 
-//     TEST("ebuckets - active-expire dry-run") {
-//         ebuckets eb = NULL;
-//         MyItem items[2*EB_SEG_MAX_ITEMS];
+    TEST("ebuckets - active-expire dry-run") {
+        ebuckets eb = NULL;
+        MyItem items[2*EB_SEG_MAX_ITEMS];
 
-//         for (int numItems = 1 ; numItems < (int)ARRAY_SIZE(items) ; numItems++) {
-//             int maxExpireKey = (numItems % 2) ? 40 : 2;
-//             /* Allocate numItems and add to ebuckets */
-//             for (int i = 0; i < numItems; i++) {
-//                 /* generate random expiration time */
-//                 uint64_t expireTime = (rand() % maxExpireKey) << EB_BUCKET_KEY_PRECISION;
-//                 ebAdd(&eb, &myEbucketsType2, items + i, expireTime);
-//             }
+        for (int numItems = 1 ; numItems < (int)ARRAY_SIZE(items) ; numItems++) {
+            int maxExpireKey = (numItems % 2) ? 40 : 2;
+            /* Allocate numItems and add to ebuckets */
+            for (int i = 0; i < numItems; i++) {
+                /* generate random expiration time */
+                uint64_t expireTime = (rand() % maxExpireKey) << EB_BUCKET_KEY_PRECISION;
+                ebAdd(&eb, &myEbucketsType2, items + i, expireTime);
+            }
 
-//             for (int i = 0 ; i <= maxExpireKey ; ++i) {
-//                 uint64_t now = i << EB_BUCKET_KEY_PRECISION;
+            for (int i = 0 ; i <= maxExpireKey ; ++i) {
+                uint64_t now = i << EB_BUCKET_KEY_PRECISION;
 
-//                 /* Count how much items are expired */
-//                 uint64_t expectedNumExpired = 0;
-//                 for (int j = 0; j < numItems; j++) {
-//                     if (ebGetExpireTime(&myEbucketsType2, items + j) < now)
-//                         expectedNumExpired++;
-//                 }
-//                 /* Perform dry-run and verify number of expired items */
-//                 assert(ebExpireDryRun(eb, &myEbucketsType2, now) == expectedNumExpired);
-//             }
-//             ebDestroy(&eb, &myEbucketsType2, NULL);
-//         }
-//     }
+                /* Count how much items are expired */
+                uint64_t expectedNumExpired = 0;
+                for (int j = 0; j < numItems; j++) {
+                    if (ebGetExpireTime(&myEbucketsType2, items + j) < now)
+                        expectedNumExpired++;
+                }
+                /* Perform dry-run and verify number of expired items */
+                assert(ebExpireDryRun(eb, &myEbucketsType2, now) == expectedNumExpired);
+            }
+            ebDestroy(&eb, &myEbucketsType2, NULL);
+        }
+    }
 
-//     TEST("ebuckets - active expire callback returns ACT_UPDATE_EXP_ITEM") {
-//         ebuckets eb = NULL;
-//         MyItem items[2*EB_SEG_MAX_ITEMS];
-//         int numItems = 2*EB_SEG_MAX_ITEMS;
+    TEST("ebuckets - active expire callback returns ACT_UPDATE_EXP_ITEM") {
+        ebuckets eb = NULL;
+        MyItem items[2*EB_SEG_MAX_ITEMS];
+        int numItems = 2*EB_SEG_MAX_ITEMS;
 
-//         /* timeline */
-//         int expiredAt           = 2,
-//             applyActiveExpireAt = 3,
-//             updateItemTo        = 5,
-//             expectedExpiredAt   = 6;
+        /* timeline */
+        int expiredAt           = 2,
+            applyActiveExpireAt = 3,
+            updateItemTo        = 5,
+            expectedExpiredAt   = 6;
 
-//         /* Allocate numItems and add to ebuckets */
-//         for (int i = 0; i < numItems; i++)
-//             ebAdd(&eb, &myEbucketsType2, items + i, expiredAt << EB_BUCKET_KEY_PRECISION);
+        /* Allocate numItems and add to ebuckets */
+        for (int i = 0; i < numItems; i++)
+            ebAdd(&eb, &myEbucketsType2, items + i, expiredAt << EB_BUCKET_KEY_PRECISION);
 
-//         /* active-expire. Expected that all but one will be expired */
-//         ExpireInfo info = {
-//                 .maxToExpire = 0xFFFFFFFF,
-//                 .onExpireItem = expireUpdateThirdItemCb,
-//                 .ctx = (void *) (uintptr_t) (updateItemTo << EB_BUCKET_KEY_PRECISION),
-//                 .now = applyActiveExpireAt << EB_BUCKET_KEY_PRECISION,
-//                 .itemsExpired = 0};
-//         ebExpire(&eb, &myEbucketsType2, &info);
-//         assert(info.itemsExpired == (uint64_t) numItems);
-//         assert(info.nextExpireTime == (uint64_t)updateItemTo << EB_BUCKET_KEY_PRECISION);
-//         assert(ebGetTotalItems(eb, &myEbucketsType2) == 1);
+        /* active-expire. Expected that all but one will be expired */
+        ExpireInfo info = {
+                .maxToExpire = 0xFFFFFFFF,
+                .onExpireItem = expireUpdateThirdItemCb,
+                .ctx = (void *) (uintptr_t) (updateItemTo << EB_BUCKET_KEY_PRECISION),
+                .now = applyActiveExpireAt << EB_BUCKET_KEY_PRECISION,
+                .itemsExpired = 0};
+        ebExpire(&eb, &myEbucketsType2, &info);
+        assert(info.itemsExpired == (uint64_t) numItems);
+        assert(info.nextExpireTime == (uint64_t)updateItemTo << EB_BUCKET_KEY_PRECISION);
+        assert(ebGetTotalItems(eb, &myEbucketsType2) == 1);
 
-//         /* active-expire. Expected that all will be expired */
-//         ExpireInfo info2 = {
-//                 .maxToExpire = 0xFFFFFFFF,
-//                 .onExpireItem = expireUpdateThirdItemCb,
-//                 .ctx = (void *) (uintptr_t) (updateItemTo << EB_BUCKET_KEY_PRECISION),
-//                 .now = expectedExpiredAt << EB_BUCKET_KEY_PRECISION,
-//                 .itemsExpired = 0};
-//         ebExpire(&eb, &myEbucketsType2, &info2);
-//         assert(info2.itemsExpired == (uint64_t) 1);
-//         assert(info2.nextExpireTime == EB_EXPIRE_TIME_INVALID);
-//         assert(ebGetTotalItems(eb, &myEbucketsType2) == 0);
+        /* active-expire. Expected that all will be expired */
+        ExpireInfo info2 = {
+                .maxToExpire = 0xFFFFFFFF,
+                .onExpireItem = expireUpdateThirdItemCb,
+                .ctx = (void *) (uintptr_t) (updateItemTo << EB_BUCKET_KEY_PRECISION),
+                .now = expectedExpiredAt << EB_BUCKET_KEY_PRECISION,
+                .itemsExpired = 0};
+        ebExpire(&eb, &myEbucketsType2, &info2);
+        assert(info2.itemsExpired == (uint64_t) 1);
+        assert(info2.nextExpireTime == EB_EXPIRE_TIME_INVALID);
+        assert(ebGetTotalItems(eb, &myEbucketsType2) == 0);
 
-//         ebDestroy(&eb, &myEbucketsType2, NULL);
+        ebDestroy(&eb, &myEbucketsType2, NULL);
 
-//     }
+    }
 
     TEST("item defragmentation") {
         for (int s = 1; s <= EB_LIST_MAX_ITEMS * 3; s++) {
@@ -2662,11 +2662,8 @@ int ebucketsTest(int argc, char **argv, int flags) {
                 .defragItem = defragItemCallback,
             };
             printf("defrag start\n");
-            while (ebDefrag(&eb, &myEbucketsType, &cursor, &defragfns, items)) {
-                // printf("defrag start break\n");
-            }
+            while (ebDefrag(&eb, &myEbucketsType, &cursor, &defragfns, items)) {}
             ebValidate(eb, &myEbucketsType);
-            // printf("end\n");
             ebDestroy(&eb, &myEbucketsType, NULL);
         }
     }
