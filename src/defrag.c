@@ -1218,9 +1218,9 @@ static doneStatus defragStageExpiresKvstore(void *ctx, monotime endtime) {
 }
 
 void *activeDefragHExpiresStringOB(void *ptr, void *privdata) {
-    return ptr;
-    // robj *ob = ptr;
-    // return activeDefragStringObEx(ob, 1);
+    UNUSED(privdata);
+    robj *ob = ptr;
+    return activeDefragStringObEx(ob, 1);
 }
 
 static doneStatus defragStageHExpires(void *ctx, monotime endtime) {
