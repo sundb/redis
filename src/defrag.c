@@ -201,7 +201,7 @@ hfield activeDefragHfield(hfield hf) {
 }
 
 void *activeDefragHfield1(void *hfptr, void *privdata) {
-    printf("activeDefragHfield, %s\n", hfptr);
+    // printf("activeDefragHfield, %s\n", hfptr);
     hfield hf = hfptr, newhf;
     dict *d = privdata;
 
@@ -406,7 +406,7 @@ void activeDefragHfieldDictCallback(void *privdata, const dictEntry *de) {
 
     if (hfieldGetExpireTime(hf) == EB_EXPIRE_TIME_INVALID) {
         /* If the hfield does not have TTL, we directly defrag it. */
-        // activeDefragHfield(hf, d);
+        activeDefragHfield1(hf, d);
     } else {
         /* do other place */
     }
@@ -858,17 +858,13 @@ void defragKey(defragKeysCtx *ctx, dictEntry *de) {
     }
 
     /* Try to defrag robj and / or string value. */
-    if (unlikely(ob->type == OBJ_HASH && hashTypeGetMinExpire(ob, 0) != EB_EXPIRE_TIME_INVALID)) {
-        /* Update its reference in the ebucket while defragging it. */
-        newob = ebDefragItem(&db->hexpires, &hashExpireBucketsType, ob,
-                             (ebDefragFunction *)activeDefragStringOb);
-    } else {
+    if (!(ob->type == OBJ_HASH && hashTypeGetMinExpire(ob, 0) != EB_EXPIRE_TIME_INVALID)) {
         /* If the dict doesn't have metadata, we directly defrag it. */
         newob = activeDefragStringOb(ob);
-    }
-    if (newob) {
-        kvstoreDictSetVal(db->keys, slot, de, newob);
-        ob = newob;
+        if (newob) {
+            kvstoreDictSetVal(db->keys, slot, de, newob);
+            ob = newob;
+        }
     }
 
     if (ob->type == OBJ_STRING) {

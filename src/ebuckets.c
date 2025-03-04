@@ -1809,68 +1809,6 @@ void ebValidate(ebuckets eb, EbucketsType *type) {
         ebValidateRax(ebGetRaxPtr(eb), type);
 }
 
-/* Reallocates the memory used by the item using the provided allocation function.
- * This feature was added for the active defrag feature.
- *
- * The 'defragfn' callbacks are called with a pointer to memory that callback
- * can reallocate. The callbacks should return a new memory address or NULL,
- * where NULL means that no reallocation happened and the old memory is still valid.
- * 
- * Note: It is the caller's responsibility to ensure that the item has a valid expire time. */
-eItem ebDefragItem(ebuckets *eb, EbucketsType *type, eItem item, ebDefragFunction *defragfn) {
-    assert(!ebIsEmpty(*eb));
-    if (ebIsList(*eb)) {
-        ExpireMeta *prevem = NULL;
-        eItem curitem = ebGetListPtr(type, *eb);
-        while (curitem != NULL) {
-            if (curitem == item) {
-                if ((curitem = defragfn(curitem))) {
-                    if (prevem)
-                        prevem->next = curitem;
-                    else
-                        *eb = ebMarkAsList(curitem);
-                }
-                return curitem;
-            }
-
-            /* Move to the next item in the list. */
-            prevem = type->getExpireMeta(curitem);
-            curitem = prevem->next;
-        }
-    } else {
-        CommonSegHdr *currHdr;
-        ExpireMeta *mIter = type->getExpireMeta(item);
-        assert(mIter->trash != 1);
-        while (mIter->lastInSegment == 0)
-            mIter = type->getExpireMeta(mIter->next);
-
-        if (mIter->lastItemBucket)
-            currHdr = (CommonSegHdr *) mIter->next;
-        else  
-            currHdr = (CommonSegHdr *) ((NextSegHdr *) mIter->next)->prevSeg;
-        /* If the item is the first in the segment, then update the segment header */
-        if (currHdr->head == item) {
-            if ((item = defragfn(item))) {
-                currHdr->head = item;
-            }
-            return item;
-        }
-
-        /* Iterate over all items in the segment until the next is 'item' */
-        ExpireMeta *mHead = type->getExpireMeta(currHdr->head);
-        mIter = mHead;
-        while (mIter->next != item)
-            mIter = type->getExpireMeta(mIter->next);
-        assert(mIter->next == item);
-
-        if ((item = defragfn(item))) {
-            mIter->next = item;
-        }
-        return item;
-    }
-    redis_unreachable();
-}
-
 /* Defrag callback for radix tree iterator, called for each node,
  * used in order to defrag the nodes allocations. */
 int ebDefragRaxNode(raxNode **noderef, void *privdata) {
@@ -2001,7 +1939,7 @@ int ebDefrag(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragFu
         return 0;
     } else {
         // printf("rax\n");
-        // return ebDefragRax(eb, type, cursor, defragfns, privdata);
+        return ebDefragRax(eb, type, cursor, defragfns, privdata);
         return 0;
     }
 }

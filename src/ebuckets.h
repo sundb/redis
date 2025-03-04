@@ -269,13 +269,6 @@ typedef struct EbucketsIterator {
     uint64_t itemsCurrBucket;     /* Number of items in current bucket. */
 } EbucketsIterator;
 
-typedef void *(ebDefragAllocFunction)(void *ptr);
-typedef void *(ebDefragAllocItemFunction)(void *ptr, void *privdata);
-typedef struct {
-    ebDefragAllocFunction *defragAlloc; /* Used for entries etc. */
-    ebDefragAllocItemFunction *defragItem;  /* Defrag-realloc keys (optional) */
-} ebDefragFunctions;
-
 /* ebuckets API */
 
 static inline ebuckets ebCreate(void) { return NULL; } /* Empty ebuckets */
@@ -310,11 +303,12 @@ int ebNext(EbucketsIterator *iter);
 
 int ebNextBucket(EbucketsIterator *iter);
 
-typedef eItem (ebDefragFunction)(const eItem item);
-eItem ebDefragItem(ebuckets *eb, EbucketsType *type, eItem item, ebDefragFunction *fn);
-
-// typedef void *(ebDefragAllocFunction)(void *ptr);
-// typedef void *(ebDefragAllocItemFunction)(void *ptr, void *privdata);
+typedef void *(ebDefragAllocFunction)(void *ptr);
+typedef void *(ebDefragAllocItemFunction)(void *ptr, void *privdata);
+typedef struct {
+    ebDefragAllocFunction *defragAlloc; /* Used for entries etc. */
+    ebDefragAllocItemFunction *defragItem;  /* Defrag-realloc keys (optional) */
+} ebDefragFunctions;
 int ebDefrag(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefragFunctions *defragfns, void *privdata);
 
 static inline uint64_t ebGetMetaExpTime(ExpireMeta *expMeta) {
