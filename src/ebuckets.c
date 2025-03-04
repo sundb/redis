@@ -1880,8 +1880,11 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
                     iter = newiter;
 
                     if (prevIter == NULL) {
+                        /* If this is the first item in the segment, update the segment
+                         * header to point to the new item location. */
                         currentSegHdr->head = iter;
                     } else {
+                        /* Update the previous item's next pointer to point to the newly defragmented item */
                         prevIter->next = iter;
                     }
                 }
@@ -1892,8 +1895,11 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
 
             if ((newSegHdr = defragfns->defragAlloc(currentSegHdr))) {
                 if (currentSegHdr == ri.data) {
-                    raxSetData(ri.node, ri.data=newSegHdr); /* 如果第一个更新了, 需要更新rax的data */
+                    /* If the first segment is updated, need to update the rax data. */
+                    raxSetData(ri.node, ri.data=newSegHdr);
                 } else {
+                    /* For non-first segments, update the next pointer of previous
+                     * item to point to the newly defragmented segment. */
                     preLastIter->next = newSegHdr;
                 }
                 currentSegHdr = newSegHdr;
@@ -1901,12 +1907,13 @@ int ebDefragRax(ebuckets *eb, EbucketsType *type, unsigned long *cursor, ebDefra
 
             preLastIter = mIter;
             if (mIter->lastItemBucket) {
-                mIter->next = currentSegHdr; /* 最后一个eitem需要指向前一个的seg */
+                mIter->next = currentSegHdr; /* The last eitem needs to point back to the segment. */
                 break;
             }
 
             NextSegHdr *nextSegHdr = mIter->next;
-            nextSegHdr->prevSeg = currentSegHdr; /* 如果不是最后一个, 则需要更新当前seg的前一个为更新后的 */
+            nextSegHdr->prevSeg = currentSegHdr; /* If not the last segment, update the prevSeg
+                                                  * pointer to the newly defragged segment. */
             iter = nextSegHdr->head;
             mHead = type->getExpireMeta(iter);
         }
@@ -2238,7 +2245,6 @@ void *defragCallback(void *ptr) {
 }
 
 void *defragItemCallback(void *ptr, void *privdata) {
-    printf("defrag item: %p\n", ptr);
     MyItem *item = ptr;
     MyItem **items = privdata;
     int index = item->index;
@@ -2631,7 +2637,6 @@ int ebucketsTest(int argc, char **argv, int flags) {
             for (int i = 0; i < s; i++) {
                 items[i] = zmalloc(sizeof(MyItem));
                 items[i]->index = i;
-                printf("items: %p\n", (void*)items[i]);
                 ebAdd(&eb, &myEbucketsType, items[i], i);
             }
             assert((s <= EB_LIST_MAX_ITEMS) ? ebIsList(eb) : !ebIsList(eb));
