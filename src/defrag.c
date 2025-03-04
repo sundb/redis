@@ -196,24 +196,16 @@ sds activeDefragSds(sds sdsptr) {
  * returns NULL in case the allocation wasn't moved.
  * when it returns a non-null value, the old pointer was already released
  * and should NOT be accessed. */
-hfield activeDefragHfield(hfield hf) {
+void *activeDefragHfield(void *hfptr, void *privdata) {
+    hfield hf = hfptr, newhf = NULL;
+    dict *d = privdata;
+
     void *ptr = hfieldGetAllocPtr(hf);
     void *newptr = activeDefragAlloc(ptr);
     if (newptr) {
         size_t offset = hf - (char*)ptr;
-        hf = (char*)newptr + offset;
-        return hf;
-    }
-    return NULL;
-}
+        newhf = (char*)newptr + offset;
 
-void *activeDefragHfield1(void *hfptr, void *privdata) {
-    // printf("activeDefragHfield, %s\n", hfptr);
-    hfield hf = hfptr, newhf;
-    dict *d = privdata;
-
-    newhf = activeDefragHfield(hf);
-    if (newhf) {
         /* We can't search in dict for that key after we've released
          * the pointer it holds, since it won't be able to do the string
          * compare, but we can find the entry using key hash and pointer. */
@@ -224,6 +216,7 @@ void *activeDefragHfield1(void *hfptr, void *privdata) {
         serverAssert(de);
         dictSetKey(d, de, newhf);
     }
+
     return newhf;
 }
 
@@ -413,7 +406,7 @@ void activeDefragHfieldDictCallback(void *privdata, const dictEntry *de) {
 
     if (hfieldGetExpireTime(hf) == EB_EXPIRE_TIME_INVALID) {
         /* If the hfield does not have TTL, we directly defrag it. */
-        activeDefragHfield1(hf, d);
+        activeDefragHfield(hf, d);
     } else {
         /* do other place */
     }
@@ -453,7 +446,7 @@ void activeDefragHfieldDict(dict *d) {
     cursor = 0;
     ebDefragFunctions eb_defragfns = {
         .defragAlloc = activeDefragAlloc,
-        .defragItem = activeDefragHfield1
+        .defragItem = activeDefragHfield
     };
     ebuckets *eb = hashTypeGetDictMetaHFE(d);
     while (ebDefrag(eb, &hashFieldExpireBucketsType, &cursor, &eb_defragfns, d)) {}
