@@ -2626,8 +2626,6 @@ int ebucketsTest(int argc, char **argv, int flags) {
 
     TEST("item defragmentation") {
         for (int s = 1; s <= EB_LIST_MAX_ITEMS * 3; s++) {
-            // int s = EB_LIST_MAX_ITEMS * 3;
-            printf("start\n");
             ebuckets eb = NULL;
             MyItem *items[s];
             for (int i = 0; i < s; i++) {
@@ -2643,7 +2641,6 @@ int ebucketsTest(int argc, char **argv, int flags) {
                 .defragAlloc = defragCallback,
                 .defragItem = defragItemCallback,
             };
-            printf("defrag start\n");
             while (ebDefrag(&eb, &myEbucketsType, &cursor, &defragfns, items)) {}
             ebValidate(eb, &myEbucketsType);
             ebDestroy(&eb, &myEbucketsType, NULL);
