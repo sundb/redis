@@ -948,7 +948,7 @@ static int ebRemoveFromRax(ebuckets *eb, EbucketsType *type, eItem item) {
         raxStart(&ri, rax);
         unsigned char raxKey[EB_KEY_SIZE];
         bucketKey2RaxKey(EB_BUCKET_KEY(ebGetMetaExpTime(mItem)), raxKey);
-        raxSeek(&ri, ">", raxKey, EB_KEY_SIZE);
+        raxSeek(&ri, "<=", raxKey, EB_KEY_SIZE);
 
         if (raxNext(&ri) == 0)
             return 0; /* not removed */
@@ -1274,9 +1274,7 @@ void ebRaxDeleteCb(void *item, void *context) {
             eItem toDelete = itemIter;
             mIter->trash = 1;
             itemIter = mIter->next;
-            if (ctx->type->onDeleteItem) {
-                ctx->type->onDeleteItem(toDelete, &ctx->userCtx);
-            }
+            if (ctx->type->onDeleteItem) ctx->type->onDeleteItem(toDelete, &ctx->userCtx);
         }
         nextSegHdr = itemIter;
 
