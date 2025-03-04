@@ -1218,9 +1218,28 @@ static doneStatus defragStageExpiresKvstore(void *ctx, monotime endtime) {
 }
 
 void *activeDefragHExpiresStringOB(void *ptr, void *privdata) {
-    UNUSED(privdata);
     robj *ob = ptr;
-    return activeDefragStringObEx(ob, 1);
+    redisDb* db = privdata;
+    serverAssert(ob->type == OBJ_HASH);
+
+    if ((ob = activeDefragStringObEx(ob, 1))) {
+        sds keystr;
+        if (ob->encoding == OBJ_ENCODING_LISTPACK_EX) {
+            keystr = ((listpackEx*)ob->ptr)->key;
+        } else {
+            serverAssert(ob->encoding == OBJ_ENCODING_HT);
+    
+            dict *d = ob->ptr;
+            dictExpireMetadata *dictExpireMeta = (dictExpireMetadata *) dictMetadata(d);
+            keystr = dictExpireMeta->key;
+        }
+
+        unsigned int slot = calculateKeySlot(keystr);
+        dictEntry *de = kvstoreDictFind(db->keys, slot, keystr);
+        serverAssert(de);
+        kvstoreDictSetVal(db->keys, slot, de, ob);
+    }
+    return ob;
 }
 
 static doneStatus defragStageHExpires(void *ctx, monotime endtime) {
@@ -1238,7 +1257,7 @@ static doneStatus defragStageHExpires(void *ctx, monotime endtime) {
     };
     while (1) {
         if (++iterations > 16 && getMonotonicUs() >= endtime) break;
-        int ret = ebDefrag(&db->hexpires, &hashExpireBucketsType, &defrag_hexpires_ctx->cursor, &eb_defragfns, db->hexpires);
+        int ret = ebDefrag(&db->hexpires, &hashExpireBucketsType, &defrag_hexpires_ctx->cursor, &eb_defragfns, db);
         if (!ret) return DEFRAG_DONE;
     }
 
