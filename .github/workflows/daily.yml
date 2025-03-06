@@ -31,6 +31,39 @@ on:
 
 jobs:
 
+  test-s390x:
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'workflow_dispatch' || (github.event_name != 'workflow_dispatch' && github.repository == 'redis/redis')) &&
+      !contains(github.event.inputs.skipjobs, 's390x')
+    timeout-minutes: 14400
+    steps:
+    - name: prep
+      if: github.event_name == 'workflow_dispatch'
+      run: |
+        echo "GITHUB_REPOSITORY=${{github.event.inputs.use_repo}}" >> $GITHUB_ENV
+        echo "GITHUB_HEAD_REF=${{github.event.inputs.use_git_ref}}" >> $GITHUB_ENV
+        echo "skipjobs: ${{github.event.inputs.skipjobs}}"
+        echo "skiptests: ${{github.event.inputs.skiptests}}"
+        echo "test_args: ${{github.event.inputs.test_args}}"
+        echo "cluster_test_args: ${{github.event.inputs.cluster_test_args}}"
+    - uses: actions/checkout@v4
+      with:
+        repository: ${{ env.GITHUB_REPOSITORY }}
+        ref: ${{ env.GITHUB_HEAD_REF }}
+    - uses: uraimo/run-on-arch-action@v3
+      with:
+        arch: s390x
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make gcc g++ tcl8.6 tclx
+          make REDIS_CFLAGS='-Werror -DREDIS_TEST'
+          ./runtest --accurate --verbose --dump-logs ${{github.event.inputs.test_args}}
+          CFLAGS='-Werror' ./runtest-moduleapi --verbose --dump-logs ${{github.event.inputs.test_args}}
+          ./runtest-sentinel ${{github.event.inputs.cluster_test_args}}
+          ./runtest-cluster ${{github.event.inputs.cluster_test_args}}
+          ./src/redis-server test all --accurate
+
   test-ubuntu-jemalloc:
     runs-on: ubuntu-latest
     if: |
