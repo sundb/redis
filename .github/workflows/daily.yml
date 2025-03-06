@@ -54,6 +54,7 @@ jobs:
     - uses: uraimo/run-on-arch-action@v3
       with:
         arch: s390x
+        distro: ubuntu22.04
         run: |
           sudo apt-get update
           sudo apt-get install -y make gcc g++ tcl8.6 tclx
