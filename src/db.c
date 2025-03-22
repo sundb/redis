@@ -986,6 +986,11 @@ void selectCommand(client *c) {
         addReplyError(c,"SELECT is not allowed in cluster mode");
         return;
     }
+
+    if (id != 0) {
+        server.stat_cluster_incompatible_ops++;
+    }
+
     if (selectDb(c,id) == C_ERR) {
         addReplyError(c,"DB index is out of range");
     } else {
@@ -1698,6 +1703,9 @@ void moveCommand(client *c) {
         return;
     }
 
+    /* Record incompatible operations in cluster mode */
+    server.stat_cluster_incompatible_ops++;
+
     /* Check if the element exists and get a reference */
     o = lookupKeyWrite(c->db,c->argv[1]);
     if (!o) {
@@ -1789,6 +1797,10 @@ void copyCommand(client *c) {
     if (src == dst && (sdscmp(key->ptr, newkey->ptr) == 0)) {
         addReplyErrorObject(c,shared.sameobjecterr);
         return;
+    }
+
+    if (srcid != 0 || dbid != 0) {
+        server.stat_cluster_incompatible_ops++;
     }
 
     /* Check if the element exists and get a reference */
@@ -2029,6 +2041,7 @@ void swapdbCommand(client *c) {
         RedisModuleSwapDbInfo si = {REDISMODULE_SWAPDBINFO_VERSION,id1,id2};
         moduleFireServerEvent(REDISMODULE_EVENT_SWAPDB,0,&si);
         server.dirty++;
+        server.stat_cluster_incompatible_ops++;
         addReply(c,shared.ok);
     }
 }
