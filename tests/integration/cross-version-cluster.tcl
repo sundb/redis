@@ -7,53 +7,73 @@ proc server_name_and_version {} {
     return "$server_name $server_version"
 }
 
-tags {external:skip needs:other-server cluster} {
-    start_cluster 1 0 {tags {external:skip cluster}} {
-        set first_shard_host [srv 0 host]
-        set first_shard_port [srv 0 port]
-        set first_shard_name_and_version [server_name_and_version]
+# make sure the test infra won't use SELECT
+set old_singledb $::singledb
+set ::singledb 1
 
-        start_server {tags {"external:skip"} overrides {cluster-enabled {yes}} start-other-server 1} {
-            test "Join a node to the cluster and make sure it gets the same secret from $first_shard_name_and_version" {
-                r cluster meet $first_shard_host $first_shard_port
-                # wait_for_cluster_propagation
-                wait_for_cluster_state "ok"
+start_server {tags {"external:skip"} overrides {cluster-enabled {yes}} start-other-server 1} {
+    start_server {tags {"external:skip"} overrides {cluster-enabled {yes}}} {
+        test "set up cluster" {
+            r CLUSTER MEET [srv -1 host] [srv -1 port]
+            wait_for_cluster_propagation
+            # wait_for_cluster_state "ok"
 
-                r cluster REPLICATE [R 1 CLUSTER MYID]
-                wait_for_condition 50 100 {
-                    [r cluster myshardid] eq [R 1 cluster myshardid]
-                } else {
-                    puts [r cluster myshardid]
-                    puts [r -1 cluster myshardid]
-                    fail "Secrets not match"
-                }
+            # Link establishment requires few PING-PONG between two nodes
+            wait_for_condition 50 100 {
+                [string match {*handshake*} [r CLUSTER NODES]] eq 0 &&
+                [string match {*handshake*} [r -1 CLUSTER NODES]] eq 0
+            } else {
+                puts [r CLUSTER NODES]
+                puts [r -1 CLUSTER NODES]
+                fail "Cluster meet stuck in handshake state"
             }
         }
+
+        test "" {
+            r CLUSTER REPLICATE [r -1 CLUSTER MYID]
+            wait_for_cluster_propagation
+            # wait_for_cluster_state "ok"
+            wait_for_condition 50 100 {
+                [r cluster myshardid] eq [r -1 cluster myshardid]
+            } else {
+                puts [r cluster myshardid]
+                puts [r -1 cluster myshardid]
+                fail "Secrets not match"
+            }
+        }
+
     }
+}
 
-    start_cluster 1 0 {tags {external:skip cluster}} {
-        set first_shard_host [srv 0 host]
-        set first_shard_port [srv 0 port]
-        set first_shard_name_and_version [server_name_and_version]
+start_server {tags {"external:skip"} overrides {cluster-enabled {yes}}} {
+    start_server {tags {"external:skip"} overrides {cluster-enabled {yes}} start-other-server 1} {
+        test "set up cluster" {
+            r CLUSTER MEET [srv -1 host] [srv -1 port]
+            wait_for_cluster_propagation
+            # wait_for_cluster_state "ok"
 
-        start_server {tags {"external:skip"} overrides {cluster-enabled {yes}} start-other-server 1} {
-            test "Join a node to the cluster and make sure it gets the same secret from $first_shard_name_and_version" {
-                r cluster meet $first_shard_host $first_shard_port
-                wait_for_cluster_state "ok"
+            # Link establishment requires few PING-PONG between two nodes
+            wait_for_condition 50 100 {
+                [string match {*handshake*} [r CLUSTER NODES]] eq 0 &&
+                [string match {*handshake*} [r -1 CLUSTER NODES]] eq 0
+            } else {
+                puts [r CLUSTER NODES]
+                puts [r -1 CLUSTER NODES]
+                fail "Cluster meet stuck in handshake state"
+            }
+        }
 
-                start_server {tags {"external:skip"} overrides {cluster-enabled {yes}}} {
-                    r cluster meet $first_shard_host $first_shard_port
-                    wait_for_cluster_state "ok"
-                    r cluster REPLICATE [r -1 CLUSTER MYID]
-                    wait_for_condition 50 100 {
-                        [r cluster myshardid] eq [r -1 cluster myshardid]
-                    } else {
-                        puts [r cluster myshardid]
-                        puts [r -1 cluster myshardid]
-                        fail "Secrets not match"
-                    }
-                }
+        test "" {
+            r CLUSTER REPLICATE [r -1 CLUSTER MYID]
+            wait_for_condition 50 100 {
+                [r cluster myshardid] eq [r -1 cluster myshardid]
+            } else {
+                puts [r cluster myshardid]
+                puts [r -1 cluster myshardid]
+                fail "Secrets not match"
             }
         }
     }
 }
+
+set ::singledb $old_singledb
