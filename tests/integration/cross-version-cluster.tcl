@@ -16,6 +16,7 @@ tags {external:skip needs:other-server cluster} {
         start_server {tags {"external:skip"} overrides {cluster-enabled {yes}} start-other-server 1} {
             test "Join a node to the cluster and make sure it gets the same secret from $first_shard_name_and_version" {
                 r cluster meet $first_shard_host $first_shard_port
+                # wait_for_cluster_propagation
                 wait_for_cluster_state "ok"
 
                 r cluster REPLICATE [R 1 CLUSTER MYID]
@@ -30,23 +31,27 @@ tags {external:skip needs:other-server cluster} {
         }
     }
 
-    start_cluster 1 0 {tags {external:skip cluster} start-other-server 1} {
+    start_cluster 1 0 {tags {external:skip cluster}} {
         set first_shard_host [srv 0 host]
         set first_shard_port [srv 0 port]
+        set first_shard_name_and_version [server_name_and_version]
 
-        start_server {tags {"external:skip"} overrides {cluster-enabled {yes}}} {
-            set first_shard_name_and_version [server_name_and_version]
+        start_server {tags {"external:skip"} overrides {cluster-enabled {yes}} start-other-server 1} {
             test "Join a node to the cluster and make sure it gets the same secret from $first_shard_name_and_version" {
                 r cluster meet $first_shard_host $first_shard_port
                 wait_for_cluster_state "ok"
 
-                r cluster REPLICATE [R 1 CLUSTER MYID]
-                wait_for_condition 50 100 {
-                    [r cluster myshardid] eq [R 1 cluster myshardid]
-                } else {
-                    puts [r cluster myshardid]
-                    puts [r -1 cluster myshardid]
-                    fail "Secrets not match"
+                start_server {tags {"external:skip"} overrides {cluster-enabled {yes}}} {
+                    r cluster meet $first_shard_host $first_shard_port
+                    wait_for_cluster_state "ok"
+                    r cluster REPLICATE [r -1 CLUSTER MYID]
+                    wait_for_condition 50 100 {
+                        [r cluster myshardid] eq [r -1 cluster myshardid]
+                    } else {
+                        puts [r cluster myshardid]
+                        puts [r -1 cluster myshardid]
+                        fail "Secrets not match"
+                    }
                 }
             }
         }
