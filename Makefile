@@ -3,6 +3,8 @@
 SUBDIRS = src
 ifeq ($(BUILD_WITH_MODULES), yes)
 	SUBDIRS += modules
+else
+	SUBDIRS += modules/vector-sets
 endif
 
 default: all
