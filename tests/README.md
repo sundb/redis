@@ -18,6 +18,7 @@ match different external server configurations:
 | `--ignore-digest`    | Skip key value digest validations. |
 | `--cluster-mode`     | Run in strict Redis Cluster compatibility mode. |
 | `--large-memory`     | Enables tests that consume more than 100mb |
+| `--other-server-path PATH` | Run compatibility tests with an other server executable. |
 
 Tags
 ----
@@ -46,6 +47,7 @@ The following compatibility and capability tags are currently used:
 | `needs:config-resetstat`  | Uses `CONFIG RESETSTAT` to reset statistics. |
 | `needs:reset`             | Uses `RESET` to reset client connections. |
 | `needs:save`              | Uses `SAVE` or `BGSAVE` to create an RDB file. |
+| `needs:other-server`      | Requires `--other-server-path`. |
 
 When using an external server (`--host` and `--port`), filtering using the
 `external:skip` tags is done automatically.
