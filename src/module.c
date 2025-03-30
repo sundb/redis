@@ -12249,6 +12249,15 @@ void moduleRemoveCateogires(RedisModule *module) {
     }
 }
 
+/* Load internal data types that bundled as modules */
+int VectorSets_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
+void moduleLoadInternalModules(void) {
+#ifdef INCLUDE_VEC_SETS
+    int retval = moduleOnLoad((int (*)(void *, void **, int)) VectorSets_OnLoad, NULL, NULL, NULL, 0, 0);
+    serverAssert(retval == C_OK);
+#endif
+}
+
 /* Load all the modules in the server.loadmodule_queue list, which is
  * populated by `loadmodule` directives in the configuration file.
  * We can't load modules directly when processing the configuration file
@@ -12448,7 +12457,72 @@ void moduleUnregisterCleanup(RedisModule *module) {
     moduleUnregisterAuthCBs(module);
 }
 
-/* Load a module and initialize it. On success C_OK is returned, otherwise
+/* Load a module by its 'onload' callback and initialize it. On success C_OK is returned, otherwise
+ * C_ERR is returned. */
+int moduleOnLoad(int (*onload)(void *, void **, int), const char *path, void *handle, void **module_argv, int module_argc, int is_loadex) {
+    RedisModuleCtx ctx;
+    moduleCreateContext(&ctx, NULL, REDISMODULE_CTX_TEMP_CLIENT); /* We pass NULL since we don't have a module yet. */
+    if (onload((void*)&ctx,module_argv,module_argc) == REDISMODULE_ERR) {
+        serverLog(LL_WARNING,
+                  "Module %s initialization failed. Module not loaded",path);
+        if (ctx.module) {
+            moduleUnregisterCleanup(ctx.module);
+            moduleRemoveCateogires(ctx.module);
+            moduleFreeModuleStructure(ctx.module);
+        }
+        moduleFreeContext(&ctx);
+        if (handle) dlclose(handle);
+        return C_ERR;
+    }
+
+    /* Redis module loaded! Register it. */
+    dictAdd(modules,ctx.module->name,ctx.module);
+    ctx.module->blocked_clients = 0;
+    ctx.module->handle = handle;
+    ctx.module->loadmod = zmalloc(sizeof(struct moduleLoadQueueEntry));
+    ctx.module->loadmod->path = sdsnew(path);
+    ctx.module->loadmod->argv = module_argc ? zmalloc(sizeof(robj*)*module_argc) : NULL;
+    ctx.module->loadmod->argc = module_argc;
+    for (int i = 0; i < module_argc; i++) {
+        ctx.module->loadmod->argv[i] = module_argv[i];
+        incrRefCount(ctx.module->loadmod->argv[i]);
+    }
+
+    /* If module commands have ACL categories, recompute command bits
+     * for all existing users once the modules has been registered. */
+    if (ctx.module->num_commands_with_acl_categories) {
+        ACLRecomputeCommandBitsFromCommandRulesAllUsers();
+    }
+    if (path) serverLog(LL_NOTICE,"Module '%s' loaded from %s",ctx.module->name,path);
+    ctx.module->onload = 0;
+
+    int post_load_err = 0;
+    if (listLength(ctx.module->module_configs) && !(ctx.module->configs_initialized & MODULE_CONFIGS_USER_VALS)) {
+        serverLogRaw(LL_WARNING, "Module Configurations were not set, missing LoadConfigs call. Unloading the module.");
+        post_load_err = 1;
+    }
+
+    if (is_loadex && dictSize(server.module_configs_queue)) {
+        serverLogRaw(LL_WARNING, "Loadex configurations were not applied, likely due to invalid arguments. Unloading the module.");
+        post_load_err = 1;
+    }
+
+    if (post_load_err) {
+        serverAssert(moduleUnload(ctx.module->name, NULL, 1) == C_OK);
+        moduleFreeContext(&ctx);
+        return C_ERR;
+    }
+
+    /* Fire the loaded modules event. */
+    moduleFireServerEvent(REDISMODULE_EVENT_MODULE_CHANGE,
+                          REDISMODULE_SUBEVENT_MODULE_LOADED,
+                          ctx.module);
+
+    moduleFreeContext(&ctx);
+    return C_OK;
+}
+
+/* Load a module by path and initialize it. On success C_OK is returned, otherwise
  * C_ERR is returned. */
 int moduleLoad(const char *path, void **module_argv, int module_argc, int is_loadex) {
     int (*onload)(void *, void **, int);
@@ -12476,66 +12550,8 @@ int moduleLoad(const char *path, void **module_argv, int module_argc, int is_loa
             "symbol. Module not loaded.",path);
         return C_ERR;
     }
-    RedisModuleCtx ctx;
-    moduleCreateContext(&ctx, NULL, REDISMODULE_CTX_TEMP_CLIENT); /* We pass NULL since we don't have a module yet. */
-    if (onload((void*)&ctx,module_argv,module_argc) == REDISMODULE_ERR) {
-        serverLog(LL_WARNING,
-            "Module %s initialization failed. Module not loaded",path);
-        if (ctx.module) {
-            moduleUnregisterCleanup(ctx.module);
-            moduleRemoveCateogires(ctx.module);
-            moduleFreeModuleStructure(ctx.module);
-        }
-        moduleFreeContext(&ctx);
-        dlclose(handle);
-        return C_ERR;
-    }
 
-    /* Redis module loaded! Register it. */
-    dictAdd(modules,ctx.module->name,ctx.module);
-    ctx.module->blocked_clients = 0;
-    ctx.module->handle = handle;
-    ctx.module->loadmod = zmalloc(sizeof(struct moduleLoadQueueEntry));
-    ctx.module->loadmod->path = sdsnew(path);
-    ctx.module->loadmod->argv = module_argc ? zmalloc(sizeof(robj*)*module_argc) : NULL;
-    ctx.module->loadmod->argc = module_argc;
-    for (int i = 0; i < module_argc; i++) {
-        ctx.module->loadmod->argv[i] = module_argv[i];
-        incrRefCount(ctx.module->loadmod->argv[i]);
-    }
-
-    /* If module commands have ACL categories, recompute command bits 
-     * for all existing users once the modules has been registered. */
-    if (ctx.module->num_commands_with_acl_categories) {
-        ACLRecomputeCommandBitsFromCommandRulesAllUsers();
-    }
-    serverLog(LL_NOTICE,"Module '%s' loaded from %s",ctx.module->name,path);
-    ctx.module->onload = 0;
-
-    int post_load_err = 0;
-    if (listLength(ctx.module->module_configs) && !(ctx.module->configs_initialized & MODULE_CONFIGS_USER_VALS)) {
-        serverLogRaw(LL_WARNING, "Module Configurations were not set, missing LoadConfigs call. Unloading the module.");
-        post_load_err = 1;
-    }
-
-    if (is_loadex && dictSize(server.module_configs_queue)) {
-        serverLogRaw(LL_WARNING, "Loadex configurations were not applied, likely due to invalid arguments. Unloading the module.");
-        post_load_err = 1;
-    }
-
-    if (post_load_err) {
-        serverAssert(moduleUnload(ctx.module->name, NULL, 1) == C_OK);
-        moduleFreeContext(&ctx);
-        return C_ERR;
-    }
-
-    /* Fire the loaded modules event. */
-    moduleFireServerEvent(REDISMODULE_EVENT_MODULE_CHANGE,
-                          REDISMODULE_SUBEVENT_MODULE_LOADED,
-                          ctx.module);
-
-    moduleFreeContext(&ctx);
-    return C_OK;
+    return moduleOnLoad(onload, path, handle, module_argv, module_argc, is_loadex);
 }
 
 /* Unload the module registered with the specified name. On success

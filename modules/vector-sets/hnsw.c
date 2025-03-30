@@ -379,7 +379,7 @@ void hnsw_normalize_vector(float *x, float *l2ptr, uint32_t dim) {
 }
 
 /* Helper function to generate random level. */
-uint32_t random_level() {
+uint32_t random_level(void) {
     static const int threshold = HNSW_P * RAND_MAX;
     uint32_t level = 0;
 

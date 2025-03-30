@@ -1578,6 +1578,9 @@ void rewriteConfigLoadmoduleOption(struct rewriteConfigState *state) {
     dictEntry *de;
     while ((de = dictNext(di)) != NULL) {
         struct RedisModule *module = dictGetVal(de);
+        /* Internal modules doesn't have path and not part of the configuration file */
+        if (sdslen(module->loadmod->path) == 0) continue;
+
         line = sdsnew("loadmodule ");
         line = sdscatsds(line, module->loadmod->path);
         for (int i = 0; i < module->loadmod->argc; i++) {

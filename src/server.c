@@ -7490,6 +7490,7 @@ int main(int argc, char **argv) {
     }
     if (!server.sentinel_mode) {
         moduleInitModulesSystemLast();
+        moduleLoadInternalModules();
         moduleLoadFromQueue();
     }
     ACLLoadUsersAtStartup();

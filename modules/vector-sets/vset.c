@@ -1767,6 +1767,8 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
     if (RedisModule_Init(ctx,"vectorset",1,REDISMODULE_APIVER_1)
         == REDISMODULE_ERR) return REDISMODULE_ERR;
 
+    RedisModule_SetModuleOptions(ctx, REDISMODULE_OPTIONS_HANDLE_IO_ERRORS|REDISMODULE_OPTIONS_HANDLE_REPL_ASYNC_LOAD);
+
     RedisModuleTypeMethods tm = {
         .version = REDISMODULE_TYPE_METHOD_VERSION,
         .rdb_load = VectorSetRdbLoad,
@@ -1828,4 +1830,8 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
                        RedisModule_Realloc);
 
     return REDISMODULE_OK;
+}
+
+int VectorSets_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    return RedisModule_OnLoad(ctx, argv, argc);
 }
