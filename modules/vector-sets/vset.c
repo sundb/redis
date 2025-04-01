@@ -88,7 +88,7 @@ static inline uint32_t bit_count(uint32_t n) {
  * Note that compared to other approaches (random gaussian weights), what
  * we have here is deterministic, it means that our replicas will have
  * the same set of weights. Also this approach seems to work much better
- * in pratice, and the distances between elements are better guaranteed.
+ * in practice, and the distances between elements are better guaranteed.
  *
  * Note that we still save the projection matrix in the RDB file, because
  * in the future we may change the weights generation, and we want everything
@@ -199,7 +199,7 @@ int vectorSetInsert(struct vsetObject *o, float *vec, int8_t *qvec, float qrange
             RedisModule_DictReplace(o->dict,val,node);
 
             /* If attrib != NULL, the user wants that in case of an update we
-             * update the attribute as well (otherwise it reamins as it was).
+             * update the attribute as well (otherwise it remains as it was).
              * Note that the order of operations is conceinved so that it
              * works in case the old attrib and the new attrib pointer is the
              * same. */
@@ -251,7 +251,7 @@ int vectorSetInsert(struct vsetObject *o, float *vec, int8_t *qvec, float qrange
 float *parseVector(RedisModuleString **argv, int argc, int start_idx,
                   size_t *dim, uint32_t *reduce_dim, int *consumed_args)
 {
-    int consumed = 0; // Argumnets consumed
+    int consumed = 0; // Arguments consumed
 
     /* Check for REDUCE option first */
     if (reduce_dim) *reduce_dim = 0;
@@ -367,7 +367,7 @@ int VADD_CASReply(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
 
         /* Also, if the element was already inserted, we just pretend
          * the other insert won. We don't even start a threaded VADD
-         * if this was an udpate, since the deletion of the element itself
+         * if this was an update, since the deletion of the element itself
          * in order to perform the update would invalidate the CAS state. */
         if (vset && RedisModule_DictGet(vset->dict,val,NULL) != NULL)
             vset = NULL;
@@ -401,7 +401,7 @@ int VADD_CASReply(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
         }
         RedisModule_DictSet(vset->dict,val,newnode);
         val = NULL; // Don't free it later.
-        attrib = NULL; // Dont' free it later.
+        attrib = NULL; // Don't free it later.
 
         RedisModule_ReplicateVerbatim(ctx);
     }
@@ -509,7 +509,7 @@ int VADD_RedisCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
         cas = 0; /* Do synchronous insert at creation, otherwise the
                   * key would be left empty until the threaded part
                   * does not return. It's also pointless to try try
-                  * doing threaded first elemetn insertion. */
+                  * doing threaded first element insertion. */
         vset = createVectorSetObject(reduce_dim ? reduce_dim : dim, quant_type, hnsw_create_M);
         if (vset == NULL) {
             // We can't fail for OOM in Redis, but the mutex initialization
@@ -589,7 +589,7 @@ int VADD_RedisCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     }
 
     /* For existing keys don't do CAS updates. For how things work now, the
-     * CAS state would be invalidated by the detetion before adding back. */
+     * CAS state would be invalidated by the deletion before adding back. */
     if (cas && RedisModule_DictGet(vset->dict,val,NULL) != NULL)
         cas = 0;
 
@@ -927,7 +927,7 @@ int VSIM_RedisCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     if (filter_ef == 0) filter_ef = count * 100; // Max filter visited nodes.
 
     /* Disable threaded for MULTI/EXEC and Lua, or if explicitly
-     * requsted by the user via the NOTHREAD option. */
+     * requested by the user via the NOTHREAD option. */
     if (no_thread || (RedisModule_GetContextFlags(ctx) &
                       (REDISMODULE_CTX_FLAGS_LUA|
                        REDISMODULE_CTX_FLAGS_MULTI)))

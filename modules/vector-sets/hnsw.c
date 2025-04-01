@@ -13,7 +13,7 @@
  *    be not close enough to replace old links in candidate.
  *
  * 2. We normalize on-insert, making cosine similarity and dot product the
- *    same. This means we can't use euclidian distance or alike here.
+ *    same. This means we can't use euclidean distance or alike here.
  *    Together with quantization, this provides an important speedup that
  *    makes HNSW more practical.
  *
@@ -113,7 +113,7 @@ typedef struct {
 } pqueue;
 
 /* The HNSW algorithms access the pqueue conceptually from nearest (index 0)
- * to farest (larger indexes) node, so the following macros are used to
+ * to farthest (larger indexes) node, so the following macros are used to
  * access the pqueue in this fashion, even if the internal order is
  * actually reversed. */
 #define pq_get_node(q,i) ((q)->items[(q)->count-(i+1)].node)
@@ -213,7 +213,7 @@ float vectors_distance_float(const float *x, const float *y, uint32_t dim) {
     }
 
     /* Handle the remaining elements. These are a minority in the case
-     * of a smal vector, don't optimze this part. */
+     * of a small vector, don't optimize this part. */
     for (; i < dim; i++) dot0 += x[i] * y[i];
 
     /* The following line may be counter intuitive. The dot product of
@@ -901,7 +901,7 @@ void hnsw_update_worst_neighbor_on_remove(HNSW *index, hnswNode *node, uint32_t 
     }
 }
 
-/* We have a list of candidate nodes to link to the new node, when iserting
+/* We have a list of candidate nodes to link to the new node, when inserting
  * one. This function selects which nodes to link and performs the linking.
  *
  * Parameters:
@@ -910,14 +910,14 @@ void hnsw_update_worst_neighbor_on_remove(HNSW *index, hnswNode *node, uint32_t 
  *   new node 'new_node'.
  * - 'required_links' is as many links we would like our new_node to get
  *   at the specified layer.
- * - 'aggressive' changes the startegy used to find good neighbors as follows:
+ * - 'aggressive' changes the strategy used to find good neighbors as follows:
  *
  * This function is called with aggressive=0 for all the layers, including
  * layer 0. When called like that, it will use the diversity of links and
  * quality of links checks before linking our new node with some candidate.
  *
  * However if the insert function finds that at layer 0, with aggressive=0,
- * few connections were made, it calls this function again with agressiveness
+ * few connections were made, it calls this function again with aggressiveness
  * levels greater up to 2.
  *
  * At aggressive=1, the diversity checks are disabled, and the candidate
@@ -929,7 +929,7 @@ void hnsw_update_worst_neighbor_on_remove(HNSW *index, hnswNode *node, uint32_t 
  * a connection (to make space for our new node link). In this case:
  *
  * 1. If such "dropped" node would remain with too little links, we try with
- *    some different neighbor instead, however as the 'aggressive' paramter
+ *    some different neighbor instead, however as the 'aggressive' parameter
  *    has incremental values (0, 1, 2) we are more and more willing to leave
  *    the dropped node with fever connections.
  * 2. If aggressive=2, we will scan the candidate neighbor node links to
@@ -1051,7 +1051,7 @@ void select_neighbors(HNSW *index, pqueue *candidates, hnswNode *new_node,
         {
             /* Let's see if we can find at least a candidate link that
              * would remain with a few connections. Track the one
-             * that is the farest away (worst distance) from our candidate
+             * that is the farthest away (worst distance) from our candidate
              * neighbor (in order to remove the less interesting link). */
             worst_node = NULL;
             uint32_t worst_idx = 0;
@@ -1210,7 +1210,7 @@ void hnsw_reconnect_nodes(HNSW *index, hnswNode **nodes, int count, uint32_t lay
 
     /* Step 2: Calculate row averages (will be used in scoring):
      * please note that we just calculate row averages and not
-     * colums averages since the matrix is symmetrical, so those
+     * columns averages since the matrix is symmetrical, so those
      * are the same: check the image in the top comment if you have any
      * doubt about this. */
     float *row_avgs = hmalloc(count * sizeof(float));
@@ -1401,7 +1401,7 @@ void hnsw_reconnect_nodes(HNSW *index, hnswNode **nodes, int count, uint32_t lay
 
         // If still no connection, search the broader graph.
         if (nodes[i]->layers[layer].num_links != wanted_links) {
-            debugmsg("No force linking possible with local candidats\n");
+            debugmsg("No force linking possible with local candidates\n");
             pq_free(candidates);
 
             // Find entry point for target layer by descending through levels.
@@ -1418,7 +1418,7 @@ void hnsw_reconnect_nodes(HNSW *index, hnswNode **nodes, int count, uint32_t lay
 
             if (curr_ep) {
                 /* Search this layer for candidates.
-                 * Use the defalt EF_C in this case, since it's not an
+                 * Use the default EF_C in this case, since it's not an
                  * "insert" operation, and we don't know the user
                  * specified "EF". */
                 candidates = search_layer(index, nodes[i], curr_ep, HNSW_EF_C, layer, 0);
@@ -1580,7 +1580,7 @@ int hnsw_delete_node(HNSW *index, hnswNode *node, void(*free_value)(void*value))
 }
 
 /* ============================ Threaded API ================================
- * Concurent readers should use the following API to get a slot assigned
+ * Concurrent readers should use the following API to get a slot assigned
  * (and a lock, too), do their read-only call, and unlock the slot.
  *
  * There is a reason why read operations don't implement opaque transparent
@@ -2352,7 +2352,7 @@ hnswNode *hnsw_cursor_next(hnswCursor *cursor) {
 }
 
 /* Called by hnsw_unlink_node() if there is at least an active cursor.
- * Will scan the cursors to see if any cursor is going to yeld this
+ * Will scan the cursors to see if any cursor is going to yield this
  * one, and in this case, updates the current element to the next. */
 void hnsw_cursor_element_deleted(HNSW *index, hnswNode *deleted) {
     hnswCursor *x = index->cursors;
@@ -2543,7 +2543,7 @@ int hnsw_validate_graph(HNSW *index, uint64_t *connected_nodes, int *reciprocal_
  *
  * This is just a debugging function that reports stuff in the standard
  * output, part of the implementation because this kind of functions
- * provide some visiblity on what happens inside the HNSW.
+ * provide some visibility on what happens inside the HNSW.
  */
 void hnsw_test_graph_recall(HNSW *index, int test_ef, int verbose) {
     // Stats

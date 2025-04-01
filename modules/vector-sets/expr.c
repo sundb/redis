@@ -87,7 +87,7 @@ typedef struct exprstate {
     char *expr;             /* Expression string to compile. Note that
                              * expression token strings point directly to this
                              * string. */
-    char *p;                // Currnet position inside 'expr', while parsing.
+    char *p;                // Current position inside 'expr', while parsing.
 
     // Virtual machine state.
     exprstack values_stack;
@@ -689,7 +689,7 @@ double exprTokenToNum(exprtoken *t) {
     }
 }
 
-/* Conver obejct to true/false (0 or 1) */
+/* Convert object to true/false (0 or 1) */
 double exprTokenToBool(exprtoken *t) {
     if (t->token_type == EXPR_TOKEN_NUM) {
         return t->num != 0;
