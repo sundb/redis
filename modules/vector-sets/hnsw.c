@@ -1196,7 +1196,8 @@ void hnsw_reconnect_nodes(HNSW *index, hnswNode **nodes, int count, uint32_t lay
     /* Step 1: Build the distance matrix between all nodes.
      * Since distance(i,j) = distance(j,i), we only compute the upper triangle
      * and mirror it to the lower triangle. */
-    float *distances = hmalloc(count * count * sizeof(float));
+    assert((SIZE_MAX / (size_t)count) / sizeof(float) >= (size_t)count);
+    float *distances = hmalloc((long)count * count * sizeof(float));
     if (!distances) return;
 
     for (int i = 0; i < count; i++) {
@@ -1235,7 +1236,8 @@ void hnsw_reconnect_nodes(HNSW *index, hnswNode **nodes, int count, uint32_t lay
      * good is a given i,j nodes connection, with how badly connecting
      * i,j will affect the remaining quality of connections left to
      * pair the other nodes. */
-    float *scores = hmalloc(count * count * sizeof(float));
+    assert((SIZE_MAX / (size_t)count) / sizeof(float) >= (size_t)count);
+    float *scores = hmalloc((long)count * count * sizeof(float));
     if (!scores) {
         hfree(distances);
         hfree(row_avgs);

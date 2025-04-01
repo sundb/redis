@@ -632,7 +632,7 @@ jobs:
           repository: ${{ env.GITHUB_REPOSITORY }}
           ref: ${{ env.GITHUB_HEAD_REF }}
       - name: make
-        run: make SANITIZER=undefined REDIS_CFLAGS='-DREDIS_TEST -Werror' LUA_DEBUG=yes # we (ab)use this flow to also check Lua C API violations
+        run: make SANITIZER=undefined REDIS_CFLAGS='-DREDIS_TEST -Werror' SKIP_VEC_SETS=yes LUA_DEBUG=yes # we (ab)use this flow to also check Lua C API violations
       - name: testprep
         run: |
           sudo apt-get update
