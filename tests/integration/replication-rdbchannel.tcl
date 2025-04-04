@@ -79,6 +79,7 @@ start_server {tags {"repl external:skip"}} {
                 $replica1 config set repl-rdb-channel yes
                 $replica2 config set repl-rdb-channel no
 
+                set loglines [count_log_lines 0]
                 set prev_forks [s 0 total_forks]
                 $master set x 2
 
@@ -87,9 +88,10 @@ start_server {tags {"repl external:skip"}} {
                 $replica1 replicaof $master_host $master_port
                 $replica2 replicaof $master_host $master_port
 
-                set res [wait_for_log_messages 0 {"*Starting BGSAVE* replicas sockets (rdb-channel)*"} 0 2000 10]
-                set loglines [lindex $res 1]
-                wait_for_log_messages 0 {"*Starting BGSAVE* replicas sockets*"} $loglines 2000 10
+                # There will be two forks subsequently, one for rdbchannel
+                # replica, another for the replica without rdbchannel config.
+                wait_for_log_messages 0 {"*Starting BGSAVE* replicas sockets (rdb-channel)*"} $loglines 300 100
+                wait_for_log_messages 0 {"*Starting BGSAVE* replicas sockets"} $loglines 300 100
 
                 wait_replica_online $master 0 100 100
                 wait_replica_online $master 1 100 100
@@ -396,10 +398,10 @@ start_server {tags {"repl external:skip"}} {
             populate 20000 master 100 -1
 
             $replica replicaof $master_host $master_port
-            wait_for_condition 50 200 {
+            wait_for_condition 100 200 {
                 [s 0 loading] == 1
             } else {
-                fail "[s 0 loading] sdsdad"
+                fail "Replica did not start loading"
             }
 
             # Generate some traffic for backlog ~2mb
@@ -465,12 +467,11 @@ start_server {tags {"repl external:skip"}} {
                     fail "Sync did not start"
                 }
 
-                # Wait for both replicas main conns to establish psync
+                # Verify replicas are connected
                 wait_for_condition 500 100 {
                     [s -2 connected_slaves] == 2
                 } else {
-                    fail "Replicas didn't establish psync:
-                          sync_partial_ok: [s -2 sync_partial_ok]"
+                    fail "Replicas didn't connect: [s -2 connected_slaves]"
                 }
 
                 # kill one of the replicas
@@ -487,6 +488,14 @@ start_server {tags {"repl external:skip"}} {
                           master_link_status: [s 0 master_link_status]
                           sync_full:[s -2 sync_full]
                           connected_slaves: [s -2 connected_slaves]"
+                }
+
+                # Wait until replica catches up
+                wait_replica_online $master 0 200 100
+                wait_for_condition 200 100 {
+                    [s 0 mem_replica_full_sync_buffer] == 0
+                } else {
+                    fail "Replica did not consume buffer in time"
                 }
             }
 
@@ -773,7 +782,6 @@ start_server {tags {"repl external:skip"}} {
 
             # Speed up loading
             $replica config set key-load-delay 0
-            stop_write_load $load_handle
 
             # Wait until replica recovers and becomes online
             wait_replica_online $master 0 100 100

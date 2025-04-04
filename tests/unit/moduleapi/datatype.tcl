@@ -193,6 +193,7 @@ start_server {tags {"modules"}} {
                 set end_time [expr {[clock seconds] + 10}]
                 set speed_restored 0
                 while {[clock seconds] < $end_time} {
+                    for {set i 0} {$i < 500} {incr i} {
                     switch [expr {int(rand() * 3)}] {
                         0 {
                             # Randomly delete a key
@@ -213,14 +214,16 @@ start_server {tags {"modules"}} {
                             set random_key "key_[expr {int(rand() * 10000)}]"
                             r datatype.set $random_key 1 $dummy
                         }
-                    }
+                    } ;# end of switch
+                    } ;# end of for
 
                     # Wait for defragmentation speed to restore.
-                    if {[s active_defrag_running] > 25} {
+                    if {{[count_log_message $loglines "*Starting active defrag, frag=*%, frag_bytes=*, cpu=5?%*"]} > 1} {
                         set speed_restored 1
                         break;
                     }
                 }
+                # Make sure the speed is restored
                 assert_equal $speed_restored 1
 
                 # After the traffic disappears, the defragmentation speed will decrease again.

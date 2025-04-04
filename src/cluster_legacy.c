@@ -911,30 +911,24 @@ static void assignShardIdToNode(clusterNode *node, const char *shard_id, int fla
 
 static void updateShardId(clusterNode *node, const char *shard_id) {
     if (shard_id && memcmp(node->shard_id, shard_id, CLUSTER_NAMELEN) != 0) {
-        assignShardIdToNode(node, shard_id, CLUSTER_TODO_SAVE_CONFIG);
-
-        /* If the replica or master does not support shard-id (old version),
-         * we still need to make our best effort to keep their shard-id consistent.
+        /* We always make our best effort to keep the shard-id consistent
+         * between the master and its replicas:
          *
-         * 1. Master supports but the replica does not.
-         *    We might first update the replica's shard-id to the master's randomly
-         *    generated shard-id. Then, when the master's shard-id arrives, we must
-         *    also update all its replicas.
-         * 2. If the master does not support but the replica does.
-         *    We also need to synchronize the master's shard-id with the replica.
-         * 3. If neither of master and replica supports it.
-         *    The master will have a randomly generated shard-id and will update
-         *    the replica to match the master's shard-id. */
+         * 1. When updating the master's shard-id, we simultaneously update the
+         *    shard-id of all its replicas to ensure consistency.
+         * 2. When updating replica's shard-id, if it differs from its master's shard-id,
+         *    we discard this replica's shard-id and continue using master's shard-id.
+         *    This applies even if the master does not support shard-id, in which
+         *    case we rely on the master's randomly generated shard-id. */
         if (node->slaveof == NULL) {
+            assignShardIdToNode(node, shard_id, CLUSTER_TODO_SAVE_CONFIG);
             for (int i = 0; i < clusterNodeNumSlaves(node); i++) {
                 clusterNode *slavenode = clusterNodeGetSlave(node, i);
                 if (memcmp(slavenode->shard_id, shard_id, CLUSTER_NAMELEN) != 0)
                     assignShardIdToNode(slavenode, shard_id, CLUSTER_TODO_SAVE_CONFIG|CLUSTER_TODO_FSYNC_CONFIG);
             }
-        } else {
-            clusterNode *masternode = node->slaveof;
-            if (memcmp(masternode->shard_id, shard_id, CLUSTER_NAMELEN) != 0)
-                assignShardIdToNode(masternode, shard_id, CLUSTER_TODO_SAVE_CONFIG|CLUSTER_TODO_FSYNC_CONFIG);
+        } else if (memcmp(node->slaveof->shard_id, shard_id, CLUSTER_NAMELEN) == 0) {
+            assignShardIdToNode(node, shard_id, CLUSTER_TODO_SAVE_CONFIG);
         }
     }
 }
@@ -1030,6 +1024,8 @@ void clusterInit(void) {
     clusterUpdateMyselfIp();
     clusterUpdateMyselfHostname();
     clusterUpdateMyselfHumanNodename();
+
+    getRandomHexChars(server.cluster->internal_secret, CLUSTER_INTERNALSECRETLEN);
 }
 
 void clusterInitLast(void) {
@@ -1577,6 +1573,14 @@ clusterNode *clusterLookupNode(const char *name, int length) {
     sdsfree(s);
     if (de == NULL) return NULL;
     return dictGetVal(de);
+}
+
+const char *clusterGetSecret(size_t *len) {
+    if (!server.cluster) {
+        return NULL;
+    }
+    *len = CLUSTER_INTERNALSECRETLEN;
+    return server.cluster->internal_secret;
 }
 
 /* Get all the nodes in my shard.
@@ -2503,6 +2507,10 @@ uint32_t getShardIdPingExtSize(void) {
     return getAlignedPingExtSize(sizeof(clusterMsgPingExtShardId));
 }
 
+uint32_t getInternalSecretPingExtSize(void) {
+    return getAlignedPingExtSize(sizeof(clusterMsgPingExtInternalSecret));
+}
+
 uint32_t getForgottenNodeExtSize(void) {
     return getAlignedPingExtSize(sizeof(clusterMsgPingExtForgottenNode));
 }
@@ -2594,6 +2602,17 @@ uint32_t writePingExt(clusterMsg *hdr, int gossipcount)  {
     totlen += getShardIdPingExtSize();
     extensions++;
 
+    /* Populate insternal secret */
+    if (cursor != NULL) {
+        clusterMsgPingExtInternalSecret *ext = preparePingExt(cursor, CLUSTERMSG_EXT_TYPE_INTERNALSECRET, getInternalSecretPingExtSize());
+        memcpy(ext->internal_secret, server.cluster->internal_secret, CLUSTER_INTERNALSECRETLEN);
+
+        /* Move the write cursor */
+        cursor = nextPingExt(cursor);
+    }
+    totlen += getInternalSecretPingExtSize();
+    extensions++;
+
     if (hdr != NULL) {
         hdr->extensions = htons(extensions);
     }
@@ -2634,9 +2653,14 @@ void clusterProcessPingExtensions(clusterMsg *hdr, clusterLink *link) {
         } else if (type == CLUSTERMSG_EXT_TYPE_SHARDID) {
             clusterMsgPingExtShardId *shardid_ext = (clusterMsgPingExtShardId *) &(ext->ext[0].shard_id);
             ext_shardid = shardid_ext->shard_id;
+        } else if (type == CLUSTERMSG_EXT_TYPE_INTERNALSECRET) {
+            clusterMsgPingExtInternalSecret *internal_secret_ext = (clusterMsgPingExtInternalSecret *) &(ext->ext[0].internal_secret);
+            if (memcmp(server.cluster->internal_secret, internal_secret_ext->internal_secret, CLUSTER_INTERNALSECRETLEN) > 0 ) {
+                memcpy(server.cluster->internal_secret, internal_secret_ext->internal_secret, CLUSTER_INTERNALSECRETLEN);
+            }
         } else {
             /* Unknown type, we will ignore it but log what happened. */
-            serverLog(LL_WARNING, "Received unknown extension type %d", type);
+            serverLog(LL_VERBOSE, "Received unknown extension type %d", type);
         }
 
         /* We know this will be valid since we validated it ahead of time */
