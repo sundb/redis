@@ -12249,6 +12249,15 @@ void moduleRemoveCateogires(RedisModule *module) {
     }
 }
 
+int VectorSets_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
+/* Load internal data types that bundled as modules */
+void moduleLoadInternalModules(void) {
+#ifdef INCLUDE_VEC_SETS
+    int retval = moduleOnLoad((int (*)(void *, void **, int)) VectorSets_OnLoad, NULL, NULL, NULL, 0, 0);
+    serverAssert(retval == C_OK);
+#endif
+}
+
 /* Load all the modules in the server.loadmodule_queue list, which is
  * populated by `loadmodule` directives in the configuration file.
  * We can't load modules directly when processing the configuration file
@@ -12448,7 +12457,7 @@ void moduleUnregisterCleanup(RedisModule *module) {
     moduleUnregisterAuthCBs(module);
 }
 
-/* Load a module and initialize it. On success C_OK is returned, otherwise
+/* Load a module by path and initialize it. On success C_OK is returned, otherwise
  * C_ERR is returned. */
 int moduleLoad(const char *path, void **module_argv, int module_argc, int is_loadex) {
     int (*onload)(void *, void **, int);
@@ -12476,6 +12485,13 @@ int moduleLoad(const char *path, void **module_argv, int module_argc, int is_loa
             "symbol. Module not loaded.",path);
         return C_ERR;
     }
+
+    return moduleOnLoad(onload, path, handle, module_argv, module_argc, is_loadex);
+}
+
+/* Load a module by its 'onload' callback and initialize it. On success C_OK is returned, otherwise
+ * C_ERR is returned. */
+int moduleOnLoad(int (*onload)(void *, void **, int), const char *path, void *handle, void **module_argv, int module_argc, int is_loadex) {
     RedisModuleCtx ctx;
     moduleCreateContext(&ctx, NULL, REDISMODULE_CTX_TEMP_CLIENT); /* We pass NULL since we don't have a module yet. */
     if (onload((void*)&ctx,module_argv,module_argc) == REDISMODULE_ERR) {
@@ -12487,7 +12503,7 @@ int moduleLoad(const char *path, void **module_argv, int module_argc, int is_loa
             moduleFreeModuleStructure(ctx.module);
         }
         moduleFreeContext(&ctx);
-        dlclose(handle);
+        if (handle) dlclose(handle);
         return C_ERR;
     }
 
@@ -12504,12 +12520,12 @@ int moduleLoad(const char *path, void **module_argv, int module_argc, int is_loa
         incrRefCount(ctx.module->loadmod->argv[i]);
     }
 
-    /* If module commands have ACL categories, recompute command bits 
+    /* If module commands have ACL categories, recompute command bits
      * for all existing users once the modules has been registered. */
     if (ctx.module->num_commands_with_acl_categories) {
         ACLRecomputeCommandBitsFromCommandRulesAllUsers();
     }
-    serverLog(LL_NOTICE,"Module '%s' loaded from %s",ctx.module->name,path);
+    if (path) serverLog(LL_NOTICE,"Module '%s' loaded from %s",ctx.module->name,path);
     ctx.module->onload = 0;
 
     int post_load_err = 0;
@@ -12549,6 +12565,9 @@ int moduleUnload(sds name, const char **errmsg, int forced_unload) {
 
     if (module == NULL) {
         *errmsg = "no such module with that name";
+        return C_ERR;
+    } else if (sdslen(module->loadmod->path) == 0) {
+        *errmsg = "the module can't be unloaded";
         return C_ERR;
     } else if (listLength(module->types) && !forced_unload) {
         *errmsg = "the module exports one or more module-side data "

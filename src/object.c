@@ -359,7 +359,15 @@ void incrRefCount(robj *o) {
 }
 
 void decrRefCount(robj *o) {
-    if (o->refcount == 1) {
+    if (o->refcount == OBJ_SHARED_REFCOUNT)
+        return; /* Nothing to do: this refcount is immutable. */
+
+    if (unlikely(o->refcount <= 0)) {
+        serverPanic("illegal decrRefCount for object with: type %u, encoding %u, refcount %d",
+            o->type, o->encoding, o->refcount);
+    }
+
+    if (--(o->refcount) == 0) {
         switch(o->type) {
         case OBJ_STRING: freeStringObject(o); break;
         case OBJ_LIST: freeListObject(o); break;
@@ -371,9 +379,6 @@ void decrRefCount(robj *o) {
         default: serverPanic("Unknown object type"); break;
         }
         zfree(o);
-    } else {
-        if (o->refcount <= 0) serverPanic("decrRefCount against refcount <= 0");
-        if (o->refcount != OBJ_SHARED_REFCOUNT) o->refcount--;
     }
 }
 
