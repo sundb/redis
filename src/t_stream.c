@@ -3705,8 +3705,10 @@ void xdelexCommand(client *c) {
         return;
     }
 
-    if (ids_start_pos == -1)
+    if (ids_start_pos == -1) {
         addReplyError(c,"Missing IDS option");
+        return;
+    }
 
     xdelGenericCommand(c, s, ids_start_pos, numids, delpel, acked, withids);
 }
