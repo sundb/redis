@@ -57,7 +57,19 @@ stream *streamNew(void) {
     s->max_deleted_entry_id.ms = 0;
     s->entries_added = 0;
     s->cgroups = NULL; /* Created on demand to save memory when not used. */
+    s->id_to_groups = raxNew(); /* Maps stream IDs to consumer groups. */
     return s;
+}
+
+listNode *AddEntryToCGroupPEL(stream *s, streamCG *group, unsigned char *key) {
+    printf("AddEntryToCGroupPEL\n");
+    list *l;
+    if (!raxFind(s->id_to_groups, key, sizeof(streamID), (void**)&l)) {
+        l = listCreate();
+        raxInsert(s->id_to_groups, key, sizeof(streamID), l, NULL);
+    }
+    listAddNodeTail(l, group);
+    return listLast(l);
 }
 
 /* Free a stream, including the listpacks stored inside the radix tree. */
@@ -65,6 +77,7 @@ void freeStream(stream *s) {
     raxFreeWithCallback(s->rax, lpFreeGeneric);
     if (s->cgroups)
         raxFreeWithCallback(s->cgroups, streamFreeCGGeneric);
+    raxFreeWithCallback(s->id_to_groups, listReleaseGeneric);
     zfree(s);
 }
 
@@ -199,6 +212,7 @@ robj *streamDup(robj *o) {
             streamNACK *new_nack = streamCreateNACK(NULL);
             new_nack->delivery_time = nack->delivery_time;
             new_nack->delivery_count = nack->delivery_count;
+            new_nack->list_node = AddEntryToCGroupPEL(s, new_cg, ri_cg_pel.key);
             raxInsert(new_cg->pel, ri_cg_pel.key, sizeof(streamID), new_nack, NULL);
         }
         raxStop(&ri_cg_pel);
@@ -1749,6 +1763,7 @@ size_t streamReplyWithRange(client *c, stream *s, streamID *start, streamID *end
              * will not require extra lookups. We'll fix the problem later
              * if we find that there is already an entry for this ID. */
             streamNACK *nack = streamCreateNACK(consumer);
+            nack->list_node = AddEntryToCGroupPEL(s, group, buf);
             int group_inserted =
                 raxTryInsert(group->pel,buf,sizeof(buf),nack,NULL);
             int consumer_inserted =
@@ -3295,6 +3310,7 @@ void xclaimCommand(client *c) {
         if (force && nack == NULL) {
             /* Create the NACK. */
             nack = streamCreateNACK(NULL);
+            nack->list_node = AddEntryToCGroupPEL(o->ptr, group, buf);
             raxInsert(group->pel,buf,sizeof(buf),nack,NULL);
         }
 
@@ -3546,33 +3562,54 @@ void xautoclaimCommand(client *c) {
     preventCommandPropagation(c);
 }
 
-/* XDEL <key> [<ID1> <ID2> ... <IDN>]
- *
- * Removes the specified entries from the stream. Returns the number
- * of items actually deleted, that may be different from the number
- * of IDs passed in case certain IDs do not exist. */
-void xdelCommand(client *c) {
-    kvobj *kv = lookupKeyWriteOrReply(c, c->argv[1], shared.czero); 
-    if (kv == NULL || checkType(c, kv, OBJ_STREAM)) return;
-    stream *s = kv->ptr;
-
+void xdelGenericCommand(client *c, stream *s, int start_idx, int id_count, int delpel, int acked, int withids) {
+    UNUSED(withids);
     /* We need to sanity check the IDs passed to start. Even if not
      * a big issue, it is not great that the command is only partially
      * executed because at some point an invalid ID is parsed. */
     streamID static_ids[STREAMID_STATIC_VECTOR_LEN];
     streamID *ids = static_ids;
-    int id_count = c->argc-2;
     if (id_count > STREAMID_STATIC_VECTOR_LEN)
         ids = zmalloc(sizeof(streamID)*id_count);
-    for (int j = 2; j < c->argc; j++) {
-        if (streamParseStrictIDOrReply(c,c->argv[j],&ids[j-2],0,NULL) != C_OK) goto cleanup;
+    for (int j = start_idx; j < c->argc; j++) {
+        if (streamParseStrictIDOrReply(c,c->argv[j],&ids[j-start_idx],0,NULL) != C_OK) goto cleanup;
     }
 
     /* Actually apply the command. */
     int deleted = 0;
     int first_entry = 0;
-    for (int j = 2; j < c->argc; j++) {
-        streamID *id = &ids[j-2];
+    for (int j = start_idx; j < c->argc; j++) {
+        streamID *id = &ids[j-start_idx];
+        if (acked) {
+            unsigned char buf[sizeof(streamID)];
+            streamEncodeID(buf,id);
+            list *l;
+            if (raxFind(s->id_to_groups, buf, sizeof(streamID), (void **)&l)) {
+                if (listLength(l) != 0) continue;
+            }
+        } else if (delpel) {
+            /* If we are deleting the PEL, we need to check if the ID
+             * exists in the PEL, otherwise we just skip it. */
+            unsigned char buf[sizeof(streamID)];
+            streamEncodeID(buf,id);
+            list *l;
+            if (raxFind(s->id_to_groups, buf, sizeof(streamID), (void **)&l)) {
+                listIter li;
+                listNode *ln;
+                listRewind(l, &li);
+                while((ln = listNext(&li))) {
+                    streamCG *group = (streamCG *) listNodeValue(ln);
+                    // printf("delpel group, pel:%p\n", group->pel);
+                    void *result;
+                    if (raxFind(group->pel,buf,sizeof(buf),&result)) {
+                        streamNACK *nack = result;
+                        raxRemove(group->pel,buf,sizeof(buf),NULL);
+                        raxRemove(nack->consumer->pel,buf,sizeof(buf),NULL);
+                        streamFreeNACK(nack);
+                    }
+                }
+            }
+        }
         if (streamDeleteItem(s,id)) {
             /* We want to know if the first entry in the stream was deleted
              * so we can later set the new one. */
@@ -3604,8 +3641,74 @@ void xdelCommand(client *c) {
         server.dirty += deleted;
     }
     addReplyLongLong(c,deleted);
+
 cleanup:
     if (ids != static_ids) zfree(ids);
+}
+
+/* XDEL <key> [<ID1> <ID2> ... <IDN>]
+ *
+ * Removes the specified entries from the stream. Returns the number
+ * of items actually deleted, that may be different from the number
+ * of IDs passed in case certain IDs do not exist. */
+void xdelCommand(client *c) {
+    kvobj *kv = lookupKeyWriteOrReply(c, c->argv[1], shared.czero); 
+    if (kv == NULL || checkType(c, kv, OBJ_STREAM)) return;
+    stream *s = kv->ptr;
+    xdelGenericCommand(c, s, 2, c->argc - 2, 0, 0, 0);
+}
+
+/* XDELEX <key> <DELPEL|ACKED> <WITHIDS> ids numids [<ID1> <ID2> ... <IDN>]
+ *
+ * Removes the specified entries from the stream. Returns the number
+ * of items actually deleted, that may be different from the number
+ * of IDs passed in case certain IDs do not exist. */
+void xdelexCommand(client *c) {
+    int delpel = 0;     /* */
+    int acked = 0;      /* */
+    int withids = 0;    /* */
+    long numids;   /* */
+    int ids_start_pos = -1;
+
+    kvobj *kv = lookupKeyWriteOrReply(c, c->argv[1], shared.czero); 
+    if (kv == NULL || checkType(c, kv, OBJ_STREAM)) return;
+    stream *s = kv->ptr;
+
+    for (int j = 2; j < c->argc; j++) {
+        if (!strcasecmp(c->argv[j]->ptr, "DELPEL")) {
+            delpel = 1;
+        } else if (!strcasecmp(c->argv[j]->ptr, "ACKED")) {
+            acked = 1;
+        } else if (!strcasecmp(c->argv[j]->ptr, "WITHIDS")) {
+            withids = 1;
+        } else if (!strcasecmp(c->argv[j]->ptr, "IDS") && j+1 < c->argc) {
+            j++;
+            if (getRangeLongFromObjectOrReply(c, c->argv[j], 1, LONG_MAX,
+                &numids, "Parameter `numFields` should be greater than 0") != C_OK) {
+                return;
+            }
+            if (numids != (c->argc - j - 1)) {
+                addReplyError(c, "Number of IDs must be equal to the number of remaining arguments");
+                return;
+            }
+            ids_start_pos = j + 1;
+            break; /* We are done with options */
+        } else {
+            addReplyErrorObject(c,shared.syntaxerr);
+            return;
+        }
+    }
+
+    /* Check for mutually exclusive options */
+    if (delpel && acked) {
+        addReplyError(c,"DELPEL and ACKED options are mutually exclusive");
+        return;
+    }
+
+    if (ids_start_pos == -1)
+        addReplyError(c,"Missing IDS option");
+
+    xdelGenericCommand(c, s, ids_start_pos, numids, delpel, acked, withids);
 }
 
 /* General form: XTRIM <key> [... options ...]

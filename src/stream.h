@@ -21,6 +21,7 @@ typedef struct stream {
     streamID max_deleted_entry_id;  /* The maximal ID that was deleted. */
     uint64_t entries_added; /* All time count of elements added. */
     rax *cgroups;           /* Consumer groups dictionary: name -> streamCG */
+    rax *id_to_groups;      /* stream id -> list of stream groups. */
 } stream;
 
 /* We define an iterator to iterate stream items in an abstract way, without
@@ -94,6 +95,9 @@ typedef struct streamNACK {
     uint64_t delivery_count;    /* Number of times this message was delivered.*/
     streamConsumer *consumer;   /* The consumer this message was delivered to
                                    in the last delivery. */
+    listNode *list_node; /* The list node in the consumer's PEL. This is
+                            used to remove the entry from the PEL when
+                            the message is acknowledged. */
 } streamNACK;
 
 /* Stream propagation information, passed to functions in order to propagate
@@ -127,6 +131,7 @@ streamConsumer *streamLookupConsumer(streamCG *cg, sds name);
 streamConsumer *streamCreateConsumer(streamCG *cg, sds name, robj *key, int dbid, int flags);
 streamCG *streamCreateCG(stream *s, char *name, size_t namelen, streamID *id, long long entries_read);
 streamNACK *streamCreateNACK(streamConsumer *consumer);
+listNode *AddEntryToCGroupPEL(stream *s, streamCG *group, unsigned char *key);
 void streamDecodeID(void *buf, streamID *id);
 int streamCompareID(streamID *a, streamID *b);
 void streamFreeNACK(streamNACK *na);
