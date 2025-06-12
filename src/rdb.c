@@ -2976,14 +2976,14 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
                 if (rioGetReadError(rdb)) {
                     rdbReportReadError("Stream PEL NACK loading failed.");
                     decrRefCount(o);
-                    streamFreeNACK(nack);
+                    streamFreeNACKAndRemoveFromIndex(s, nack, rawid);
                     return NULL;
                 }
                 if (!raxTryInsert(cgroup->pel,rawid,sizeof(rawid),nack,NULL)) {
                     rdbReportCorruptRDB("Duplicated global PEL entry "
                                             "loading stream consumer group");
                     decrRefCount(o);
-                    streamFreeNACK(nack);
+                    streamFreeNACKAndRemoveFromIndex(s, nack, rawid);
                     return NULL;
                 }
             }

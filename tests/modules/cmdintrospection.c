@@ -34,6 +34,7 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
              * XADD). */
             {"6.2.0", "Added the `NOMKSTREAM` option, `MINID` trimming strategy and the `LIMIT` option."},
             {"7.0.0", "Added support for the `<ms>-*` explicit ID form."},
+            {"8.2.0", ""},
             {0}
         },
         .key_specs = (RedisModuleCommandKeySpec[]){
