@@ -2494,7 +2494,7 @@ streamNACK *streamCreateNACK(stream *s, streamConsumer *consumer, streamCG *grou
     nack->delivery_time = commandTimeSnapshot();
     nack->delivery_count = 1;
     nack->consumer = consumer;
-    nack->list_node = streamRegisterConsumerGroup(s, group, key);
+    nack->cgroups_index_node = streamRegisterConsumerGroup(s, group, key);
     return nack;
 }
 
@@ -2508,7 +2508,7 @@ void streamFreeNACK(streamNACK *na) {
 void streamFreeNACKAndRemoveFromIndex(stream *s, streamNACK *na, unsigned char *key) {
     list *l;
     if (raxFind(s->message_cgroups_index, key, sizeof(streamID), (void**)&l)) {
-        listDelNode(l, na->list_node);
+        listDelNode(l, na->cgroups_index_node);
         
         /* If the list is now empty, remove it from the index. */
         if (listLength(l) == 0) {

@@ -95,9 +95,7 @@ typedef struct streamNACK {
     uint64_t delivery_count;    /* Number of times this message was delivered.*/
     streamConsumer *consumer;   /* The consumer this message was delivered to
                                    in the last delivery. */
-    listNode *list_node; /* The list node in the consumer's PEL. This is
-                            used to remove the entry from the PEL when
-                            the message is acknowledged. */
+    listNode *cgroups_index_node; /* Reference to this NACK in the message_cgroups_index list. */
 } streamNACK;
 
 /* Stream propagation information, passed to functions in order to propagate
