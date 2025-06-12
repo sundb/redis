@@ -2954,7 +2954,6 @@ void xackGenricCommand(client *c, int start_idx, int id_count, int delentry, int
                         listRewind(l, &li);
                         while((ln = listNext(&li))) {
                             streamCG *group = (streamCG *) listNodeValue(ln);
-                            // printf("delpel group, pel:%p\n", group->pel);
                             void *result;
                             if (raxFind(group->pel,buf,sizeof(buf),&result)) {
                                 streamNACK *nack = result;
@@ -3703,44 +3702,44 @@ void xdelGenericCommand(client *c, int start_idx, int id_count, int delpel, int 
     streamID *ids = static_ids;
     if (id_count > STREAMID_STATIC_VECTOR_LEN)
         ids = zmalloc(sizeof(streamID)*id_count);
-    for (int j = start_idx; j < c->argc; j++) {
+    for (int j = start_idx; j < id_count; j++) {
         if (streamParseStrictIDOrReply(c,c->argv[j],&ids[j-start_idx],0,NULL) != C_OK) goto cleanup;
     }
 
     /* Actually apply the command. */
     int deleted = 0;
     int first_entry = 0;
-    for (int j = start_idx; j < c->argc; j++) {
+    for (int j = start_idx; j < id_count; j++) {
         streamID *id = &ids[j-start_idx];
-        if (acked) {
+
+        if (delpel || acked) {
             unsigned char buf[sizeof(streamID)];
             streamEncodeID(buf,id);
+
             list *l;
             if (raxFind(s->message_cgroups_index, buf, sizeof(streamID), (void **)&l)) {
-                if (listLength(l) != 0) continue;
-            }
-        } else if (delpel) {
-            /* If we are deleting the PEL, we need to check if the ID
-             * exists in the PEL, otherwise we just skip it. */
-            unsigned char buf[sizeof(streamID)];
-            streamEncodeID(buf,id);
-            list *l;
-            if (raxFind(s->message_cgroups_index, buf, sizeof(streamID), (void **)&l)) {
-                listIter li;
-                listNode *ln;
-                listRewind(l, &li);
-                while((ln = listNext(&li))) {
-                    streamCG *group = (streamCG *) listNodeValue(ln);
-                    void *result;
-                    if (raxFind(group->pel,buf,sizeof(buf),&result)) {
-                        streamNACK *nack = result;
-                        raxRemove(group->pel,buf,sizeof(buf),NULL);
-                        raxRemove(nack->consumer->pel,buf,sizeof(buf),NULL);
-                        streamFreeNACKAndRemoveFromIndex(s, nack, buf);
+                if (acked) {
+                    /* For ACKED option, skip deletion if there are pending consumers */
+                    if (listLength(l) > 0) continue;
+                } else if (delpel) {
+                    /* For DELPEL option, remove the entry from all consumer groups */
+                    listIter li;
+                    listNode *ln;
+                    listRewind(l, &li);
+                    while((ln = listNext(&li))) {
+                        streamCG *group = listNodeValue(ln);
+                        void *result;
+                        if (raxFind(group->pel, buf, sizeof(buf), &result)) {
+                            streamNACK *nack = result;
+                            raxRemove(group->pel, buf, sizeof(buf), NULL);
+                            raxRemove(nack->consumer->pel, buf, sizeof(buf), NULL);
+                            streamFreeNACKAndRemoveFromIndex(s, nack, buf);
+                        }
                     }
                 }
             }
         }
+
         if (streamDeleteItem(s,id)) {
             /* We want to know if the first entry in the stream was deleted
              * so we can later set the new one. */
