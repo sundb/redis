@@ -61,6 +61,24 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
                 .flags = REDISMODULE_CMD_ARG_OPTIONAL
             },
             {
+                .name = "condition",
+                .type = REDISMODULE_ARG_TYPE_ONEOF,
+                .flags = REDISMODULE_CMD_ARG_OPTIONAL,
+                .subargs = (RedisModuleCommandArg[]){
+                    {
+                        .name = "delpel",
+                        .type = REDISMODULE_ARG_TYPE_PURE_TOKEN,
+                        .token = "DELPEL"
+                    },
+                    {
+                        .name = "acked",
+                        .type = REDISMODULE_ARG_TYPE_PURE_TOKEN,
+                        .token = "ACKED"
+                    },
+                    {0}
+                }
+            },
+            {
                 .name = "trim",
                 .type = REDISMODULE_ARG_TYPE_BLOCK,
                 .flags = REDISMODULE_CMD_ARG_OPTIONAL,
