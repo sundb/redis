@@ -3786,7 +3786,7 @@ void xdelCommand(client *c) {
     xdelGenericCommand(c, 2, c->argc - 2, 0, 0);
 }
 
-/* XDELEX <key> <DELPEL|ACKED> ids numids [<ID1> <ID2> ... <IDN>]
+/* XDELEX <key> [DELPEL|ACKED] [IDS <numids> <id ...>]
  *
  * Removes the specified entries from the stream. Returns the number
  * of items actually deleted, that may be different from the number
@@ -3797,24 +3797,30 @@ void xdelexCommand(client *c) {
     long numids;   /* */
     int ids_start_pos = -1;
 
-
-    for (int j = 2; j < c->argc; j++) {
-        if (!strcasecmp(c->argv[j]->ptr, "DELPEL")) {
+    /* Parse command options */
+    int j = 2;
+    while (j < c->argc) {
+        char *opt = c->argv[j]->ptr;
+        if (!strcasecmp(opt, "DELPEL")) {
             delpel = 1;
-        } else if (!strcasecmp(c->argv[j]->ptr, "ACKED")) {
-            acked = 1;
-        } else if (!strcasecmp(c->argv[j]->ptr, "IDS") && j+1 < c->argc) {
             j++;
-            if (getRangeLongFromObjectOrReply(c, c->argv[j], 1, LONG_MAX,
-                &numids, "Parameter `numFields` should be greater than 0") != C_OK) {
+        } else if (!strcasecmp(opt, "ACKED")) {
+            acked = 1;
+            j++;
+        } else if (!strcasecmp(opt, "IDS") && j+1 < c->argc) {
+            /* Parse the number of IDs */
+            if (getRangeLongFromObjectOrReply(c, c->argv[j+1], 1, LONG_MAX,
+                &numids, "Number of IDs must be greater than 0") != C_OK) {
                 return;
             }
-            if (numids != (c->argc - j - 1)) {
-                addReplyError(c, "Number of IDs must be equal to the number of remaining arguments");
+
+            /* Verify that the specified number of IDs matches the actual arguments */
+            if (numids >= (c->argc - j - 2)) {
+                addReplyError(c, "Number of IDs must match the remaining arguments");
                 return;
             }
-            ids_start_pos = j + 1;
-            break; /* We are done with options */
+            
+            ids_start_pos = j + 2;  /* Skip "IDS" and numids */
         } else {
             addReplyErrorObject(c,shared.syntaxerr);
             return;
