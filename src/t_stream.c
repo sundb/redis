@@ -2879,10 +2879,7 @@ void xsetidCommand(client *c) {
     notifyKeyspaceEvent(NOTIFY_STREAM,"xsetid",c->argv[1],c->db->id);
 }
 
-void xackGenricCommand(client *c, int start_idx, int id_count, int delentry, int delpel, int acked) {
-    UNUSED(delpel);
-    UNUSED(acked);
-
+void xackGenericCommand(client *c, int start_idx, int id_count, int delentry, int delpel, int acked) {
     stream *s = NULL;
     streamCG *group = NULL;
     kvobj *kv = lookupKeyRead(c->db, c->argv[1]);
@@ -3010,7 +3007,7 @@ cleanup:
  * acknowledged, that is, the IDs we were actually able to resolve in the PEL.
  */
 void xackCommand(client *c) {
-    xackGenricCommand(c, 3, c->argc - 3, 0, 0, 0);
+    xackGenericCommand(c, 3, c->argc - 3, 0, 0, 0);
 }
 
 void xackdelCommand(client *c) {
@@ -3042,7 +3039,7 @@ void xackdelCommand(client *c) {
         }
     }
 
-    xackGenricCommand(c, startidx, numids, 1, delpel, acked);
+    xackGenericCommand(c, startidx, numids, 1, delpel, acked);
 }
 
 /* XPENDING <key> <group> [[IDLE <idle>] <start> <stop> <count> [<consumer>]]
