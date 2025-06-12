@@ -3702,15 +3702,15 @@ void xdelGenericCommand(client *c, int start_idx, int id_count, int delpel, int 
     streamID *ids = static_ids;
     if (id_count > STREAMID_STATIC_VECTOR_LEN)
         ids = zmalloc(sizeof(streamID)*id_count);
-    for (int j = start_idx; j < id_count; j++) {
-        if (streamParseStrictIDOrReply(c,c->argv[j],&ids[j-start_idx],0,NULL) != C_OK) goto cleanup;
+    for (int j = 0; j < id_count; j++) {
+        if (streamParseStrictIDOrReply(c,c->argv[j+start_idx],&ids[j],0,NULL) != C_OK) goto cleanup;
     }
 
     /* Actually apply the command. */
     int deleted = 0;
     int first_entry = 0;
-    for (int j = start_idx; j < id_count; j++) {
-        streamID *id = &ids[j-start_idx];
+    for (int j = 0; j < id_count; j++) {
+        streamID *id = &ids[j];
 
         if (delpel || acked) {
             unsigned char buf[sizeof(streamID)];
