@@ -2879,7 +2879,77 @@ void xsetidCommand(client *c) {
     notifyKeyspaceEvent(NOTIFY_STREAM,"xsetid",c->argv[1],c->db->id);
 }
 
-void xackGenericCommand(client *c, int start_idx, int id_count, int delentry, int delpel, int acked) {
+int streamDeleteMessagesWithOptions(stream *s, streamID *ids, int id_count, int delpel, int acked) {
+    int deleted = 0;
+    int first_entry = 0;
+
+    for (int j = 0; j < id_count; j++) {
+        list *l;
+        unsigned char buf[sizeof(streamID)];
+        streamID *id = &ids[j];
+
+        if (!(delpel || acked))
+            goto delete_item;
+
+        streamEncodeID(buf,id);
+        /* If message is not in any consumer group, proceed to deletion */
+        if (!raxFind(s->message_cgroups_index, buf, sizeof(streamID), (void **)&l))
+            goto delete_item;
+
+        /* For ACKED option, skip deletion if there are pending consumers */ 
+        if (acked) continue;
+
+        /* For DELPEL option: remove the entry from all consumer groups */
+        if (delpel) {
+            listIter li;
+            listNode *ln;
+
+            listRewind(l, &li);
+            while((ln = listNext(&li))) {
+                streamCG *group = listNodeValue(ln);
+                void *result;
+                
+                /* Find the message in this consumer group's PEL */
+                if (raxFind(group->pel, buf, sizeof(buf), &result)) {
+                    streamNACK *nack = result;
+                    
+                    /* Remove from group and consumer PELs */
+                    raxRemove(group->pel, buf, sizeof(buf), NULL);
+                    raxRemove(nack->consumer->pel, buf, sizeof(buf), NULL);
+                    streamFreeNACKAndRemoveFromIndex(s, nack, buf);
+                }
+            }
+        }
+
+delete_item:
+        if (streamDeleteItem(s,id)) {
+            /* We want to know if the first entry in the stream was deleted
+             * so we can later set the new one. */
+            if (streamCompareID(id,&s->first_id) == 0) {
+                first_entry = 1;
+            }
+            /* Update the stream's maximal tombstone if needed. */
+            if (streamCompareID(id,&s->max_deleted_entry_id) > 0) {
+                s->max_deleted_entry_id = *id;
+            }
+            deleted++;
+        }
+    }
+
+    /* Update the stream's first ID. */
+    if (deleted) {
+        if (s->length == 0) {
+            s->first_id.ms = 0;
+            s->first_id.seq = 0;
+        } else if (first_entry) {
+            streamGetEdgeID(s,1,1,&s->first_id);
+        }
+    }
+
+    return deleted;
+}
+
+void xackGenericCommand(client *c, int start_idx, int id_count, int delpel, int acked) {
     stream *s = NULL;
     streamCG *group = NULL;
     kvobj *kv = lookupKeyRead(c->db, c->argv[1]);
@@ -2903,14 +2973,14 @@ void xackGenericCommand(client *c, int start_idx, int id_count, int delentry, in
     streamID *ids = static_ids;
     if (id_count > STREAMID_STATIC_VECTOR_LEN)
         ids = zmalloc(sizeof(streamID)*id_count);
-    for (int j = 3; j < c->argc; j++) {
-        if (streamParseStrictIDOrReply(c,c->argv[j],&ids[j-3],0,NULL) != C_OK) goto cleanup;
+    for (int j = 0; j < id_count; j++) {
+        if (streamParseStrictIDOrReply(c,c->argv[j+start_idx],&ids[j],0,NULL) != C_OK) goto cleanup;
     }
 
     int acknowledged = 0;
-    for (int j = start_idx; j < c->argc; j++) {
+    for (int j = 0; j < id_count; j++) {
         unsigned char buf[sizeof(streamID)];
-        streamEncodeID(buf,&ids[j-start_idx]);
+        streamEncodeID(buf,&ids[j]);
 
         /* Lookup the ID in the group PEL: it will have a reference to the
          * NACK structure that will have a reference to the consumer, so that
@@ -2926,64 +2996,8 @@ void xackGenericCommand(client *c, int start_idx, int id_count, int delentry, in
         }
 
         /* Revmoe this entry */
-        if (delentry) {
-            /* Actually apply the command. */
-            int deleted = 0;
-            int first_entry = 0;
-            for (int j = start_idx; j < c->argc; j++) {
-                streamID *id = &ids[j-start_idx];
-                if (acked) {
-                    unsigned char buf[sizeof(streamID)];
-                    streamEncodeID(buf,id);
-                    list *l;
-                    if (raxFind(s->message_cgroups_index, buf, sizeof(streamID), (void **)&l)) {
-                        if (listLength(l) != 0) continue;
-                    }
-                } else if (delpel) {
-                    /* If we are deleting the PEL, we need to check if the ID
-                    * exists in the PEL, otherwise we just skip it. */
-                    unsigned char buf[sizeof(streamID)];
-                    streamEncodeID(buf,id);
-                    list *l;
-                    if (raxFind(s->message_cgroups_index, buf, sizeof(streamID), (void **)&l)) {
-                        listIter li;
-                        listNode *ln;
-                        listRewind(l, &li);
-                        while((ln = listNext(&li))) {
-                            streamCG *group = (streamCG *) listNodeValue(ln);
-                            void *result;
-                            if (raxFind(group->pel,buf,sizeof(buf),&result)) {
-                                streamNACK *nack = result;
-                                raxRemove(group->pel,buf,sizeof(buf),NULL);
-                                raxRemove(nack->consumer->pel,buf,sizeof(buf),NULL);
-                                streamFreeNACKAndRemoveFromIndex(s, nack, buf);
-                            }
-                        }
-                    }
-                }
-                if (streamDeleteItem(s,id)) {
-                    /* We want to know if the first entry in the stream was deleted
-                    * so we can later set the new one. */
-                    if (streamCompareID(id,&s->first_id) == 0) {
-                        first_entry = 1;
-                    }
-                    /* Update the stream's maximal tombstone if needed. */
-                    if (streamCompareID(id,&s->max_deleted_entry_id) > 0) {
-                        s->max_deleted_entry_id = *id;
-                    }
-                    deleted++;
-                };
-            }
-
-            /* Update the stream's first ID. */
-            if (deleted) {
-                if (s->length == 0) {
-                    s->first_id.ms = 0;
-                    s->first_id.seq = 0;
-                } else if (first_entry) {
-                    streamGetEdgeID(s,1,1,&s->first_id);
-                }
-            }
+        if (c->cmd->proc == xackdelCommand) {
+            int deleted = streamDeleteMessagesWithOptions(s, ids, id_count, delpel, acked);
 
             /* Propagate the write if needed. */
             if (deleted) {
@@ -3007,7 +3021,7 @@ cleanup:
  * acknowledged, that is, the IDs we were actually able to resolve in the PEL.
  */
 void xackCommand(client *c) {
-    xackGenericCommand(c, 3, c->argc - 3, 0, 0, 0);
+    xackGenericCommand(c, 3, c->argc - 3, 0, 0);
 }
 
 void xackdelCommand(client *c) {
@@ -3039,7 +3053,7 @@ void xackdelCommand(client *c) {
         }
     }
 
-    xackGenericCommand(c, startidx, numids, 1, delpel, acked);
+    xackGenericCommand(c, startidx, numids, delpel, acked);
 }
 
 /* XPENDING <key> <group> [[IDLE <idle>] <start> <stop> <count> [<consumer>]]
@@ -3703,63 +3717,7 @@ void xdelGenericCommand(client *c, int start_idx, int id_count, int delpel, int 
         if (streamParseStrictIDOrReply(c,c->argv[j+start_idx],&ids[j],0,NULL) != C_OK) goto cleanup;
     }
 
-    /* Actually apply the command. */
-    int deleted = 0;
-    int first_entry = 0;
-    for (int j = 0; j < id_count; j++) {
-        streamID *id = &ids[j];
-
-        if (delpel || acked) {
-            unsigned char buf[sizeof(streamID)];
-            streamEncodeID(buf,id);
-
-            list *l;
-            if (raxFind(s->message_cgroups_index, buf, sizeof(streamID), (void **)&l)) {
-                if (acked) {
-                    /* For ACKED option, skip deletion if there are pending consumers */
-                    if (listLength(l) > 0) continue;
-                } else if (delpel) {
-                    /* For DELPEL option, remove the entry from all consumer groups */
-                    listIter li;
-                    listNode *ln;
-                    listRewind(l, &li);
-                    while((ln = listNext(&li))) {
-                        streamCG *group = listNodeValue(ln);
-                        void *result;
-                        if (raxFind(group->pel, buf, sizeof(buf), &result)) {
-                            streamNACK *nack = result;
-                            raxRemove(group->pel, buf, sizeof(buf), NULL);
-                            raxRemove(nack->consumer->pel, buf, sizeof(buf), NULL);
-                            streamFreeNACKAndRemoveFromIndex(s, nack, buf);
-                        }
-                    }
-                }
-            }
-        }
-
-        if (streamDeleteItem(s,id)) {
-            /* We want to know if the first entry in the stream was deleted
-             * so we can later set the new one. */
-            if (streamCompareID(id,&s->first_id) == 0) {
-                first_entry = 1;
-            }
-            /* Update the stream's maximal tombstone if needed. */
-            if (streamCompareID(id,&s->max_deleted_entry_id) > 0) {
-                s->max_deleted_entry_id = *id;
-            }
-            deleted++;
-        };
-    }
-
-    /* Update the stream's first ID. */
-    if (deleted) {
-        if (s->length == 0) {
-            s->first_id.ms = 0;
-            s->first_id.seq = 0;
-        } else if (first_entry) {
-            streamGetEdgeID(s,1,1,&s->first_id);
-        }
-    }
+    int deleted = streamDeleteMessagesWithOptions(s, ids, id_count, delpel, acked);
 
     /* Propagate the write if needed. */
     if (deleted) {
