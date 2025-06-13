@@ -2906,18 +2906,16 @@ int streamDeleteMessagesWithOptions(stream *s, streamID *ids, int id_count, int 
 
             listRewind(l, &li);
             while((ln = listNext(&li))) {
+                streamNACK *nack;
                 streamCG *group = listNodeValue(ln);
-                void *result;
                 
                 /* Find the message in this consumer group's PEL */
-                if (raxFind(group->pel, buf, sizeof(buf), &result)) {
-                    streamNACK *nack = result;
-                    
-                    /* Remove from group and consumer PELs */
-                    raxRemove(group->pel, buf, sizeof(buf), NULL);
-                    raxRemove(nack->consumer->pel, buf, sizeof(buf), NULL);
-                    streamFreeNACKAndRemoveFromIndex(s, nack, buf);
-                }
+                serverAssert(raxFind(group->pel, buf, sizeof(buf), (void **)&nack));
+                
+                /* Remove from group and consumer PELs */
+                raxRemove(group->pel, buf, sizeof(buf), NULL);
+                raxRemove(nack->consumer->pel, buf, sizeof(buf), NULL);
+                streamFreeNACKAndRemoveFromIndex(s, nack, buf);
             }
         }
 
