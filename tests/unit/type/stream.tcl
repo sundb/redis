@@ -1081,3 +1081,112 @@ start_server {tags {"stream"}} {
         assert_match "*wrong number of arguments for 'xinfo|help' command" $e
     }
 }
+
+start_server {tags {"stream"}} {
+    test "XDELEX wrong number of args" {
+        assert_error {*wrong number of arguments for 'xdelex' command} {r XDELEX s}
+        assert_error {*wrong number of arguments for 'xdelex' command} {r XDELEX s g}
+        assert_error {*wrong number of arguments for 'xdelex' command} {r XDELEX s g DELPEL}
+    }
+
+    test "XDELEX IDS parameter validation" {
+        # Test invalid numids
+        assert_error {*Number of IDs must be greater than 0*} {r XDELEX s g IDS abc 1-1}
+        assert_error {*Number of IDs must be greater than 0*} {r XDELEX s g IDS 0}
+        assert_error {*Number of IDs must be greater than 0*} {r XDELEX s g IDS -5 1-1}
+
+        # Test whether numids is euqal to the number of IDs provided
+        assert_error {*Number of IDs can't exceed the remaining arguments*} {r XDELEX s g IDS 3 1-1 2-2}
+        assert_error {*syntax error*} {r XDELEX s g IDS 1 1-1 2-2}
+    }
+
+    test "XDELEX DELPEL/ACKED parameter validation" {
+        # Test mutually exclusive options
+        assert_error {*mutually exclusive*} {r XDELEX s g DELPEL ACKED}
+
+        # Test missing IDS option
+        assert_error {*IDS option is required*} {r XDELEX s g DELPEL DELPEL}
+        assert_error {*IDS option is required*} {r XDELEX s g ACKED ACKED}
+    }
+
+    test "XDELEX DELPEL" {
+        r DEL mystream
+        r XADD mystream 1-0 f v
+        r XADD mystream 2-0 f v
+        r XADD mystream 3-0 f v
+
+        # Create two consumer groups
+        r XGROUP CREATE mystream group1 0
+        r XGROUP CREATE mystream group2 0
+        r XREADGROUP GROUP group1 consumer1 STREAMS mystream >
+        r XREADGROUP GROUP group2 consumer2 STREAMS mystream >
+        assert_equal 3 [llength [r XPENDING mystream group1 - + 10]]
+        assert_equal 3 [llength [r XPENDING mystream group2 - + 10]]
+
+        # Test DELPEL with a single ID
+        assert_equal 1 [r XDELEX mystream group1 DELPEL IDS 1 2-0]
+        assert_equal 2 [r XLEN mystream]
+
+        # Verify the message was removed from both groups' PELs
+        assert_equal 2 [llength [r XPENDING mystream group1 - + 10]]
+        assert_equal 2 [llength [r XPENDING mystream group2 - + 10]]
+        foreach entry [r XPENDING mystream group1 - + 10] {
+            assert {[lindex $entry 0] != "2-0"}
+        }
+        foreach entry [r XPENDING mystream group2 - + 10] {
+            assert {[lindex $entry 0] != "2-0"}
+        }
+
+       # Test DELPEL with multiple IDs
+        assert_equal 2 [r XDELEX mystream group1 DELPEL IDS 2 1-0 3-0]
+        assert_equal 0 [r XLEN mystream] 
+         # Verify all PELs are empty
+        assert_equal 0 [llength [r XPENDING mystream group1 - + 10]]
+        assert_equal 0 [llength [r XPENDING mystream group2 - + 10]]
+    }
+
+    test "XDELEX ACKED" {
+        r DEL mystream
+        r XADD mystream 1-0 f v
+        r XADD mystream 2-0 f v
+        r XADD mystream 3-0 f v
+
+        # Create two consumer groups
+        r XGROUP CREATE mystream group1 0
+        r XGROUP CREATE mystream group2 0
+        r XREADGROUP GROUP group1 consumer1 STREAMS mystream >
+        r XREADGROUP GROUP group2 consumer2 STREAMS mystream >
+        assert_equal 3 [llength [r XPENDING mystream group1 - + 10]]
+        assert_equal 3 [llength [r XPENDING mystream group2 - + 10]]
+
+        # Messages that are still being referenced by the group will not be deleted.
+        assert_equal 0 [r XDELEX mystream group1 ACKED IDS 1 2-0]
+        assert_equal 3 [r XLEN mystream]
+
+        # The messageis referenced by two groups.
+        # Even after one of them is ack, it still can't be deleted.
+        r XACK mystream group1 2-0
+        assert_equal 0 [r XDELEX mystream group1 ACKED IDS 1 2-0]
+        assert_equal 3 [r XLEN mystream]
+        # 
+        r XACK mystream group2 2-0
+        assert_equal 1 [r XDELEX mystream group1 ACKED IDS 1 2-0]
+        assert_equal 2 [r XLEN mystream]
+        # When a message is dereferenced by all groups, it can be deleted.
+        assert_equal 2 [llength [r XPENDING mystream group1 - + 10]]
+        assert_equal 2 [llength [r XPENDING mystream group2 - + 10]]
+        foreach entry [r XPENDING mystream group1 - + 10] {
+            assert {[lindex $entry 0] != "2-0"}
+        }
+        foreach entry [r XPENDING mystream group2 - + 10] {
+            assert {[lindex $entry 0] != "2-0"}
+        }
+
+        # Acknowledge all remaining messages in all groups
+        r XACK mystream group1 1-0 3-0
+        r XACK mystream group2 1-0 3-0
+        # Delete multiple messages with ACKED
+        assert_equal 2 [r XDELEX mystream group1 ACKED IDS 2 1-0 3-0]
+        assert_equal 0 [r XLEN mystream]
+    }
+}

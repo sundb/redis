@@ -3054,12 +3054,13 @@ void xackdelCommand(client *c) {
             }
 
             /* Verify that the specified number of IDs matches the actual arguments */
-            if (numids >= (c->argc - j - 2)) {
+            if (numids > (c->argc - j - 2)) {
                 addReplyError(c, "Number of IDs must match the remaining arguments");
                 return;
             }
             
             startidx = j + 2;  /* Skip "IDS" and numids */
+            j = startidx + numids;
         } else {
             addReplyErrorObject(c,shared.syntaxerr);
             return;
@@ -3776,7 +3777,7 @@ void xdelexCommand(client *c) {
     int startidx = -1;  /* Starting index of IDs in argv */
 
     /* Parse command options */
-    int j = 2;
+    int j = 3;
     while (j < c->argc) {
         char *opt = c->argv[j]->ptr;
         if (!strcasecmp(opt, "DELPEL")) {
@@ -3793,12 +3794,13 @@ void xdelexCommand(client *c) {
             }
 
             /* Verify that the specified number of IDs matches the actual arguments */
-            if (numids >= (c->argc - j - 2)) {
-                addReplyError(c, "Number of IDs must match the remaining arguments");
+            if (numids > (c->argc - j - 2)) {
+                addReplyError(c, "Number of IDs can't exceed the remaining arguments");
                 return;
             }
             
             startidx = j + 2;  /* Skip "IDS" and numids */
+            j = startidx + numids;
         } else {
             addReplyErrorObject(c,shared.syntaxerr);
             return;
