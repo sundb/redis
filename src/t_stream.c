@@ -2992,18 +2992,18 @@ void xackGenericCommand(client *c, int start_idx, int id_count, int delpel, int 
             acknowledged++;
             server.dirty++;
         }
+    }
 
-        /* Revmoe this entry */
-        if (c->cmd->proc == xackdelCommand) {
-            int deleted = streamDeleteMessagesWithOptions(s, ids, id_count, delpel, acked);
+    /* Revmoe this entry */
+    if (c->cmd->proc == xackdelCommand) {
+        int deleted = streamDeleteMessagesWithOptions(s, ids, id_count, delpel, acked);
 
-            /* Propagate the write if needed. */
-            if (deleted) {
-                signalModifiedKey(c,c->db,c->argv[1]);
-                notifyKeyspaceEvent(NOTIFY_STREAM,"xdel",c->argv[1],c->db->id);
-                server.dirty += deleted;
-            } 
-        }
+        /* Propagate the write if needed. */
+        if (deleted) {
+            signalModifiedKey(c,c->db,c->argv[1]);
+            notifyKeyspaceEvent(NOTIFY_STREAM,"xdel",c->argv[1],c->db->id);
+            server.dirty += deleted;
+        } 
     }
     addReplyLongLong(c,acknowledged);
 cleanup:
@@ -3055,7 +3055,7 @@ void xackdelCommand(client *c) {
 
             /* Verify that the specified number of IDs matches the actual arguments */
             if (numids > (c->argc - j - 2)) {
-                addReplyError(c, "Number of IDs must match the remaining arguments");
+                addReplyError(c, "Number of IDs can't exceed the remaining arguments");
                 return;
             }
             
@@ -3777,7 +3777,7 @@ void xdelexCommand(client *c) {
     int startidx = -1;  /* Starting index of IDs in argv */
 
     /* Parse command options */
-    int j = 3;
+    int j = 2;
     while (j < c->argc) {
         char *opt = c->argv[j]->ptr;
         if (!strcasecmp(opt, "DELPEL")) {
