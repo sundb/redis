@@ -1190,7 +1190,7 @@ start_server {tags {"stream"}} {
         assert_equal 0 [r XLEN mystream]
     }
 
-    test "XDELEX WoTHOUT DELPEL and ACKED" {
+    test "XDELEX without DELPEL and ACKED" {
         r DEL mystream
         r XADD mystream 1-0 f v
         r XADD mystream 2-0 f v
@@ -1327,7 +1327,7 @@ start_server {tags {"stream"}} {
         assert_equal 0 [r XLEN mystream]
     }
 
-    test "XACKDEL WoTHOUT DELPEL and ACKED" {
+    test "XACKDEL without DELPEL and ACKED" {
         r DEL mystream
         r XADD mystream 1-0 f v
         r XADD mystream 2-0 f v
