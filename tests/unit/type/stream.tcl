@@ -1189,4 +1189,15 @@ start_server {tags {"stream"}} {
         assert_equal 2 [r XDELEX mystream group1 ACKED IDS 2 1-0 3-0]
         assert_equal 0 [r XLEN mystream]
     }
+
+    test "XDELEX WITHOUT DELPEL and ACKED" {
+    }
+}
+
+start_server {tags {"stream"}} {
+    test "XACKDEL wrong number of args" {
+        assert_error {*wrong number of arguments for 'xackdel' command} {r XACKDEL}
+        assert_error {*wrong number of arguments for 'xackdel' command} {r XACKDEL s}
+        assert_error {*wrong number of arguments for 'xackdel' command} {r XACKDEL s g}
+    }
 }

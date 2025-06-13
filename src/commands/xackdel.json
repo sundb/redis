@@ -4,7 +4,7 @@
         "complexity": "O(1) for ach message ID processed.",
         "group": "stream",
         "since": "8.2.0",
-        "arity": -4,
+        "arity": -6,
         "function": "xackdelCommand",
         "command_flags": [
             "WRITE",

@@ -3037,7 +3037,7 @@ void xackdelCommand(client *c) {
     int startidx = -1;  /* Starting index of IDs in argv */
 
     /* Parse command options */
-    int j = 2;
+    int j = 3;
     while (j < c->argc) {
         char *opt = c->argv[j]->ptr;
         if (!strcasecmp(opt, "DELPEL")) {
