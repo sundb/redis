@@ -3022,6 +3022,14 @@ void xackCommand(client *c) {
     xackGenericCommand(c, 3, c->argc - 3, 0, 0);
 }
 
+/* XACKDEL <key> <group> [DELPEL|ACKED] [IDS <numids> <id ...>]
+ * Acknowledges messages as processed and deletes them from the stream.
+ * 
+ * This command combines the functionality of XACK and XDEL:
+ * - It acknowledges messages in the Pending Entries List (PEL) like XACK
+ * - It also deletes the acknowledged messages from the stream like XDEL
+ * 
+ * Return value is the number of messages successfully acknowledged. */
 void xackdelCommand(client *c) {
     int delpel = 0;     /* Delete from pending entries list */
     int acked = 0;      /* Only delete messages that are acknowledged */
@@ -3060,12 +3068,12 @@ void xackdelCommand(client *c) {
 
     /* Check for mutually exclusive options */
     if (delpel && acked) {
-        addReplyError(c,"DELPEL and ACKED options are mutually exclusive");
+        addReplyError(c, "DELPEL and ACKED options are mutually exclusive");
         return;
     }
 
     if (startidx == -1) {
-        addReplyError(c,"IDS option is required");
+        addReplyError(c, "IDS option is required");
         return;
     }
 
