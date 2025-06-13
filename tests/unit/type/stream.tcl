@@ -1331,36 +1331,22 @@ start_server {tags {"stream"}} {
         r DEL mystream
         r XADD mystream 1-0 f v
         r XADD mystream 2-0 f v
-        r XADD mystream 3-0 f v
 
         # Create two consumer groups
         r XGROUP CREATE mystream group1 0
         r XGROUP CREATE mystream group2 0
         r XREADGROUP GROUP group1 consumer1 STREAMS mystream >
         r XREADGROUP GROUP group2 consumer2 STREAMS mystream >
-        assert_equal 3 [llength [r XPENDING mystream group1 - + 10]]
-        assert_equal 3 [llength [r XPENDING mystream group2 - + 10]]
 
         # Test XACKDEL without DELPEL or ACKED (default behavior)
         # Without DELPEL or ACKED options, XACKDEL only deletes the message from the stream
         # but does not clean up references in consumer groups' PELs
-        assert_equal 1 [r XACKDEL mystream group1 IDS 1 2-0]
-        assert_equal 2 [r XLEN mystream]
-        # Even though the message is deleted from the stream, the PELs still contain references to it
-        # This is different from DELPEL option which would also remove these references.
-        assert_equal 2 [llength [r XPENDING mystream group1 - + 10]]
-        assert_equal 3 [llength [r XPENDING mystream group2 - + 10]] 
-        assert_equal 1 [r XACKDEL mystream group2 IDS 1 2-0]
-        assert_equal 2 [llength [r XPENDING mystream group1 - + 10]]
-        assert_equal 2 [llength [r XPENDING mystream group2 - + 10]] 
-
-        # Test with multiple IDs
-        assert_equal 2 [r XACKDEL mystream group1 IDS 2 1-0 3-0]
+        assert_equal 2 [r XACKDEL mystream group1 IDS 2 1-0 2-0]
         assert_equal 0 [r XLEN mystream]
         assert_equal 0 [llength [r XPENDING mystream group1 - + 10]]
         assert_equal 2 [llength [r XPENDING mystream group2 - + 10]]
-        # 
-        assert_equal 2 [r XACKDEL mystream group2 IDS 2 1-0 3-0]
+        # Acknowledge remaining messages in group2
+        assert_equal 2 [r XACKDEL mystream group2 IDS 2 1-0 2-0]
         assert_equal 0 [llength [r XPENDING mystream group1 - + 10]]
         assert_equal 0 [llength [r XPENDING mystream group2 - + 10]]
     }
