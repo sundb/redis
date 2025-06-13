@@ -3023,32 +3023,50 @@ void xackCommand(client *c) {
 }
 
 void xackdelCommand(client *c) {
-    int delpel = 0;     /* */
-    int acked = 0;      /* */
-    long numids = 0;    /* */
-    int startidx = -1;  /**/
+    int delpel = 0;     /* Delete from pending entries list */
+    int acked = 0;      /* Only delete messages that are acknowledged */
+    long numids = 0;    /* Number of IDs to process */
+    int startidx = -1;  /* Starting index of IDs in argv */
 
-    for (int j = 2; j < c->argc; j++) {
-        if (!strcasecmp(c->argv[j]->ptr, "DELPEL")) {
+    /* Parse command options */
+    int j = 2;
+    while (j < c->argc) {
+        char *opt = c->argv[j]->ptr;
+        if (!strcasecmp(opt, "DELPEL")) {
             delpel = 1;
-        } else if (!strcasecmp(c->argv[j]->ptr, "ACKED")) {
-            acked = 1;
-        } else if (!strcasecmp(c->argv[j]->ptr, "IDS") && j+1 < c->argc) {
             j++;
-            if (getRangeLongFromObjectOrReply(c, c->argv[j], 1, LONG_MAX,
-                &numids, "Parameter `numFields` should be greater than 0") != C_OK) {
+        } else if (!strcasecmp(opt, "ACKED")) {
+            acked = 1;
+            j++;
+        } else if (!strcasecmp(opt, "IDS") && j+1 < c->argc) {
+            /* Parse the number of IDs */
+            if (getRangeLongFromObjectOrReply(c, c->argv[j+1], 1, LONG_MAX,
+                &numids, "Number of IDs must be greater than 0") != C_OK) {
                 return;
             }
-            if (numids != (c->argc - j - 1)) {
-                addReplyError(c, "Number of IDs must be equal to the number of remaining arguments");
+
+            /* Verify that the specified number of IDs matches the actual arguments */
+            if (numids >= (c->argc - j - 2)) {
+                addReplyError(c, "Number of IDs must match the remaining arguments");
                 return;
             }
-            startidx = j + 1;
-            break; /* We are done with options */
+            
+            startidx = j + 2;  /* Skip "IDS" and numids */
         } else {
             addReplyErrorObject(c,shared.syntaxerr);
             return;
         }
+    }
+
+    /* Check for mutually exclusive options */
+    if (delpel && acked) {
+        addReplyError(c,"DELPEL and ACKED options are mutually exclusive");
+        return;
+    }
+
+    if (startidx == -1) {
+        addReplyError(c,"IDS option is required");
+        return;
     }
 
     xackGenericCommand(c, startidx, numids, delpel, acked);
@@ -3744,10 +3762,10 @@ void xdelCommand(client *c) {
  * of items actually deleted, that may be different from the number
  * of IDs passed in case certain IDs do not exist. */
 void xdelexCommand(client *c) {
-    int delpel = 0;     /* */
-    int acked = 0;      /* */
-    long numids;   /* */
-    int ids_start_pos = -1;
+    int delpel = 0;     /* Delete from pending entries list */
+    int acked = 0;      /* Only delete messages that are acknowledged */
+    long numids = 0;    /* Number of IDs to process */
+    int startidx = -1;  /* Starting index of IDs in argv */
 
     /* Parse command options */
     int j = 2;
@@ -3772,7 +3790,7 @@ void xdelexCommand(client *c) {
                 return;
             }
             
-            ids_start_pos = j + 2;  /* Skip "IDS" and numids */
+            startidx = j + 2;  /* Skip "IDS" and numids */
         } else {
             addReplyErrorObject(c,shared.syntaxerr);
             return;
@@ -3785,12 +3803,12 @@ void xdelexCommand(client *c) {
         return;
     }
 
-    if (ids_start_pos == -1) {
-        addReplyError(c,"Missing IDS option");
+    if (startidx == -1) {
+        addReplyError(c,"IDS option is required");
         return;
     }
 
-    xdelGenericCommand(c, ids_start_pos, numids, delpel, acked);
+    xdelGenericCommand(c, startidx, numids, delpel, acked);
 }
 
 /* General form: XTRIM <key> [... options ...]
