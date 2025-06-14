@@ -2503,9 +2503,7 @@ void streamFreeNACK(streamNACK *na) {
     zfree(na);
 }
 
-/* Free a NACK entry and remove its reference from the message_cgroups_index.
- * This ensures proper cleanup of the consumer group list associated with the message ID. */
-void streamFreeNACKAndRemoveFromIndex(stream *s, streamNACK *na, unsigned char *key) {
+void streamRemoveCgroupRef(stream *s, streamNACK *na, unsigned char *key) {
     list *l;
     if (raxFind(s->message_cgroups_index, key, sizeof(streamID), (void**)&l)) {
         listDelNode(l, na->cgroups_index_node);
@@ -2516,6 +2514,12 @@ void streamFreeNACKAndRemoveFromIndex(stream *s, streamNACK *na, unsigned char *
             listRelease(l);
         }
     }
+}
+
+/* Free a NACK entry and remove its reference from the message_cgroups_index.
+ * This ensures proper cleanup of the consumer group list associated with the message ID. */
+void streamFreeNACKAndRemoveFromIndex(stream *s, streamNACK *na, unsigned char *key) {
+    streamRemoveCgroupRef(s, na, key);
     zfree(na);
 }
 
@@ -2564,6 +2568,20 @@ void streamFreeCG(streamCG *cg) {
     raxFreeWithCallback(cg->pel, streamFreeNACKGeneric);
     raxFreeWithCallback(cg->consumers, streamFreeConsumerGeneric);
     zfree(cg);
+}
+
+void streamFreeCGAndRemoveRef(stream *s, streamCG *cg) {
+    /* Before removing the consumer group, we need to clean up all references
+     * to this group in the message_cgroups_index */
+    raxIterator it;
+    raxStart(&it, cg->pel);
+    raxSeek(&it, "^", NULL, 0);
+    while(raxNext(&it)) {
+        streamNACK *nack = it.data;
+        streamRemoveCgroupRef(s, nack, it.key);
+    }
+    raxStop(&it);
+    streamFreeCG(cg);
 }
 
 /* Generic version of streamFreeCG. */
@@ -2772,7 +2790,7 @@ NULL
     } else if (!strcasecmp(opt,"DESTROY") && c->argc == 4) {
         if (cg) {
             raxRemove(s->cgroups,(unsigned char*)grpname,sdslen(grpname),NULL);
-            streamFreeCG(cg);
+            streamFreeCGAndRemoveRef(s, cg);
             addReply(c,shared.cone);
             server.dirty++;
             notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-destroy",
