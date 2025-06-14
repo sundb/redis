@@ -2631,7 +2631,7 @@ streamConsumer *streamLookupConsumer(streamCG *cg, sds name) {
 }
 
 /* Delete the consumer specified in the consumer group 'cg'. */
-void streamDelConsumer(streamCG *cg, streamConsumer *consumer) {
+void streamDelConsumer(stream *s, streamCG *cg, streamConsumer *consumer) {
     /* Iterate all the consumer pending messages, deleting every corresponding
      * entry from the global entry. */
     raxIterator ri;
@@ -2639,8 +2639,8 @@ void streamDelConsumer(streamCG *cg, streamConsumer *consumer) {
     raxSeek(&ri,"^",NULL,0);
     while(raxNext(&ri)) {
         streamNACK *nack = ri.data;
+        streamFreeNACKAndRemoveFromIndex(s, nack, ri.key);
         raxRemove(cg->pel,ri.key,ri.key_len,NULL);
-        streamFreeNACK(nack);
     }
     raxStop(&ri);
 
@@ -2811,7 +2811,7 @@ NULL
             /* Delete the consumer and returns the number of pending messages
              * that were yet associated with such a consumer. */
             pending = raxSize(consumer->pel);
-            streamDelConsumer(cg,consumer);
+            streamDelConsumer(s,cg,consumer);
             server.dirty++;
             notifyKeyspaceEvent(NOTIFY_STREAM,"xgroup-delconsumer",
                                 c->argv[2],c->db->id);
