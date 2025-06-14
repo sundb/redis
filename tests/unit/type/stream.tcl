@@ -1123,8 +1123,8 @@ start_server {tags {"stream"}} {
         # Verify the message was removed from both groups' PELs when with DELPEL
         assert_equal 2 [r XDELEX mystream DELPEL IDS 2 1-0 2-0]
         assert_equal 0 [r XLEN mystream] 
-        assert_equal {} [r XPENDING mystream group1 - + 10]
-        assert_equal {} [r XPENDING mystream group2 - + 10] 
+        assert_equal {0 {} {} {}} [r XPENDING mystream group1]
+        assert_equal {0 {} {} {}} [r XPENDING mystream group2] 
     }
 
     test "XDELEX with ACKED option only deletes messages acknowledged by all groups" {
@@ -1148,8 +1148,8 @@ start_server {tags {"stream"}} {
         assert_equal 2 [r XDELEX mystream ACKED IDS 2 1-0 2-0]
         assert_equal 0 [r XLEN mystream]
 
-        assert_equal {} [r XPENDING mystream group1 - + 10]
-        assert_equal {} [r XPENDING mystream group2 - + 10] 
+        assert_equal {0 {} {} {}} [r XPENDING mystream group1]
+        assert_equal {0 {} {} {}} [r XPENDING mystream group2] 
     }
 
     test "XDELEX without DELPEL or ACKED (default behavior)" {
@@ -1168,8 +1168,8 @@ start_server {tags {"stream"}} {
         # but does not clean up references in consumer groups' PELs
         assert_equal 2 [r XDELEX mystream IDS 2 1-0 2-0]
         assert_equal 0 [r XLEN mystream]
-        assert_equal {{1-0 consumer1 0 1} {2-0 consumer1 0 1}} [r XPENDING mystream group1 - + 10]
-        assert_equal {{1-0 consumer2 0 1} {2-0 consumer2 0 1}} [r XPENDING mystream group2 - + 10]
+        assert_equal {2 1-0 2-0 {{consumer1 2}}} [r XPENDING mystream group1]
+        assert_equal {2 1-0 2-0 {{consumer2 2}}} [r XPENDING mystream group2]
     }
 }
 
@@ -1214,8 +1214,8 @@ start_server {tags {"stream"}} {
         # Verify the message was removed from both groups' PELs when with DELPEL
         assert_equal 2 [r XACKDEL mystream group1 DELPEL IDS 2 1-0 2-0]
         assert_equal 0 [r XLEN mystream] 
-        assert_equal {} [r XPENDING mystream group1 - + 10]
-        assert_equal {} [r XPENDING mystream group2 - + 10] 
+        assert_equal {0 {} {} {}} [r XPENDING mystream group1]
+        assert_equal {0 {} {} {}} [r XPENDING mystream group2] 
         assert_equal 0 [r XACKDEL mystream group2 DELPEL IDS 2 1-0 2-0]
     }
 
@@ -1234,14 +1234,14 @@ start_server {tags {"stream"}} {
         # Even after one of them is ack, it still can't be deleted.
         assert_equal 2 [r XACKDEL mystream group1 ACKED IDS 2 1-0 2-0]
         assert_equal 2 [r XLEN mystream]
-        assert_equal {} [r XPENDING mystream group1 - + 10]
-        assert_equal {{1-0 consumer2 0 1} {2-0 consumer2 0 1}} [r XPENDING mystream group2 - + 10]
+        assert_equal {0 {} {} {}} [r XPENDING mystream group1]
+        assert_equal {2 1-0 2-0 {{consumer2 2}}} [r XPENDING mystream group2]
 
         # When these messages are dereferenced by all groups, they can be deleted.
         assert_equal 2 [r XACKDEL mystream group2 ACKED IDS 2 1-0 2-0]
         assert_equal 0 [r XLEN mystream]
-        assert_equal {} [r XPENDING mystream group1 - + 10]
-        assert_equal {} [r XPENDING mystream group2 - + 10]
+        assert_equal {0 {} {} {}} [r XPENDING mystream group1]
+        assert_equal {0 {} {} {}} [r XPENDING mystream group2]
     }
 
     test "XACKDEL without DELPEL or ACKED (default behavior)" {
@@ -1260,12 +1260,12 @@ start_server {tags {"stream"}} {
         # but does not clean up references in consumer groups' PELs
         assert_equal 2 [r XACKDEL mystream group1 IDS 2 1-0 2-0]
         assert_equal 0 [r XLEN mystream]
-        assert_equal 0 [llength [r XPENDING mystream group1 - + 10]]
-        assert_equal 2 [llength [r XPENDING mystream group2 - + 10]]
+        assert_equal {0 {} {} {}} [r XPENDING mystream group1]
+        assert_equal {2 1-0 2-0 {{consumer2 2}}} [r XPENDING mystream group2]
 
         # Acknowledge remaining messages in group2
         assert_equal 2 [r XACKDEL mystream group2 IDS 2 1-0 2-0]
-        assert_equal 0 [llength [r XPENDING mystream group1 - + 10]]
-        assert_equal 0 [llength [r XPENDING mystream group2 - + 10]]
+        assert_equal {0 {} {} {}} [r XPENDING mystream group1]
+        assert_equal {0 {} {} {}} [r XPENDING mystream group2]
     }
 }
