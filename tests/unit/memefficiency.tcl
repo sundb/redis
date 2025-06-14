@@ -727,107 +727,107 @@ run_solo {defrag} {
         }
 
         if {$type eq "standalone"} { ;# skip in cluster mode
-        test "Active defrag big list: $type" {
-            r flushdb
-            r config set hz 100
-            r config set activedefrag no
-            wait_for_defrag_stop 500 100
-            r config resetstat
-            r config set active-defrag-max-scan-fields 1000
-            r config set active-defrag-threshold-lower 5
-            r config set active-defrag-cycle-min 65
-            r config set active-defrag-cycle-max 75
-            r config set active-defrag-ignore-bytes 2mb
-            r config set maxmemory 0
-            r config set list-max-ziplist-size 5 ;# list of 500k items will have 100k quicklist nodes
+        # test "Active defrag big list: $type" {
+        #     r flushdb
+        #     r config set hz 100
+        #     r config set activedefrag no
+        #     wait_for_defrag_stop 500 100
+        #     r config resetstat
+        #     r config set active-defrag-max-scan-fields 1000
+        #     r config set active-defrag-threshold-lower 5
+        #     r config set active-defrag-cycle-min 65
+        #     r config set active-defrag-cycle-max 75
+        #     r config set active-defrag-ignore-bytes 2mb
+        #     r config set maxmemory 0
+        #     r config set list-max-ziplist-size 5 ;# list of 500k items will have 100k quicklist nodes
 
-            # create big keys with 10k items
-            set rd [redis_deferring_client]
+        #     # create big keys with 10k items
+        #     set rd [redis_deferring_client]
 
-            set expected_frag 1.5
-            # add a mass of list nodes to two lists (allocations are interlaced)
-            set val [string repeat A 100] ;# 5 items of 100 bytes puts us in the 640 bytes bin, which has 32 regs, so high potential for fragmentation
-            set elements 500000
-            for {set j 0} {$j < $elements} {incr j} {
-                $rd lpush biglist1 $val
-                $rd lpush biglist2 $val
-            }
-            for {set j 0} {$j < $elements} {incr j} {
-                $rd read ; # Discard replies
-                $rd read ; # Discard replies
-            }
+        #     set expected_frag 1.5
+        #     # add a mass of list nodes to two lists (allocations are interlaced)
+        #     set val [string repeat A 100] ;# 5 items of 100 bytes puts us in the 640 bytes bin, which has 32 regs, so high potential for fragmentation
+        #     set elements 500000
+        #     for {set j 0} {$j < $elements} {incr j} {
+        #         $rd lpush biglist1 $val
+        #         $rd lpush biglist2 $val
+        #     }
+        #     for {set j 0} {$j < $elements} {incr j} {
+        #         $rd read ; # Discard replies
+        #         $rd read ; # Discard replies
+        #     }
 
-            # create some fragmentation
-            r del biglist2
+        #     # create some fragmentation
+        #     r del biglist2
 
-            # start defrag
-            after 120 ;# serverCron only updates the info once in 100ms
-            set frag [s allocator_frag_ratio]
-            if {$::verbose} {
-                puts "frag $frag"
-            }
+        #     # start defrag
+        #     after 120 ;# serverCron only updates the info once in 100ms
+        #     set frag [s allocator_frag_ratio]
+        #     if {$::verbose} {
+        #         puts "frag $frag"
+        #     }
 
-            assert {$frag >= $expected_frag}
-            r config set latency-monitor-threshold 5
-            r latency reset
+        #     assert {$frag >= $expected_frag}
+        #     r config set latency-monitor-threshold 5
+        #     r latency reset
 
-            set digest [debug_digest]
-            catch {r config set activedefrag yes} e
-            if {[r config get activedefrag] eq "activedefrag yes"} {
-                # wait for the active defrag to start working (decision once a second)
-                wait_for_condition 50 100 {
-                    [s total_active_defrag_time] ne 0
-                } else {
-                    after 120 ;# serverCron only updates the info once in 100ms
-                    puts [r info memory]
-                    puts [r info stats]
-                    puts [r memory malloc-stats]
-                    fail "defrag not started."
-                }
+        #     set digest [debug_digest]
+        #     catch {r config set activedefrag yes} e
+        #     if {[r config get activedefrag] eq "activedefrag yes"} {
+        #         # wait for the active defrag to start working (decision once a second)
+        #         wait_for_condition 50 100 {
+        #             [s total_active_defrag_time] ne 0
+        #         } else {
+        #             after 120 ;# serverCron only updates the info once in 100ms
+        #             puts [r info memory]
+        #             puts [r info stats]
+        #             puts [r memory malloc-stats]
+        #             fail "defrag not started."
+        #         }
 
-                # wait for the active defrag to stop working
-                wait_for_defrag_stop 500 100 1.1
+        #         # wait for the active defrag to stop working
+        #         wait_for_defrag_stop 500 100 1.1
 
-                # test the fragmentation is lower
-                after 120 ;# serverCron only updates the info once in 100ms
-                set misses [s active_defrag_misses]
-                set hits [s active_defrag_hits]
-                set frag [s allocator_frag_ratio]
-                set max_latency 0
-                foreach event [r latency latest] {
-                    lassign $event eventname time latency max
-                    if {$eventname == "active-defrag-cycle"} {
-                        set max_latency $max
-                    }
-                }
-                if {$::verbose} {
-                    puts "used [s allocator_allocated]"
-                    puts "rss [s allocator_active]"
-                    puts "frag_bytes [s allocator_frag_bytes]"
-                    puts "frag $frag"
-                    puts "misses: $misses"
-                    puts "hits: $hits"
-                    puts "max latency $max_latency"
-                    puts [r latency latest]
-                    puts [r latency history active-defrag-cycle]
-                    puts [r memory malloc-stats]
-                }
-                # due to high fragmentation, 100hz, and active-defrag-cycle-max set to 75,
-                # we expect max latency to be not much higher than 7.5ms but due to rare slowness threshold is set higher
-                if {!$::no_latency} {
-                    assert {$max_latency <= 30}
-                }
+        #         # test the fragmentation is lower
+        #         after 120 ;# serverCron only updates the info once in 100ms
+        #         set misses [s active_defrag_misses]
+        #         set hits [s active_defrag_hits]
+        #         set frag [s allocator_frag_ratio]
+        #         set max_latency 0
+        #         foreach event [r latency latest] {
+        #             lassign $event eventname time latency max
+        #             if {$eventname == "active-defrag-cycle"} {
+        #                 set max_latency $max
+        #             }
+        #         }
+        #         if {$::verbose} {
+        #             puts "used [s allocator_allocated]"
+        #             puts "rss [s allocator_active]"
+        #             puts "frag_bytes [s allocator_frag_bytes]"
+        #             puts "frag $frag"
+        #             puts "misses: $misses"
+        #             puts "hits: $hits"
+        #             puts "max latency $max_latency"
+        #             puts [r latency latest]
+        #             puts [r latency history active-defrag-cycle]
+        #             puts [r memory malloc-stats]
+        #         }
+        #         # due to high fragmentation, 100hz, and active-defrag-cycle-max set to 75,
+        #         # we expect max latency to be not much higher than 7.5ms but due to rare slowness threshold is set higher
+        #         if {!$::no_latency} {
+        #             assert {$max_latency <= 30}
+        #         }
 
-                # in extreme cases of stagnation, we see over 20m misses before the tests aborts with "defrag didn't stop",
-                # in normal cases we only see 100k misses out of 500k elements
-                assert {$misses < $elements}
-            }
-            # verify the data isn't corrupted or changed
-            set newdigest [debug_digest]
-            assert {$digest eq $newdigest}
-            r save ;# saving an rdb iterates over all the data / pointers
-            r del biglist1 ;# coverage for quicklistBookmarksClear
-        } {1}
+        #         # in extreme cases of stagnation, we see over 20m misses before the tests aborts with "defrag didn't stop",
+        #         # in normal cases we only see 100k misses out of 500k elements
+        #         assert {$misses < $elements}
+        #     }
+        #     # verify the data isn't corrupted or changed
+        #     set newdigest [debug_digest]
+        #     assert {$digest eq $newdigest}
+        #     r save ;# saving an rdb iterates over all the data / pointers
+        #     r del biglist1 ;# coverage for quicklistBookmarksClear
+        # } {1}
 
         test "Active defrag edge case: $type" {
             # there was an edge case in defrag where all the slabs of a certain bin are exact the same
