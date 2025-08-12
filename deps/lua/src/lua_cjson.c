@@ -681,10 +681,23 @@ static void json_append_data(lua_State *l, json_config_t *cfg,
         current_depth++;
         json_check_encode_depth(l, cfg, current_depth, json);
         len = lua_array_length(l, cfg, json);
-        if (len > 0)
+        if (len > 0) {
             json_append_array(l, cfg, current_depth, json, len);
-        else
+        } else if (len == 0) {
+            /* Check if this is a empty array */
+            if (lua_getmetatable(l, -1)) {
+                lua_getfield(l, -1, "__is_cjson_array");
+                int is_array = lua_toboolean(l, -1);
+                lua_pop(l, 2); /* pop value and metatable */
+                if (is_array) {
+                    json_append_array(l, cfg, current_depth, json, 0);
+                    break;
+                }
+            }
             json_append_object(l, cfg, current_depth, json);
+        } else {
+            json_append_object(l, cfg, current_depth, json);
+        }
         break;
     case LUA_TNIL:
         strbuf_append_mem(json, "null", 4);
@@ -1200,6 +1213,11 @@ static void json_parse_array_context(lua_State *l, json_parse_t *json)
 
     /* Handle empty arrays */
     if (token.type == T_ARR_END) {
+        /* Mark this table so encoder can emit [] for empty arrays */
+        lua_newtable(l);
+        lua_pushboolean(l, 1);
+        lua_setfield(l, -2, "__is_cjson_array");
+        lua_setmetatable(l, -2); /* set metatable for the array table */
         json_decode_ascend(json);
         return;
     }
