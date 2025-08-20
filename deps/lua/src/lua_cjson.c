@@ -71,7 +71,7 @@
 #define DEFAULT_DECODE_INVALID_NUMBERS 1
 #define DEFAULT_ENCODE_KEEP_BUFFER 1
 #define DEFAULT_ENCODE_NUMBER_PRECISION 14
-#define DEFAULT_DECODE_EMPTY_TABLE_AS_OBJECT 1
+#define DEFAULT_DECODE_EMPTY_ARRAY_AS_OBJECT 1
 
 #ifdef DISABLE_INVALID_NUMBERS
 #undef DEFAULT_DECODE_INVALID_NUMBERS
@@ -131,7 +131,7 @@ typedef struct {
 
     int decode_invalid_numbers;
     int decode_max_depth;
-    int decode_empty_table_as_object;
+    int decode_empty_array_as_object;
 } json_config_t;
 
 typedef struct {
@@ -306,11 +306,11 @@ static int json_cfg_encode_number_precision(lua_State *l)
 }
 
 /* Configures how to treat empty array when decode json array. */
-static int json_cfg_decode_empty_table_as_object(lua_State *l)
+static int json_cfg_decode_empty_array_as_object(lua_State *l)
 {
     json_config_t *cfg = json_arg_init(l, 1);
 
-    return json_enum_option(l, 1, &cfg->decode_empty_table_as_object, NULL, 1);
+    return json_enum_option(l, 1, &cfg->decode_empty_array_as_object, NULL, 1);
 }
 
 /* Configures JSON encoding buffer persistence */
@@ -403,7 +403,7 @@ static void json_create_config(lua_State *l)
     cfg->decode_invalid_numbers = DEFAULT_DECODE_INVALID_NUMBERS;
     cfg->encode_keep_buffer = DEFAULT_ENCODE_KEEP_BUFFER;
     cfg->encode_number_precision = DEFAULT_ENCODE_NUMBER_PRECISION;
-    cfg->decode_empty_table_as_object = DEFAULT_DECODE_EMPTY_TABLE_AS_OBJECT;
+    cfg->decode_empty_array_as_object = DEFAULT_DECODE_EMPTY_ARRAY_AS_OBJECT;
 
 #if DEFAULT_ENCODE_KEEP_BUFFER > 0
     strbuf_init(&cfg->encode_buf, 0);
@@ -1229,7 +1229,7 @@ static void json_parse_array_context(lua_State *l, json_parse_t *json)
 
     /* Handle empty arrays */
     if (token.type == T_ARR_END) {
-        if (!json->cfg->decode_empty_table_as_object) {
+        if (!json->cfg->decode_empty_array_as_object) {
             /* Mark this table so encoder can emit [] for empty arrays */
             lua_newtable(l);
             lua_pushboolean(l, 1);
@@ -1385,7 +1385,7 @@ static int lua_cjson_new(lua_State *l)
     luaL_Reg reg[] = {
         { "encode", json_encode },
         { "decode", json_decode },
-        { "decode_empty_table_as_object", json_cfg_decode_empty_table_as_object },
+        { "decode_empty_array_as_object", json_cfg_decode_empty_array_as_object },
         { "encode_sparse_array", json_cfg_encode_sparse_array },
         { "encode_max_depth", json_cfg_encode_max_depth },
         { "decode_max_depth", json_cfg_decode_max_depth },
