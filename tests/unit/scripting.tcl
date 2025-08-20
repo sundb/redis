@@ -379,6 +379,22 @@ start_server {tags {"scripting"}} {
         } 0
     } {a b}
 
+    test {EVAL - JSON empty array decoding} {
+        assert_equal "{\"items\":{}}" [run_script {
+            return cjson.encode(cjson.decode('{"items": []}'))
+        } 0]
+
+        assert_equal "{\"items\":\[\]}" [run_script {
+            cjson.decode_empty_array_as_object(false)
+            return cjson.encode(cjson.decode('{"items": []}'))
+        } 0]
+
+        assert_equal "{\"items\":{}}" [run_script {
+            cjson.decode_empty_array_as_object(true)
+            return cjson.encode(cjson.decode('{"items": []}'))
+        } 0]
+    }
+
     test {EVAL - JSON smoke test} {
         run_script {
             local some_map = {
