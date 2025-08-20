@@ -71,6 +71,7 @@
 #define DEFAULT_DECODE_INVALID_NUMBERS 1
 #define DEFAULT_ENCODE_KEEP_BUFFER 1
 #define DEFAULT_ENCODE_NUMBER_PRECISION 14
+#define DEFAULT_DECODE_EMPTY_TABLE_AS_OBJECT 1
 
 #ifdef DISABLE_INVALID_NUMBERS
 #undef DEFAULT_DECODE_INVALID_NUMBERS
@@ -130,6 +131,7 @@ typedef struct {
 
     int decode_invalid_numbers;
     int decode_max_depth;
+    int decode_empty_table_as_object;
 } json_config_t;
 
 typedef struct {
@@ -303,6 +305,14 @@ static int json_cfg_encode_number_precision(lua_State *l)
     return json_integer_option(l, 1, &cfg->encode_number_precision, 1, 14);
 }
 
+/* Configures how to treat empty array when decode json array. */
+static int json_cfg_decode_empty_table_as_object(lua_State *l)
+{
+    json_config_t *cfg = json_arg_init(l, 1);
+
+    return json_enum_option(l, 1, &cfg->decode_empty_table_as_object, NULL, 1);
+}
+
 /* Configures JSON encoding buffer persistence */
 static int json_cfg_encode_keep_buffer(lua_State *l)
 {
@@ -393,6 +403,7 @@ static void json_create_config(lua_State *l)
     cfg->decode_invalid_numbers = DEFAULT_DECODE_INVALID_NUMBERS;
     cfg->encode_keep_buffer = DEFAULT_ENCODE_KEEP_BUFFER;
     cfg->encode_number_precision = DEFAULT_ENCODE_NUMBER_PRECISION;
+    cfg->decode_empty_table_as_object = DEFAULT_DECODE_EMPTY_TABLE_AS_OBJECT;
 
 #if DEFAULT_ENCODE_KEEP_BUFFER > 0
     strbuf_init(&cfg->encode_buf, 0);
@@ -681,10 +692,28 @@ static void json_append_data(lua_State *l, json_config_t *cfg,
         current_depth++;
         json_check_encode_depth(l, cfg, current_depth, json);
         len = lua_array_length(l, cfg, json);
-        if (len > 0)
+        if (len > 0) {
             json_append_array(l, cfg, current_depth, json, len);
-        else
+        } else if (len == 0) {
+            if (!lua_checkstack(l, 2)) {
+                luaL_error(l, "Stack overflow while creating metatable");
+                break;
+            }
+
+            /* Check if this is a empty array */
+            if (lua_getmetatable(l, -1)) {
+                lua_getfield(l, -1, "__is_cjson_array");
+                int is_array = lua_toboolean(l, -1);
+                lua_pop(l, 2); /* pop value and metatable */
+                if (is_array) {
+                    json_append_array(l, cfg, current_depth, json, 0);
+                    break;
+                }
+            }
             json_append_object(l, cfg, current_depth, json);
+        } else {
+            json_append_object(l, cfg, current_depth, json);
+        }
         break;
     case LUA_TNIL:
         strbuf_append_mem(json, "null", 4);
@@ -1200,6 +1229,14 @@ static void json_parse_array_context(lua_State *l, json_parse_t *json)
 
     /* Handle empty arrays */
     if (token.type == T_ARR_END) {
+        if (!json->cfg->decode_empty_table_as_object) {
+            /* Mark this table so encoder can emit [] for empty arrays */
+            lua_newtable(l);
+            lua_pushboolean(l, 1);
+            lua_setfield(l, -2, "__is_cjson_array");
+            lua_setmetatable(l, -2); /* set metatable for the array table */
+        }
+
         json_decode_ascend(json);
         return;
     }
@@ -1348,6 +1385,7 @@ static int lua_cjson_new(lua_State *l)
     luaL_Reg reg[] = {
         { "encode", json_encode },
         { "decode", json_decode },
+        { "decode_empty_table_as_object", json_cfg_decode_empty_table_as_object },
         { "encode_sparse_array", json_cfg_encode_sparse_array },
         { "encode_max_depth", json_cfg_encode_max_depth },
         { "decode_max_depth", json_cfg_decode_max_depth },
