@@ -226,6 +226,7 @@ dictEntryLink dictTwoPhaseUnlinkFind(dict *d, const void *key, int *table_index)
 void dictTwoPhaseUnlinkFree(dict *d, dictEntryLink llink, int table_index);
 void dictRelease(dict *d);
 dictEntry * dictFind(dict *d, const void *key);
+dictEntry *dictFindByHashAndPtr(dict *d, const void *oldptr, const uint64_t hash);
 int dictShrinkIfNeeded(dict *d);
 int dictExpandIfNeeded(dict *d);
 void *dictGetKey(const dictEntry *de);
@@ -278,15 +279,16 @@ uint64_t dictIncrUnsignedIntegerVal(dictEntry *de, uint64_t val);
 uint64_t dictGetUnsignedIntegerVal(const dictEntry *de);
 
 #define dictForEach(d, ty, m, ...) do { \
-    dictIterator *di = dictGetIterator(d); \
+    dictIterator di; \
     dictEntry *de; \
-    while ((de = dictNext(di)) != NULL) { \
+    dictInitIterator(&di, d); \
+    while ((de = dictNext(&di)) != NULL) { \
         ty *m = dictGetVal(de); \
         do { \
             __VA_ARGS__ \
         } while(0); \
     } \
-    dictReleaseIterator(di); \
+    dictResetIterator(&di); \
 } while(0);
 
 #ifdef REDIS_TEST

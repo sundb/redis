@@ -512,6 +512,10 @@ static void dbSetValue(redisDb *db, robj *key, robj **valref, dictEntryLink link
         /* Set new to old to keep the old object. Set old to val to be freed below. */
         kvNew = old;
         old = val;
+
+    /* Handle TTL in the optimization path */
+    if ((!keepTTL) && (getExpire(db, key->ptr, kvNew) >= 0))
+        removeExpire(db, key);
     } else {
         /* Replace the old value at its location in the key space. */
         val->lru = old->lru;
@@ -606,21 +610,32 @@ void setKey(client *c, redisDb *db, robj *key, robj **valref, int flags) {
 void setKeyByLink(client *c, redisDb *db, robj *key, robj **valref, int flags, dictEntryLink *plink) {
     dictEntryLink dummy = NULL, *link = plink ? plink : &dummy;
     int exists;
+    kvobj *oldval = NULL;
 
     if (flags & SETKEY_ALREADY_EXIST) {
-        exists = 1;
         debugServerAssert((*link) != NULL);
+        oldval = dictGetKV(**link);
+        exists = 1;
     } else if (flags & SETKEY_DOESNT_EXIST) {
         /* link is optional */
         exists = 0;
     } else {
         /* Add or update key */
-        exists = (lookupKeyWriteWithLink(db, key, link)) != NULL;
+        oldval = lookupKeyWriteWithLink(db, key, link);
+        exists = oldval != NULL;
     }
 
     if (exists) {
+        int oldtype = oldval->type;
+        int newtype = (*valref)->type;
+
         /* Update the value of an existing key */
         dbSetValue(db, key, valref, *link, 1, 1, flags & SETKEY_KEEPTTL);
+
+        /* Notify keyspace events for override and type change */
+        notifyKeyspaceEvent(NOTIFY_OVERWRITTEN, "overwritten", key, db->id);
+        if (oldtype != newtype)
+            notifyKeyspaceEvent(NOTIFY_TYPE_CHANGED, "type_changed", key, db->id);
     } else {
         /* Add the new key to the database */
         dbAddByLink(db, key, valref, link);
@@ -1845,21 +1860,28 @@ void renameGenericCommand(client *c, int nx) {
 
     incrRefCount(o);
     expire = kvobjGetExpire(o);
-    if (lookupKeyWrite(c->db,c->argv[2]) != NULL) {
+    kvobj *destval = lookupKeyWrite(c->db,c->argv[2]);
+    int overwritten = 0;
+    int desttype = -1;
+    if (destval != NULL) {
         if (nx) {
             decrRefCount(o);
             addReply(c,shared.czero);
             return;
         }
+
         /* Overwrite: delete the old key before creating the new one
          * with the same name. */
+        desttype = destval->type;
         dbDelete(c->db,c->argv[2]);
+        overwritten = 1;
     }
 
     /* If hash with expiration on fields then remove it from global HFE DS and
      * keep next expiration time. Otherwise, dbDelete() will remove it from the
      * global HFE DS and we will lose the expiration time. */
-    if (o->type == OBJ_HASH)
+    int srctype = o->type;
+    if (srctype == OBJ_HASH)
         minHashExpireTime = hashTypeRemoveFromExpires(&c->db->hexpires, o);
 
     dbDelete(c->db,c->argv[1]);
@@ -1875,6 +1897,11 @@ void renameGenericCommand(client *c, int nx) {
         c->argv[1],c->db->id);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"rename_to",
         c->argv[2],c->db->id);
+    if (overwritten) {
+        notifyKeyspaceEvent(NOTIFY_OVERWRITTEN, "overwritten", c->argv[2], c->db->id);
+        if (desttype != srctype)
+            notifyKeyspaceEvent(NOTIFY_TYPE_CHANGED, "type_changed", c->argv[2], c->db->id);
+    }
     server.dirty++;
     addReply(c,nx ? shared.cone : shared.ok);
 }
@@ -1948,7 +1975,7 @@ void moveCommand(client *c) {
 
     dbAddByLink(dst, c->argv[1], &kv, &dstBucket);
     if (expire != -1)
-        setExpireByLink(c, dst, c->argv[1]->ptr, expire, dstBucket);
+        kv = setExpireByLink(c, dst, c->argv[1]->ptr, expire, dstBucket);
 
     /* If object of type hash with expiration on fields. Taken care to add the
      * hash to hexpires of `dst` only after dbDelete(). */
@@ -2030,7 +2057,8 @@ void copyCommand(client *c) {
 
     /* Return zero if the key already exists in the target DB. 
      * If REPLACE option is selected, delete newkey from targetDB. */
-    if (lookupKeyWrite(dst,newkey) != NULL) {
+    kvobj *destval = lookupKeyWrite(dst,newkey);
+    if (destval != NULL) {
         if (replace) {
             delete = 1;
         } else {
@@ -2038,6 +2066,8 @@ void copyCommand(client *c) {
             return;
         }
     }
+    int destoldtype = destval ? destval->type : -1;
+    int destnewtype = o->type;
 
     /* Duplicate object according to object's type. */
     robj *newobj;
@@ -2073,6 +2103,13 @@ void copyCommand(client *c) {
     signalModifiedKey(c,dst,c->argv[2]);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"copy_to",c->argv[2],dst->id);
 
+    /* `delete` implies the destination key was overwritten */
+    if (delete) {
+        notifyKeyspaceEvent(NOTIFY_OVERWRITTEN, "overwritten", c->argv[2], dst->id);
+        if (destoldtype != destnewtype)
+            notifyKeyspaceEvent(NOTIFY_TYPE_CHANGED, "type_changed", c->argv[2], dst->id);
+    }
+
     server.dirty++;
     addReply(c,shared.cone);
 }
@@ -2083,14 +2120,15 @@ void copyCommand(client *c) {
  * where the function is used for more info. */
 void scanDatabaseForReadyKeys(redisDb *db) {
     dictEntry *de;
-    dictIterator *di = dictGetSafeIterator(db->blocking_keys);
-    while((de = dictNext(di)) != NULL) {
+    dictIterator di;
+    dictInitSafeIterator(&di, db->blocking_keys);
+    while((de = dictNext(&di)) != NULL) {
         robj *key = dictGetKey(de);
         kvobj *kv = dbFind(db, key->ptr);
         if (kv)
             signalKeyAsReady(db, key, kv->type);
     }
-    dictReleaseIterator(di);
+    dictResetIterator(&di);
 }
 
 /* Since we are unblocking XREADGROUP clients in the event the
@@ -2098,8 +2136,10 @@ void scanDatabaseForReadyKeys(redisDb *db) {
  * database was flushed/swapped. */
 void scanDatabaseForDeletedKeys(redisDb *emptied, redisDb *replaced_with) {
     dictEntry *de;
-    dictIterator *di = dictGetSafeIterator(emptied->blocking_keys);
-    while((de = dictNext(di)) != NULL) {
+    dictIterator di;
+
+    dictInitSafeIterator(&di, emptied->blocking_keys);
+    while((de = dictNext(&di)) != NULL) {
         robj *key = dictGetKey(de);
         int existed = 0, exists = 0;
         int original_type = -1, curr_type = -1;
@@ -2121,7 +2161,7 @@ void scanDatabaseForDeletedKeys(redisDb *emptied, redisDb *replaced_with) {
         if ((existed && !exists) || original_type != curr_type)
             signalDeletedKeyAsReady(emptied, key, original_type);
     }
-    dictReleaseIterator(di);
+    dictResetIterator(&di);
 }
 
 /* Swap two databases at runtime so that all clients will magically see

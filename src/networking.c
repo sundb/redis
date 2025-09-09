@@ -2684,9 +2684,13 @@ int processMultibulkBuffer(client *c) {
                 c->argv[c->argc++] = createObject(OBJ_STRING,c->querybuf);
                 c->argv_len_sum += c->bulklen;
                 sdsIncrLen(c->querybuf,-2); /* remove CRLF */
-                /* Assume that if we saw a fat argument we'll see another one
-                 * likely... */
-                c->querybuf = sdsnewlen(SDS_NOINIT,c->bulklen+2);
+                /* Assume that if we saw a fat argument we'll see another one likely...
+                 * But only if that fat argument is not too big compared to the memory limit. */
+                if (!server.maxmemory || (size_t)c->bulklen < server.maxmemory / 32) {
+                    c->querybuf = sdsnewlen(SDS_NOINIT,c->bulklen+2);
+                } else {
+                    c->querybuf = sdsnewlen(SDS_NOINIT, PROTO_IOBUF_LEN);
+                }
                 sdsclear(c->querybuf);
                 querybuf_len = sdslen(c->querybuf); /* Update cached length */
             } else {
@@ -3712,11 +3716,12 @@ NULL
         if (getLongLongFromObjectOrReply(c,c->argv[2],&id,NULL)
             != C_OK) return;
         struct client *target = lookupClientByID(id);
-        /* Note that we never try to unblock a client blocked on a module command, which
+        /* Note that we never try to unblock a client blocked on a module command,
+         * or a client blocked by CLIENT PAUSE or some other blocking type which
          * doesn't have a timeout callback (even in the case of UNBLOCK ERROR).
          * The reason is that we assume that if a command doesn't expect to be timedout,
          * it also doesn't expect to be unblocked by CLIENT UNBLOCK */
-        if (target && target->flags & CLIENT_BLOCKED && moduleBlockedClientMayTimeout(target)) {
+        if (target && target->flags & CLIENT_BLOCKED && blockedClientMayTimeout(target)) {
             if (unblock_error)
                 unblockClientOnError(target,
                     "-UNBLOCKED client unblocked via CLIENT UNBLOCK");
