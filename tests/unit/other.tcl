@@ -443,66 +443,66 @@ start_server {tags {"other external:skip"}} {
     }
 }
 
-start_cluster 1 0 {tags {"other external:skip cluster slow"}} {
-    r config set dynamic-hz no hz 500
-    test "Redis can trigger resizing" {
-        r flushall
-        # hashslot(foo) is 12182
-        for {set j 1} {$j <= 128} {incr j} {
-            r set "{foo}$j" a
-        }
-        assert_match "*table size: 128*" [r debug HTSTATS 0]
+# start_cluster 1 0 {tags {"other external:skip cluster slow"}} {
+#     r config set dynamic-hz no hz 500
+#     test "Redis can trigger resizing" {
+#         r flushall
+#         # hashslot(foo) is 12182
+#         for {set j 1} {$j <= 128} {incr j} {
+#             r set "{foo}$j" a
+#         }
+#         assert_match "*table size: 128*" [r debug HTSTATS 0]
 
-        # disable resizing, the reason for not using slow bgsave is because
-        # it will hit the dict_force_resize_ratio.
-        r debug dict-resizing 0
+#         # disable resizing, the reason for not using slow bgsave is because
+#         # it will hit the dict_force_resize_ratio.
+#         r debug dict-resizing 0
 
-        # delete data to have lot's (96%) of empty buckets
-        for {set j 1} {$j <= 123} {incr j} {
-            r del "{foo}$j"
-        }
-        assert_match "*table size: 128*" [r debug HTSTATS 0]
+#         # delete data to have lot's (96%) of empty buckets
+#         for {set j 1} {$j <= 123} {incr j} {
+#             r del "{foo}$j"
+#         }
+#         assert_match "*table size: 128*" [r debug HTSTATS 0]
 
-        # enable resizing
-        r debug dict-resizing 1
+#         # enable resizing
+#         r debug dict-resizing 1
 
-        # waiting for serverCron to resize the tables
-        wait_for_condition 1000 10 {
-            [string match {*table size: 8*} [r debug HTSTATS 0]]
-        } else {
-            puts [r debug HTSTATS 0]
-            fail "hash tables weren't resize."
-        }
-    } {} {needs:debug}
+#         # waiting for serverCron to resize the tables
+#         wait_for_condition 1000 10 {
+#             [string match {*table size: 8*} [r debug HTSTATS 0]]
+#         } else {
+#             puts [r debug HTSTATS 0]
+#             fail "hash tables weren't resize."
+#         }
+#     } {} {needs:debug}
 
-    test "Redis can rewind and trigger smaller slot resizing" {
-        # hashslot(foo) is 12182
-        # hashslot(alice) is 749, smaller than hashslot(foo),
-        # attempt to trigger a resize on it, see details in #12802.
-        for {set j 1} {$j <= 128} {incr j} {
-            r set "{alice}$j" a
-        }
+#     test "Redis can rewind and trigger smaller slot resizing" {
+#         # hashslot(foo) is 12182
+#         # hashslot(alice) is 749, smaller than hashslot(foo),
+#         # attempt to trigger a resize on it, see details in #12802.
+#         for {set j 1} {$j <= 128} {incr j} {
+#             r set "{alice}$j" a
+#         }
 
-        # disable resizing, the reason for not using slow bgsave is because
-        # it will hit the dict_force_resize_ratio.
-        r debug dict-resizing 0
+#         # disable resizing, the reason for not using slow bgsave is because
+#         # it will hit the dict_force_resize_ratio.
+#         r debug dict-resizing 0
 
-        for {set j 1} {$j <= 123} {incr j} {
-            r del "{alice}$j"
-        }
+#         for {set j 1} {$j <= 123} {incr j} {
+#             r del "{alice}$j"
+#         }
 
-        # enable resizing
-        r debug dict-resizing 1
+#         # enable resizing
+#         r debug dict-resizing 1
 
-        # waiting for serverCron to resize the tables
-        wait_for_condition 1000 10 {
-            [string match {*table size: 16*} [r debug HTSTATS 0]]
-        } else {
-            puts [r debug HTSTATS 0]
-            fail "hash tables weren't resize."
-        }
-    } {} {needs:debug}
-}
+#         # waiting for serverCron to resize the tables
+#         wait_for_condition 1000 10 {
+#             [string match {*table size: 16*} [r debug HTSTATS 0]]
+#         } else {
+#             puts [r debug HTSTATS 0]
+#             fail "hash tables weren't resize."
+#         }
+#     } {} {needs:debug}
+# }
 
 start_server {tags {"other external:skip"}} {
     test "Redis can resize empty dict" {

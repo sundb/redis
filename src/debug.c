@@ -497,6 +497,8 @@ void debugCommand(client *c) {
 "    Enable or disable the main dict and expire dict resizing.",
 "SCRIPT <LIST|<sha>>",
 "    Output SHA and content of all scripts or of a specific script with its SHA.",
+"LOOKAHEAD",
+"    Low-level look-ahead information for all clients.",
 "MARK-INTERNAL-CLIENT [UNMARK]",
 "    Promote the current connection to an internal connection.",
 NULL
@@ -1088,6 +1090,29 @@ NULL
             return;
         }
         addReply(c,shared.ok);
+    }  else if (!strcasecmp(c->argv[1]->ptr,"lookahead")) {
+        /* Pause all IO threads to access data of clients safely, and pausing the
+            * specific IO thread will not repeatedly execute in catClientInfoString. */
+        int allpaused = 0;
+        if (server.io_threads_num > 1 && !server.crashing &&
+            pthread_equal(server.main_thread_id, pthread_self()))
+        {
+            allpaused = 1;
+            pauseAllIOThreads();
+        }
+    
+        sds info = sdsempty();
+        listNode *ln;
+        listIter li;
+        listRewind(server.clients,&li);
+        while ((ln = listNext(&li)) != NULL) {
+            client *client = listNodeValue(ln);
+            info = sdscatprintf(info, "id: %lu pcmds: %d\n", client->id, client->ready_pending_cmds);
+        }
+    
+        if (allpaused) resumeAllIOThreads();
+        addReplyVerbatim(c,info,strlen(info),"txt");
+        sdsfree(info);
     } else if(!strcasecmp(c->argv[1]->ptr,"mark-internal-client") && c->argc < 4) {
         if (c->argc == 2) {
             c->flags |= CLIENT_INTERNAL;

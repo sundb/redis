@@ -79,6 +79,10 @@ double R_Zero, R_PosInf, R_NegInf, R_Nan;
 /* Global vars */
 struct redisServer server; /* Server global state */
 
+/* Value of the server.stat_total_client_read_events counter before processing events.
+ * See beforeSleep() for details about its use. */
+size_t stat_prev_total_client_read_events = 0;
+
 /*============================ Internal prototypes ========================== */
 
 static inline int isShutdownInitiated(void);
@@ -958,7 +962,7 @@ int CurrentPeakMemUsageSlot = 0;
 int clientsCronTrackExpansiveClients(client *c) {
     size_t qb_size = c->querybuf ? sdsZmallocSize(c->querybuf) : 0;
     size_t argv_size = c->argv ? zmalloc_size(c->argv) : 0;
-    size_t in_usage = qb_size + c->argv_len_sum + argv_size;
+    size_t in_usage = qb_size + c->all_argv_len_sum + argv_size;
     size_t out_usage = getClientOutputBufferMemoryUsage(c);
 
     /* Track the biggest values observed so far in this slot. */
@@ -1952,6 +1956,11 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * connection has pending data) */
     aeSetDontWait(server.el, dont_sleep);
 
+    /* When stat_total_client_read_events changes (from afterSleep()), it means we have served clients
+     * in this event loop cycle. */
+    if (stat_prev_total_client_read_events != server.stat_total_client_read_events)
+        server.stat_eventloop_cycles_with_clients++;
+
     /* Before we are going to sleep, let the threads access the dataset by
      * releasing the GIL. Redis main thread will not touch anything at this
      * time. */
@@ -1988,6 +1997,9 @@ void afterSleep(struct aeEventLoop *eventLoop) {
         server.el_start = getMonotonicUs();
         /* Set the eventloop command count at start. */
         server.el_cmd_cnt_start = server.stat_numcommands;
+
+        /* Record the counter before processing events. See beforeSleep() for details about its use. */
+        stat_prev_total_client_read_events = server.stat_total_client_read_events;
     }
 
     /* Set running after waking up */
@@ -2722,6 +2734,8 @@ void resetServerStats(void) {
     server.stat_sync_full = 0;
     server.stat_sync_partial_ok = 0;
     server.stat_sync_partial_err = 0;
+    server.stat_avg_pipeline_length_sum = 0;
+    server.stat_avg_pipeline_length_cnt = 0;
     for (j = 0; j < IO_THREADS_MAX_NUM; j++) {
         atomicSet(server.stat_io_reads_processed[j], 0);
         atomicSet(server.stat_io_writes_processed[j], 0);
@@ -2751,6 +2765,8 @@ void resetServerStats(void) {
     server.stat_cluster_incompatible_ops = 0;
     server.stat_total_prefetch_batches = 0;
     server.stat_total_prefetch_entries = 0;
+    server.stat_total_client_read_events = 0;
+    server.stat_eventloop_cycles_with_clients = 0;
     memset(server.duration_stats, 0, sizeof(durationStats) * EL_DURATION_TYPE_NUM);
     server.el_cmd_cnt_max = 0;
     lazyfreeResetStats();
@@ -4059,6 +4075,78 @@ uint64_t getCommandFlags(client *c) {
     return cmd_flags;
 }
 
+/* We need to get the list of keys for the command, order prefetch and remember the status of each key in each command
+ * so that when prefetch is done, we know which command is ready to be executed, and when we can unprotect a key from eviction.
+ * Each key has a list of commands waiting for it, and each command has a reference to the client that executed it.
+ * Clean a pending command from the queue only after executing it.
+ */
+void preprocessCommand(client *c, pendingCommand* pcmd) {
+    pcmd->client = c;
+    pcmd->slot = CLUSTER_INVALID_SLOT;
+    if (pcmd->argc == 0)
+        return;
+
+    /* Check if we can reuse the last command instead of looking it up.
+     * The last command is either the penultimate pending command (if it exists), or c->lastcmd. */
+    struct redisCommand *last_cmd = NULL;
+    if (listLength(c->pending_cmds) > 1)
+        last_cmd = ((pendingCommand *)(listPrevNode(listLast(c->pending_cmds))->value))->cmd;
+    else
+        last_cmd = c->lastcmd;
+
+    if (isCommandReusable(last_cmd, pcmd->argv[0]))
+        pcmd->cmd = last_cmd;
+    else
+        pcmd->cmd = c->iolookedcmd ? c->iolookedcmd : lookupCommand(pcmd->argv, pcmd->argc);
+
+    if (!pcmd->cmd)
+        return;
+    if ((pcmd->cmd->arity > 0 && pcmd->cmd->arity != pcmd->argc) ||
+        (pcmd->argc < -pcmd->cmd->arity))
+        return;
+
+    pcmd->keys_result = (getKeysResult)GETKEYS_RESULT_INIT;
+    int num_keys = getKeysFromCommandWithSpecs(pcmd->cmd, pcmd->argv, pcmd->argc, GET_KEYSPEC_DEFAULT, &pcmd->keys_result);
+    if (num_keys < 0)
+        /* We skip the checks below since We expect the command to be rejected in this case */
+        return;
+    
+    if (server.cluster_enabled) {
+        robj **margv = pcmd->argv;
+        for (int j = 0; j < pcmd->keys_result.numkeys; j++) {
+            robj *thiskey = margv[pcmd->keys_result.keys[j].pos];
+            int thisslot = (int)keyHashSlot((char*)thiskey->ptr, sdslen(thiskey->ptr));
+
+            if (pcmd->slot == CLUSTER_INVALID_SLOT)
+                pcmd->slot = thisslot;
+            else if (pcmd->slot != thisslot) {
+                serverLog(LL_NOTICE, "preprocessCommand: CROSS SLOT ERROR");
+                /* Invalidate the slot to indicate that there is a cross-slot error */
+                pcmd->slot = CLUSTER_INVALID_SLOT;
+                /* Cross slot error. */
+                return;
+            }
+        }
+    }
+
+    /* Skip keys prefetching if failing on Authentication validation. The same check is also performed when this command is to
+     * be executed (in processCommandChecks()). It is possible to fail here and pass the validation later in case there is
+     * an AUTH command that was already preprocessed, but not yet executed. The validation here is performed to avoid security risks;
+     * Without it, unauthenticated users can trigger pre-fetches, messing with the hot keyset and affecting
+     * performance of the server. Also, a user can initiate pre-fetch for any keys regardless of authentication, which
+     * opens up a potential timing attack for inferring existence of keys the user should not be able to access.*/
+    if (authRequired(c)) {
+        /* AUTH and HELLO and no auth commands are valid even in
+         * non-authenticated state. */
+        if (!(pcmd->cmd->flags & CMD_NO_AUTH)) {
+            return;
+        }
+    }
+
+    if (num_keys == 0)
+        return;    
+}
+
 /* If this function gets called we already read a whole
  * command, arguments are in the client argv/argc fields.
  * processCommand() execute the command or prepare the
@@ -4098,15 +4186,17 @@ int processCommand(client *c) {
 
     /* Now lookup the command and check ASAP about trivial error conditions
      * such as wrong arity, bad command name and so forth.
+     * When not reprocessing a command, we may skip the command lookup itself, as it was already performed
+     * in preprocessCommand().
      * In case we are reprocessing a command after it was blocked,
      * we do not have to repeat the same checks */
     if (!client_reprocessing_command) {
         /* check if we can reuse the last command instead of looking up if we already have that info */
         struct redisCommand *cmd = NULL;
-        if (isCommandReusable(c->lastcmd, c->argv[0]))
-            cmd = c->lastcmd;
-        else
-            cmd = c->iolookedcmd ? c->iolookedcmd : lookupCommand(c->argv, c->argc);
+        serverAssert(listLength(c->pending_cmds) > 0);
+        pendingCommand *pcmd = listFirst(c->pending_cmds)->value;
+        cmd = pcmd->cmd;
+        
         if (!cmd) {
             /* Handle possible security attacks. */
             if (!strcasecmp(c->argv[0]->ptr,"host:") || !strcasecmp(c->argv[0]->ptr,"post")) {
@@ -4439,9 +4529,9 @@ int areCommandKeysInSameSlot(client *c, int *hashslot) {
     /* If client is in multi-exec, we need to check the slot of all keys
      * in the transaction. */
     for (int i = 0; i < (ms ? ms->count : 1); i++) {
-        struct redisCommand *cmd = ms ? ms->commands[i].cmd : c->cmd;
-        robj **argv = ms ? ms->commands[i].argv : c->argv;
-        int argc = ms ? ms->commands[i].argc : c->argc;
+        struct redisCommand *cmd = ms ? ms->commands[i]->cmd : c->cmd;
+        robj **argv = ms ? ms->commands[i]->argv : c->argv;
+        int argc = ms ? ms->commands[i]->argc : c->argc;
 
         getKeysResult result = GETKEYS_RESULT_INIT;
         int numkeys = getKeysFromCommand(cmd, argv, argc, &result);
@@ -6199,6 +6289,9 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "evicted_scripts:%lld\r\n", server.stat_evictedscripts,
             "total_eviction_exceeded_time:%lld\r\n", (server.stat_total_eviction_exceeded_time + current_eviction_exceeded_time) / 1000,
             "current_eviction_exceeded_time:%lld\r\n", current_eviction_exceeded_time / 1000,
+            "avg_pipeline_length_sum:%lld\r\n", server.stat_avg_pipeline_length_sum,
+            "avg_pipeline_length_cnt:%lld\r\n", server.stat_avg_pipeline_length_cnt,
+            "avg_pipeline_length:%.2f\r\n", (float)server.stat_avg_pipeline_length_sum / server.stat_avg_pipeline_length_cnt,
             "keyspace_hits:%lld\r\n", server.stat_keyspace_hits,
             "keyspace_misses:%lld\r\n", server.stat_keyspace_misses,
             "pubsub_channels:%llu\r\n", kvstoreSize(server.pubsub_channels),
@@ -6234,7 +6327,9 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "eventloop_duration_sum:%llu\r\n", server.duration_stats[EL_DURATION_TYPE_EL].sum,
             "eventloop_duration_cmd_sum:%llu\r\n", server.duration_stats[EL_DURATION_TYPE_CMD].sum,
             "instantaneous_eventloop_cycles_per_sec:%llu\r\n", getInstantaneousMetric(STATS_METRIC_EL_CYCLE),
-            "instantaneous_eventloop_duration_usec:%llu\r\n", getInstantaneousMetric(STATS_METRIC_EL_DURATION)));
+            "instantaneous_eventloop_duration_usec:%llu\r\n", getInstantaneousMetric(STATS_METRIC_EL_DURATION),
+            "eventloop_cycles_with_clients:%lu\r\n", server.stat_eventloop_cycles_with_clients,
+            "total_client_read_events:%lu\r\n", server.stat_total_client_read_events));
         info = genRedisInfoStringACLStats(info);
         if (!server.cluster_enabled && server.cluster_compatibility_sample_ratio) {
             info = sdscatprintf(info, "cluster_incompatible_ops:%lld\r\n", server.stat_cluster_incompatible_ops);
@@ -6963,7 +7058,7 @@ void dismissClientMemory(client *c) {
     dismissMemory(c->buf, c->buf_usable_size);
     if (c->querybuf) dismissSds(c->querybuf);
     /* Dismiss argv array only if we estimate it contains a big buffer. */
-    if (c->argc && c->argv_len_sum/c->argc >= server.page_size) {
+    if (c->argc && c->all_argv_len_sum/c->argc >= server.page_size) {
         for (int i = 0; i < c->argc; i++) {
             dismissObject(c->argv[i], 0);
         }

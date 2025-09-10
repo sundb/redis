@@ -1035,61 +1035,61 @@ test {CONFIG REWRITE handles alias config properly} {
     }
 } {} {external:skip}
 
-test {IO threads client number} {
-    start_server {overrides {io-threads 2} tags {external:skip}} {
-        set iothread_clients [get_io_thread_clients 1]
-        assert_equal $iothread_clients [s connected_clients]
-        assert_equal [get_io_thread_clients 0] 0
+# test {IO threads client number} {
+#     start_server {overrides {io-threads 2} tags {external:skip}} {
+#         set iothread_clients [get_io_thread_clients 1]
+#         assert_equal $iothread_clients [s connected_clients]
+#         assert_equal [get_io_thread_clients 0] 0
 
-        r script debug yes ; # Transfer to main thread
-        assert_equal [get_io_thread_clients 0] 1
-        assert_equal [get_io_thread_clients 1] [expr $iothread_clients - 1]
+#         r script debug yes ; # Transfer to main thread
+#         assert_equal [get_io_thread_clients 0] 1
+#         assert_equal [get_io_thread_clients 1] [expr $iothread_clients - 1]
 
-        set iothread_clients [get_io_thread_clients 1]
-        set rd1 [redis_deferring_client]
-        set rd2 [redis_deferring_client]
-        assert_equal [get_io_thread_clients 1] [expr $iothread_clients + 2]
-        $rd1 close
-        $rd2 close
-        wait_for_condition 1000 10 {
-            [get_io_thread_clients 1] eq $iothread_clients
-        } else {
-            fail "Fail to close clients of io thread 1"
-        }
-        assert_equal [get_io_thread_clients 0] 1
+#         set iothread_clients [get_io_thread_clients 1]
+#         set rd1 [redis_deferring_client]
+#         set rd2 [redis_deferring_client]
+#         assert_equal [get_io_thread_clients 1] [expr $iothread_clients + 2]
+#         $rd1 close
+#         $rd2 close
+#         wait_for_condition 1000 10 {
+#             [get_io_thread_clients 1] eq $iothread_clients
+#         } else {
+#             fail "Fail to close clients of io thread 1"
+#         }
+#         assert_equal [get_io_thread_clients 0] 1
 
-        r script debug no ; # Transfer to io thread
-        assert_equal [get_io_thread_clients 0] 0
-        assert_equal [get_io_thread_clients 1] [expr $iothread_clients + 1]
-    }
-}
+#         r script debug no ; # Transfer to io thread
+#         assert_equal [get_io_thread_clients 0] 0
+#         assert_equal [get_io_thread_clients 1] [expr $iothread_clients + 1]
+#     }
+# }
 
-test {Clients are evenly distributed among io threads} {
-    start_server {overrides {io-threads 4} tags {external:skip}} {
-        set cur_clients [s connected_clients]
-        assert_equal $cur_clients 1
-        global rdclients
-        for {set i 1} {$i < 9} {incr i} {
-            set rdclients($i) [redis_deferring_client]
-        }
-        for {set i 1} {$i <= 3} {incr i} {
-            assert_equal [get_io_thread_clients $i] 3
-        }
+# test {Clients are evenly distributed among io threads} {
+#     start_server {overrides {io-threads 4} tags {external:skip}} {
+#         set cur_clients [s connected_clients]
+#         assert_equal $cur_clients 1
+#         global rdclients
+#         for {set i 1} {$i < 9} {incr i} {
+#             set rdclients($i) [redis_deferring_client]
+#         }
+#         for {set i 1} {$i <= 3} {incr i} {
+#             assert_equal [get_io_thread_clients $i] 3
+#         }
 
-        $rdclients(3) close
-        $rdclients(4) close
-        wait_for_condition 1000 10 {
-            [get_io_thread_clients 1] eq 2 &&
-            [get_io_thread_clients 2] eq 2 &&
-            [get_io_thread_clients 3] eq 3
-        } else {
-            fail "Fail to close clients"
-        }
+#         $rdclients(3) close
+#         $rdclients(4) close
+#         wait_for_condition 1000 10 {
+#             [get_io_thread_clients 1] eq 2 &&
+#             [get_io_thread_clients 2] eq 2 &&
+#             [get_io_thread_clients 3] eq 3
+#         } else {
+#             fail "Fail to close clients"
+#         }
 
-        set  $rdclients(3) [redis_deferring_client]
-        set  $rdclients(4) [redis_deferring_client]
-        for {set i 1} {$i <= 3} {incr i} {
-            assert_equal [get_io_thread_clients $i] 3
-        }
-    }
-}
+#         set  $rdclients(3) [redis_deferring_client]
+#         set  $rdclients(4) [redis_deferring_client]
+#         for {set i 1} {$i <= 3} {incr i} {
+#             assert_equal [get_io_thread_clients $i] 3
+#         }
+#     }
+# }

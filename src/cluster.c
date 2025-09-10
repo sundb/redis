@@ -1113,8 +1113,9 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
     robj *firstkey = NULL;
     int multiple_keys = 0;
     multiState *ms, _ms;
-    multiCmd mc;
-    int i, slot = 0, migrating_slot = 0, importing_slot = 0, missing_keys = 0,
+    pendingCommand mc;
+    pendingCommand *mcp = &mc;
+    int i, slot = CLUSTER_INVALID_SLOT, migrating_slot = 0, importing_slot = 0, missing_keys = 0,
             existing_keys = 0;
     int pubsubshard_included = 0; /* Flag to indicate if a pubsub shard cmd is included. */
 
@@ -1141,7 +1142,7 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
          * structure if the client is not in MULTI/EXEC state, this way
          * we have a single codepath below. */
         ms = &_ms;
-        _ms.commands = &mc;
+        _ms.commands = &mcp;
         _ms.count = 1;
         mc.argv = argv;
         mc.argc = argc;
@@ -1153,12 +1154,12 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
     for (i = 0; i < ms->count; i++) {
         struct redisCommand *mcmd;
         robj **margv;
-        int margc, numkeys, j;
-        keyReference *keyindex;
+        int j;
 
-        mcmd = ms->commands[i].cmd;
-        margc = ms->commands[i].argc;
-        margv = ms->commands[i].argv;
+        pendingCommand *pcmd = ms->commands[i];
+
+        mcmd = pcmd->cmd;
+        margv = pcmd->argv;
 
         /* Only valid for sharded pubsub as regular pubsub can operate on any node and bypasses this layer. */
         if (!pubsubshard_included &&
@@ -1167,20 +1168,22 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
             pubsubshard_included = 1;
         }
 
-        getKeysResult result = GETKEYS_RESULT_INIT;
-        numkeys = getKeysFromCommand(mcmd,margv,margc,&result);
-        keyindex = result.keys;
+        for (j = 0; j < pcmd->keys_result.numkeys; j++) {
+            /* The command has keys and was checked for cross-slot between its keys in preprocessCommand() */
+            if (pcmd->slot == CLUSTER_INVALID_SLOT) {
+                /* Error: multiple keys from different slots. */
+                if (error_code)
+                    *error_code = CLUSTER_REDIR_CROSS_SLOT;
+                return NULL;
+            }
 
-        for (j = 0; j < numkeys; j++) {
-            robj *thiskey = margv[keyindex[j].pos];
-            int thisslot = keyHashSlot((char*)thiskey->ptr,
-                                       sdslen(thiskey->ptr));
+            robj *thiskey = margv[pcmd->keys_result.keys[j].pos];
 
             if (firstkey == NULL) {
                 /* This is the first key we see. Check what is the slot
                  * and node. */
                 firstkey = thiskey;
-                slot = thisslot;
+                slot = pcmd->slot;
                 n = getNodeBySlot(slot);
 
                 /* Error: If a slot is not served, we are in "cluster down"
@@ -1188,7 +1191,6 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
                  * not trapped earlier in processCommand(). Report the same
                  * error to the client. */
                 if (n == NULL) {
-                    getKeysFreeResult(&result);
                     if (error_code)
                         *error_code = CLUSTER_REDIR_DOWN_UNBOUND;
                     return NULL;
@@ -1207,15 +1209,6 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
                     importing_slot = 1;
                 }
             } else {
-                /* If it is not the first key/channel, make sure it is exactly
-                 * the same key/channel as the first we saw. */
-                if (slot != thisslot) {
-                    /* Error: multiple keys from different slots. */
-                    getKeysFreeResult(&result);
-                    if (error_code)
-                        *error_code = CLUSTER_REDIR_CROSS_SLOT;
-                    return NULL;
-                }
                 if (importing_slot && !multiple_keys && !equalStringObjects(firstkey,thiskey)) {
                     /* Flag this request as one with multiple different
                      * keys/channels when the slot is in importing state. */
@@ -1236,7 +1229,6 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
                 else existing_keys++;
             }
         }
-        getKeysFreeResult(&result);
     }
 
     /* No key at all in command? then we can serve the request
