@@ -133,6 +133,22 @@ void listLinkNodeTail(list *list, listNode *node) {
     list->len++;
 }
 
+/* like listAddNodeTail, with a pre-existing listNode item */
+list *listAddTail(list *list, listNode *node)
+{
+    if (list->len == 0) {
+        list->head = list->tail = node;
+        node->prev = node->next = NULL;
+    } else {
+        node->prev = list->tail;
+        node->next = NULL;
+        list->tail->next = node;
+        list->tail = node;
+    }
+    list->len++;
+    return list;
+}
+
 list *listInsertNode(list *list, listNode *old_node, void *value, int after) {
     listNode *node;
 

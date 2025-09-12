@@ -56,6 +56,7 @@ void listReleaseGeneric(void *list);
 void listEmpty(list *list);
 list *listAddNodeHead(list *list, void *value);
 list *listAddNodeTail(list *list, void *value);
+list *listAddTail(list *list, listNode *node);
 list *listInsertNode(list *list, listNode *old_node, void *value, int after);
 void listDelNode(list *list, listNode *node);
 listIter *listGetIterator(list *list, int direction);

@@ -466,10 +466,36 @@ int processClientsFromIOThread(IOThread *t) {
 
         /* Process the pending command and input buffer. */
         if (!c->read_error && c->io_flags & CLIENT_IO_PENDING_COMMAND) {
-            c->flags |= CLIENT_PENDING_COMMAND;
-            if (processPendingCommandAndInputBuffer(c) == C_ERR) {
-                /* If the client is no longer valid, it must be freed safely. */
-                continue;
+            serverAssert(listLength(c->pending_cmds) > 0);
+
+            while (listLength(c->pending_cmds)) {
+                pendingCommand *curcmd = listFirst(c->pending_cmds)->value;
+
+                /* We populate the old client fields so we don't have to modify all existing logic to work with pendingCommands */
+                c->argc = curcmd->argc;
+                c->argv = curcmd->argv;
+                c->argv_len = curcmd->argv_len;
+                c->reploff_next = curcmd->reploff;
+                c->slot = curcmd->slot;
+                serverAssert(c->argv);
+
+                /* We are finally ready to execute the command. */
+                if (processCommandAndResetClient(c) == C_ERR) {
+                    /* If the client is no longer valid, it must be freed safely. */
+                   continue;
+                }
+            }
+            serverAssert(listLength(c->pending_cmds) == 0);
+
+            /* Now process client if it has more data in it's buffer.
+            *
+            * Note: when a master client steps into this function,
+            * it can always satisfy this condition, because its querybuf
+            * contains data not applied. */
+            serverAssert(c->ready_pending_cmds == 0);
+            if (((c->querybuf && sdslen(c->querybuf) > 0))) {
+                if (processInputBuffer(c) == C_ERR)
+                    continue;
             }
         }
 

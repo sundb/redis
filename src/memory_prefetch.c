@@ -382,18 +382,18 @@ int addCommandToBatch(client *c) {
 
     batch->clients[batch->client_count++] = c;
 
-    if (likely(c->iolookedcmd)) {
+    // if (likely(c->iolookedcmd)) {
         /* Get command's keys positions */
-        getKeysResult result = GETKEYS_RESULT_INIT;
-        int num_keys = getKeysFromCommand(c->iolookedcmd, c->argv, c->argc, &result);
-        for (int i = 0; i < num_keys && batch->key_count < batch->max_prefetch_size; i++) {
-            batch->keys[batch->key_count] = c->argv[result.keys[i].pos];
-            batch->keys_dicts[batch->key_count] =
-                kvstoreGetDict(c->db->keys, c->slot > 0 ? c->slot : 0);
-            batch->key_count++;
-        }
-        getKeysFreeResult(&result);
-    }
+        // getKeysResult result = GETKEYS_RESULT_INIT;
+        // int num_keys = getKeysFromCommand(c->iolookedcmd, c->argv, c->argc, &result);
+        // for (int i = 0; i < num_keys && batch->key_count < batch->max_prefetch_size; i++) {
+        //     batch->keys[batch->key_count] = c->argv[result.keys[i].pos];
+        //     batch->keys_dicts[batch->key_count] =
+        //         kvstoreGetDict(c->db->keys, c->slot > 0 ? c->slot : 0);
+        //     batch->key_count++;
+        // }
+        // getKeysFreeResult(&result);
+    // }
 
     return C_OK;
 }
