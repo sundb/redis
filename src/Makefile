@@ -483,16 +483,16 @@ DEP = $(REDIS_SERVER_OBJ:%.o=%.d) $(REDIS_VEC_SETS_OBJ:%.o=%.d) $(REDIS_CLI_OBJ:
 # depending on a single artifact, build all dependencies first.
 
 # Special compilation rules for vector-sets files with CPU feature detection
-ifneq ($(SKIP_VEC_SETS),yes)
-hnsw.o: ../modules/vector-sets/hnsw.c .make-prerequisites
-	$(QUIET_CC)$(CC) $(VEC_SETS_CFLAGS) -MMD -o $@ -c $<
+# ifneq ($(SKIP_VEC_SETS),yes)
+# hnsw.o: ../modules/vector-sets/hnsw.c .make-prerequisites
+# 	$(QUIET_CC)$(CC) $(VEC_SETS_CFLAGS) -MMD -o $@ -c $<
 
-vset.o: ../modules/vector-sets/vset.c .make-prerequisites
-	$(QUIET_CC)$(CC) $(VEC_SETS_CFLAGS) -MMD -o $@ -c $<
+# vset.o: ../modules/vector-sets/vset.c .make-prerequisites
+# 	$(QUIET_CC)$(CC) $(VEC_SETS_CFLAGS) -MMD -o $@ -c $<
 
-vset_config.o: ../modules/vector-sets/vset_config.c .make-prerequisites
-	$(QUIET_CC)$(CC) $(VEC_SETS_CFLAGS) -MMD -o $@ -c $<
-endif
+# vset_config.o: ../modules/vector-sets/vset_config.c .make-prerequisites
+# 	$(QUIET_CC)$(CC) $(VEC_SETS_CFLAGS) -MMD -o $@ -c $<
+# endif
 
 %.o: %.c .make-prerequisites
 	$(REDIS_CC) -MMD -o $@ -c $<
