@@ -68,6 +68,30 @@ typedef long long ustime_t; /* microsecond time type. */
 #define REDISMODULE_CORE 1
 typedef struct redisObject robj;
 
+/* Parser state and parse result of a command from a client's input buffer. */
+typedef struct parsedCommand {
+    uint8_t read_flags; /* complete, error or 0 (parsing not complete) */
+    int argc;
+    robj **argv;
+    int argv_len;
+    int slot;
+    size_t argv_len_sum;
+    size_t input_bytes;
+    struct redisCommand *cmd;
+    /* Intrusive linked list pointers */
+    struct parsedCommand *next;
+    struct parsedCommand *prev;
+} parsedCommand;
+
+/* Queue of parsed commands with client-specific command pool. */
+typedef struct {
+    parsedCommand *head; /* Head of the intrusive linked list */
+    parsedCommand *tail; /* Tail of the intrusive linked list */
+    int length; /* Number of commands in the queue */
+    parsedCommand *pool[16]; /* Client-specific command pool, max 16 objects */
+    int pool_size; /* Current number of objects in pool */
+} cmdQueue;
+
 /* kvobj - A specific type of robj that holds also embedded key
  *
  * Since robj is being overused as general purpose object, `kvobj` distincts only
@@ -460,6 +484,8 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_READ_CONN_DISCONNECTED 11
 #define CLIENT_READ_CONN_CLOSED 12
 #define CLIENT_READ_REACHED_MAX_QUERYBUF 13
+#define READ_FLAGS_AUTH_REQUIRED 14
+#define READ_FLAGS_PARSING_INCOMPLETED 15
 
 /* Client block type (btype field in client structure)
  * if CLIENT_BLOCKED flag is set. */
@@ -1347,6 +1373,7 @@ typedef struct client {
     int deferred_objects_num;   /* Number of deferred objects to free. */
     struct redisCommand *cmd, *lastcmd;  /* Last command executed. */
     struct redisCommand *iolookedcmd;    /* Command looked up in IO threads. */
+    struct redisCommand *parsed_cmd; /* The command that was parsed. */
     struct redisCommand *realcmd; /* The original command that was executed by the client,
                                      Used to update error stats in case the c->cmd was modified
                                      during the command invocation (like on GEOADD for example). */
@@ -1399,6 +1426,7 @@ typedef struct client {
     multiState mstate;      /* MULTI/EXEC state */
     blockingState bstate;     /* blocking state */
     long long woff;         /* Last write global replication offset. */
+    cmdQueue cmd_queue;  /* Parsed commands queue */
     list *watched_keys;     /* Keys WATCHED for MULTI/EXEC CAS */
     dict *pubsub_channels;  /* channels a client is interested in (SUBSCRIBE) */
     dict *pubsub_patterns;  /* patterns a client is interested in (PSUBSCRIBE) */
@@ -3333,8 +3361,19 @@ void updatePeakMemory(size_t used_memory);
 size_t freeMemoryGetNotCountedMemory(void);
 int overMaxmemoryAfterAlloc(size_t moremem);
 uint64_t getCommandFlags(client *c);
+void prepareCommandQueue(client *c);
 int processCommand(client *c);
 void commandProcessed(client *c);
+
+/* Client command queue functions */
+void cmdQueueInit(cmdQueue *queue);
+void cmdQueueCleanup(cmdQueue *queue);
+parsedCommand *cmdQueueGetCommand(cmdQueue *queue);
+void cmdQueuePutCommand(cmdQueue *queue, parsedCommand *cmd);
+void cmdQueueAddTail(cmdQueue *queue, parsedCommand *cmd);
+parsedCommand *cmdQueueRemoveHead(cmdQueue *queue);
+int cmdQueueLength(cmdQueue *queue);
+parsedCommand *cmdQueueFirst(cmdQueue *queue);
 int processPendingCommandAndInputBuffer(client *c);
 int processCommandAndResetClient(client *c);
 int areCommandKeysInSameSlot(client *c, int *hashslot);
