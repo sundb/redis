@@ -38,16 +38,9 @@ __thread sds thread_reusable_qb = NULL;
 __thread int thread_reusable_qb_used = 0; /* Avoid multiple clients using reusable query
                                          * buffer due to nested command execution. */
 
-void trimCommandQueue(client *c);
 static int consumeCommandQueue(client *c);
 static void discardCommandQueue(client *c);
-static int parseMultibulk(client *c,
-                          int *argc,
-                          robj ***argv,
-                          int *argv_len,
-                          size_t *argv_len_sum,
-                          size_t *net_input_bytes_curr_cmd,
-                          uint8_t *flag);
+static int parseMultibulk(client *c, pendingCommand *pcmd);
 
 /* COMMAND_QUEUE_MIN_CAPACITY no longer needed with linked list implementation */
 
@@ -183,7 +176,7 @@ client *createClient(connection *conn) {
     c->deferred_objects_num = 0;
     c->cmd_queue.head = c->cmd_queue.tail = NULL;
     c->cmd_queue.length = 0;
-    c->cmd = c->lastcmd = c->realcmd = c->iolookedcmd = NULL;
+    c->cmd = c->lastcmd = c->realcmd = NULL;
     c->cur_script = NULL;
     c->multibulklen = 0;
     c->bulklen = -1;
@@ -1544,7 +1537,6 @@ static inline void freeClientArgvInternal(client *c, int free_argv) {
     }
     c->argc = 0;
     c->cmd = NULL;
-    c->iolookedcmd = NULL;
     c->argv_len_sum = 0;
     if (free_argv) {
         c->argv_len = 0;
@@ -1555,6 +1547,18 @@ static inline void freeClientArgvInternal(client *c, int free_argv) {
 
 void freeClientArgv(client *c) {
     freeClientArgvInternal(c, 1);
+}
+
+void freeClientPendingCommands(client *c, int num_pcmds_to_free) {
+    /* (-1) means free all pending commands */
+    if (num_pcmds_to_free == -1)
+        num_pcmds_to_free = c->cmd_queue.length;
+
+    while (num_pcmds_to_free--) {
+        pendingCommand *pcmd = cmdQueueRemoveHead(&c->cmd_queue);
+        serverAssert(pcmd);
+        freePendingCommand(c, pcmd);
+    }
 }
 
 /* Close all the slaves connections. This is useful in chained replication
@@ -2522,14 +2526,7 @@ static void setProtocolError(const char *errstr, client *c) {
     c->flags |= (CLIENT_CLOSE_AFTER_REPLY|CLIENT_PROTOCOL_ERROR);
 }
 
-static int parseMultibulk(client *c,
-                          int *argc,
-                          robj ***argv,
-                          int *argv_len,
-                          size_t *argv_len_sum,
-                          size_t *net_input_bytes_curr_cmd,
-                          uint8_t *flag)
-{
+static int parseMultibulk(client *c, pendingCommand *pcmd) {
     char *newline = NULL;
     int ok;
     long long ll;
@@ -2537,13 +2534,13 @@ static int parseMultibulk(client *c,
 
     if (c->multibulklen == 0) {
         /* The client should have been reset */
-        // serverAssertWithInfo(c,NULL,*argc == 0);
+        serverAssertWithInfo(c,NULL,pcmd->argc == 0);
 
         /* Multi bulk length cannot be read without a \r\n */
         newline = memchr(c->querybuf+c->qb_pos,'\r',sdslen(c->querybuf) - c->qb_pos);
         if (newline == NULL) {
             if (querybuf_len-c->qb_pos > PROTO_INLINE_MAX_SIZE) {
-                *flag = CLIENT_READ_TOO_BIG_MBULK_COUNT_STRING;
+                pcmd->flags = CLIENT_READ_TOO_BIG_MBULK_COUNT_STRING;
             }
             return C_ERR;
         }
@@ -2558,10 +2555,10 @@ static int parseMultibulk(client *c,
         size_t multibulklen_slen = newline - (c->querybuf + 1 + c->qb_pos);
         ok = string2ll(c->querybuf+1+c->qb_pos,newline-(c->querybuf+1+c->qb_pos),&ll);
         if (!ok || ll > INT_MAX) {
-            *flag = CLIENT_READ_INVALID_MULTIBUCK_LENGTH;
+            pcmd->flags = CLIENT_READ_INVALID_MULTIBUCK_LENGTH;
             return C_ERR;
         } else if (ll > 10 && authRequired(c)) {
-            *flag = CLIENT_READ_UNAUTH_MBUCK_COUNT;
+            pcmd->flags = CLIENT_READ_UNAUTH_MBUCK_COUNT;
             return C_ERR;
         }
 
@@ -2572,18 +2569,10 @@ static int parseMultibulk(client *c,
         c->multibulklen = ll;
         c->bulklen = -1;
 
-        /* Setup argv array on client structure.
-         * Create new argv in the following cases:
-         * 1) When the requested size is greater than the current size.
-         * 2) When the requested size is less than the current size, because
-         *    we always allocate argv gradually with a maximum size of 1024,
-         *    Therefore, if argv_len exceeds this limit, we always reallocate. */
-        if (unlikely(c->multibulklen > *argv_len || *argv_len > 1024)) {
-            zfree(*argv);
-            *argv_len = min(c->multibulklen, 1024);
-            *argv = zmalloc(sizeof(robj*)*(*argv_len));
-        }
-        *argv_len_sum = 0;
+        zfree(pcmd->argv);
+        pcmd->argv_len = min(c->multibulklen, 1024);
+        pcmd->argv = zmalloc(sizeof(robj*)*(pcmd->argv_len));
+        pcmd->argv_len_sum = 0;
 
         /* Per-slot network bytes-in calculation.
          *
@@ -2616,7 +2605,7 @@ static int parseMultibulk(client *c,
          *
          * The 1st component is calculated within the below line.
          * */
-        *net_input_bytes_curr_cmd += (multibulklen_slen + 3);
+        pcmd->input_bytes += (multibulklen_slen + 3);
     }
 
     serverAssertWithInfo(c,NULL,c->multibulklen > 0);
@@ -2626,7 +2615,7 @@ static int parseMultibulk(client *c,
             newline = memchr(c->querybuf+c->qb_pos,'\r',sdslen(c->querybuf) - c->qb_pos);
             if (newline == NULL) {
                 if (querybuf_len-c->qb_pos > PROTO_INLINE_MAX_SIZE) {
-                    *flag = CLIENT_READ_TOO_BIG_BUCK_COUNT_STRING;
+                    pcmd->flags = CLIENT_READ_TOO_BIG_BUCK_COUNT_STRING;
                     return C_ERR;
                 }
                 break;
@@ -2637,7 +2626,7 @@ static int parseMultibulk(client *c,
                 break;
 
             if (c->querybuf[c->qb_pos] != '$') {
-                *flag = CLIENT_READ_EXPECTED_DOLLAR;
+                pcmd->flags = CLIENT_READ_EXPECTED_DOLLAR;
                 return C_ERR;
             }
 
@@ -2645,10 +2634,10 @@ static int parseMultibulk(client *c,
             ok = string2ll(c->querybuf+c->qb_pos+1,newline-(c->querybuf+c->qb_pos+1),&ll);
             if (!ok || ll < 0 ||
                 (!(c->flags & CLIENT_MASTER) && ll > server.proto_max_bulk_len)) {
-                *flag = CLIENT_READ_INVALID_BUCK_LENGTH;
+                pcmd->flags = CLIENT_READ_INVALID_BUCK_LENGTH;
                 return C_ERR;
             } else if (ll > 16384 && authRequired(c)) {
-                *flag = CLIENT_READ_UNAUTH_BUCK_LENGTH;
+                pcmd->flags = CLIENT_READ_UNAUTH_BUCK_LENGTH;
                 return C_ERR;
             }
 
@@ -2682,9 +2671,9 @@ static int parseMultibulk(client *c,
             }
             c->bulklen = ll;
             /* Per-slot network bytes-in calculation, 2nd component. */
-            *net_input_bytes_curr_cmd += (bulklen_slen + 3);
+            pcmd->input_bytes += (bulklen_slen + 3);
         } else {
-            serverAssert(*flag == READ_FLAGS_PARSING_INCOMPLETED);
+            serverAssert(pcmd->flags == READ_FLAGS_PARSING_INCOMPLETED);
         }
 
         /* Read bulk argument */
@@ -2692,9 +2681,9 @@ static int parseMultibulk(client *c,
             break;
         } else {
             /* Check if we have space in argv, grow if needed */
-            if (*argc >= *argv_len) {
-                *argv_len = min(*argv_len < INT_MAX/2 ? (*argv_len)*2 : INT_MAX, *argc+c->multibulklen);
-                *argv = zrealloc(*argv, sizeof(robj*)*(*argv_len));
+            if (pcmd->argc >= pcmd->argv_len) {
+                pcmd->argv_len = min(pcmd->argv_len < INT_MAX/2 ? (pcmd->argv_len)*2 : INT_MAX, pcmd->argc+c->multibulklen);
+                pcmd->argv = zrealloc(pcmd->argv, sizeof(robj*)*(pcmd->argv_len));
             }
 
             /* Optimization: if a non-master client's buffer contains JUST our bulk element
@@ -2705,8 +2694,8 @@ static int parseMultibulk(client *c,
                 c->bulklen >= PROTO_MBULK_BIG_ARG &&
                 querybuf_len == (size_t)(c->bulklen+2))
             {
-                (*argv)[(*argc)++] = createObject(OBJ_STRING,c->querybuf);
-                *argv_len_sum += c->bulklen;
+                (pcmd->argv)[(pcmd->argc)++] = createObject(OBJ_STRING,c->querybuf);
+                pcmd->argv_len_sum += c->bulklen;
                 sdsIncrLen(c->querybuf,-2); /* remove CRLF */
                 /* Assume that if we saw a fat argument we'll see another one likely...
                  * But only if that fat argument is not too big compared to the memory limit. */
@@ -2718,9 +2707,9 @@ static int parseMultibulk(client *c,
                 sdsclear(c->querybuf);
                 querybuf_len = sdslen(c->querybuf); /* Update cached length */
             } else {
-                (*argv)[(*argc)++] =
+                (pcmd->argv)[(pcmd->argc)++] =
                     createStringObject(c->querybuf+c->qb_pos,c->bulklen);
-                *argv_len_sum += c->bulklen;
+                pcmd->argv_len_sum += c->bulklen;
                 c->qb_pos += c->bulklen+2;
             }
             c->bulklen = -1;
@@ -2731,13 +2720,13 @@ static int parseMultibulk(client *c,
     /* We're done when c->multibulk == 0 */
     if (c->multibulklen == 0) {
         /* Per-slot network bytes-in calculation, 3rd and 4th components. */
-        *net_input_bytes_curr_cmd += (*argv_len_sum + (*argc * 2));
+        pcmd->input_bytes += (pcmd->argv_len_sum + (pcmd->argc * 2));
         c->reqtype = 0;
         return C_OK;
     }
 
     /* Still not ready to process the command */
-    *flag = READ_FLAGS_PARSING_INCOMPLETED;
+    pcmd->flags = READ_FLAGS_PARSING_INCOMPLETED;
     return C_ERR;
 }
 
@@ -2753,41 +2742,27 @@ static int parseMultibulk(client *c,
  * command is in RESP format, so the first byte in the command is found
  * to be '*'. Otherwise for inline commands processInlineBuffer() is called. */
 static inline void parseMultibulkBuffer(client *c) {
-    // int ret = parseMultibulk(c, &c->argc, &c->argv, &c->argv_len,
-    //     &c->argv_len_sum, &c->net_input_bytes_curr_cmd, &c->read_error);
-
-    // if (c->read_error & READ_FLAGS_AUTH_REQUIRED) {
-    //     /* Execute client's AUTH command before parsing more, because it affects
-    //      * parser limits for max allowed bulk and multibulk lengths. */
-    //     return;
-    // }
-
-    // if (isReplicatedClient(c)) {
-    //     /* TODO: some change is required for replication offset which is
-    //      * computed from c->qb_pos, assuming we only parse one command at a
-    //      * time. Disable multi-command parsing for replication for now. */
-    //     return;
-    // }
-
-    uint8_t flag = 0;
+    uint8_t flags = 0;
     cmdQueue *queue = &c->cmd_queue;
     pendingCommand *head = queue->head;
     if (head) {
         serverAssert(queue->length == 1 && head->flags & READ_FLAGS_PARSING_INCOMPLETED);
-        parseMultibulk(c, &head->argc, &head->argv, &head->argv_len,
-           &head->argv_len_sum, &head->input_bytes, &flag);
-        head->flags = flag;
+        parseMultibulk(c, head);
+        flags = head->flags;
     }
 
     /* Try parsing pipelined commands. */
-    while ((flag != READ_FLAGS_PARSING_INCOMPLETED) &&
+    while ((flags != READ_FLAGS_PARSING_INCOMPLETED) &&
            sdslen(c->querybuf) > c->qb_pos &&
-           c->querybuf[c->qb_pos] == '*') {
+           c->querybuf[c->qb_pos] == '*')
+    {
         c->reqtype = PROTO_REQ_MULTIBULK;
         pendingCommand *p = zcalloc(sizeof(pendingCommand));
-        parseMultibulk(c, &p->argc, &p->argv, &p->argv_len,
-                       &p->argv_len_sum, &p->input_bytes, &flag);
-        p->flags = flag;
+        if (unlikely(parseMultibulk(c, p) == C_ERR)) {
+            freePendingCommand(c, p);
+            break;
+        }
+        flags = p->flags;
         cmdQueueAddTail(queue, p);
     }
 }
@@ -3039,38 +3014,6 @@ int processInputBuffer(client *c) {
              * ASAP in that case. */
             return C_ERR;
         }
-
-        // /* Multibulk processing could see a <= 0 length. */
-        // if (c->argc == 0) {
-        //     freeClientArgvInternal(c, 0);
-        //     c->reqtype = 0;
-        //     c->multibulklen = 0;
-        //     c->bulklen = -1;
-        // } else {
-        //     /* If we are in the context of an I/O thread, we can't really
-        //      * execute the command here. All we can do is to flag the client
-        //      * as one that needs to process the command. */
-        //     if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-        //         c->io_flags |= CLIENT_IO_PENDING_COMMAND;
-        //         c->iolookedcmd = lookupCommand(c->argv, c->argc);
-        //         if (c->iolookedcmd && !commandCheckArity(c->iolookedcmd, c->argc, NULL)) {
-        //             /* The command was found, but the arity is invalid, reset it and let main
-        //              * thread handle. To avoid memory prefetching on an invalid command. */
-        //             c->iolookedcmd = NULL;
-        //         }
-        //         c->slot = getSlotFromCommand(c->iolookedcmd, c->argv, c->argc);
-        //         enqueuePendingClientsToMainThread(c, 0);
-        //         break;
-        //     }
-
-        //     /* We are finally ready to execute the command. */
-        //     if (processCommandAndResetClient(c) == C_ERR) {
-        //         /* If the client is no longer valid, we avoid exiting this
-        //          * loop and trimming the client buffer later. So we return
-        //          * ASAP in that case. */
-        //         return C_ERR;
-        //     }
-        // }
     }
 
     if (c->flags & CLIENT_MASTER) {
@@ -3228,8 +3171,6 @@ void readQueryFromClient(connection *conn) {
      * and check if there is a full command to execute. */
     if (processInputBuffer(c) == C_ERR)
          c = NULL;
-    // else
-    //     trimCommandQueue(c);
 
 done:
     if (c && c->read_error && c->read_error != READ_FLAGS_PARSING_INCOMPLETED) {
@@ -4854,10 +4795,20 @@ static int consumeCommandQueue(client *c) {
     return 1;
 }
 
-/* Free unused memory in a client's queue of parsed commands. */
-void trimCommandQueue(client *c) {
-    if (c->flags & CLIENT_CLOSE_ASAP) return; /* Prevent concurrent access with
-                                       freeClientAsync(). */
-    /* For linked lists, there's no need to trim as nodes are allocated individually */
-    /* The list structure itself is lightweight and doesn't need trimming */
+void freePendingCommand(client *c, pendingCommand *pcmd) {
+    if (!pcmd)
+        return;
+
+    getKeysFreeResult(&pcmd->keys_result);
+
+    if (pcmd->argv) {
+        for (int j = 0; j < pcmd->argc; j++)
+            decrRefCount(pcmd->argv[j]);
+
+        zfree(pcmd->argv);
+        serverAssert(c->all_argv_len_sum >= pcmd->argv_len_sum); /* assert this doesn't try to go negative */
+        c->all_argv_len_sum -= pcmd->argv_len_sum;
+    }
+
+    zfree(pcmd);
 }

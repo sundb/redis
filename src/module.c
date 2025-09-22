@@ -678,7 +678,7 @@ void moduleReleaseTempClient(client *c) {
     c->bufpos = 0;
     c->flags = CLIENT_MODULE;
     c->user = NULL; /* Root user */
-    c->cmd = c->lastcmd = c->realcmd = c->iolookedcmd = NULL;
+    c->cmd = c->lastcmd = c->realcmd = NULL;
     if (c->bstate.async_rm_call_handle) {
         RedisModuleAsyncRMCallPromise *promise = c->bstate.async_rm_call_handle;
         promise->c = NULL; /* Remove the client from the promise so it will no longer be possible to abort it. */
@@ -11033,10 +11033,6 @@ void moduleCallCommandFilters(client *c) {
         /* Call filter */
         f->callback(&filter);
     }
-
-    /* If the filter sets a new command, including command or subcommand,
-     * the command looked up in IO threads will be invalid. */
-    c->iolookedcmd = NULL;
 
     c->argv = filter.argv;
     c->argv_len = filter.argv_len;

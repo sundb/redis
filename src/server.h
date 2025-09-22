@@ -1352,11 +1352,11 @@ typedef struct client {
     int argv_len;           /* Size of argv array (may be more than argc) */
     int original_argc;      /* Num of arguments of original command if arguments were rewritten. */
     robj **original_argv;   /* Arguments of original command if arguments were rewritten. */
+    size_t all_argv_len_sum;    /* Sum of lengths of objects in all pendingCommand argv lists */
     size_t argv_len_sum;    /* Sum of lengths of objects in argv list. */
     robj **deferred_objects;    /* Array of deferred objects to free. */
     int deferred_objects_num;   /* Number of deferred objects to free. */
     struct redisCommand *cmd, *lastcmd;  /* Last command executed. */
-    struct redisCommand *iolookedcmd;    /* Command looked up in IO threads. */
     struct redisCommand *parsed_cmd; /* The command that was parsed. */
     struct redisCommand *realcmd; /* The original command that was executed by the client,
                                      Used to update error stats in case the c->cmd was modified
@@ -2826,6 +2826,9 @@ void moduleDefragStart(void);
 void moduleDefragEnd(void);
 void *moduleGetHandleByName(char *modulename);
 int moduleIsModuleCommand(void *module_handle, struct redisCommand *cmd);
+
+/* pcmd */
+void freePendingCommand(client *c, pendingCommand *pcmd);
 
 /* Utils */
 long long ustime(void);

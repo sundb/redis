@@ -4107,11 +4107,10 @@ int processCommand(client *c) {
         // serverAssert(c->parsed_cmd);
         struct redisCommand *cmd = c->parsed_cmd;
 
-        // struct redisCommand *cmd = NULL;
         // if (isCommandReusable(c->lastcmd, c->argv[0]))
         //     cmd = c->lastcmd;
         // else
-            // cmd = c->iolookedcmd ? c->iolookedcmd : lookupCommand(c->argv, c->argc);
+            // cmd = lookupCommand(c->argv, c->argc);
         if (!cmd) {
             /* Handle possible security attacks. */
             if (!strcasecmp(c->argv[0]->ptr,"host:") || !strcasecmp(c->argv[0]->ptr,"post")) {
