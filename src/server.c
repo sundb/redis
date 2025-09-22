@@ -7670,8 +7670,8 @@ int main(int argc, char **argv) {
 
 /* The End */
 
-static void prepareCommandGeneric(client *c, robj **argv, int argc, uint8_t *read_flags, struct redisCommand **cmd, int *slot) {
-    if ((*read_flags == READ_FLAGS_PARSING_INCOMPLETED) || argc == 0) return;
+static void prepareCommandGeneric(client *c, robj **argv, int argc, uint8_t *flags, struct redisCommand **cmd, int *slot) {
+    if ((*flags == READ_FLAGS_PARSING_INCOMPLETED) || argc == 0) return;
     // *cmd = lookupCommand(argv, argc);
 
     if (isCommandReusable(c->lastcmd, argv[0]))
@@ -7714,10 +7714,10 @@ void prepareCommandQueue(client *c) {
     // prepareCommand(c);
 
     /* Commands in client's command queue. */
-    parsedCommand *p = cmdQueueFirst(&c->cmd_queue);
+    pendingCommand *p = c->cmd_queue.head;
     while (p != NULL) {
-        if (p->read_flags == READ_FLAGS_PARSING_INCOMPLETED) break;
-        prepareCommandGeneric(c, p->argv, p->argc, &p->read_flags, &p->cmd, &p->slot);
+        if (p->flags == READ_FLAGS_PARSING_INCOMPLETED) break;
+        prepareCommandGeneric(c, p->argv, p->argc, &p->flags, &p->cmd, &p->slot);
         p = p->next;
     }
 }

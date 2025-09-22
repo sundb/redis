@@ -181,7 +181,8 @@ client *createClient(connection *conn) {
     c->original_argv = NULL;
     c->deferred_objects = NULL;
     c->deferred_objects_num = 0;
-    cmdQueueInit(&c->cmd_queue);
+    c->cmd_queue.head = c->cmd_queue.tail = NULL;
+    c->cmd_queue.length = 0;
     c->cmd = c->lastcmd = c->realcmd = c->iolookedcmd = NULL;
     c->cur_script = NULL;
     c->multibulklen = 0;
@@ -2301,9 +2302,7 @@ int handleClientsWithPendingWrites(void) {
 static inline void resetClientInternal(client *c, int free_argv) {
     redisCommandProc *prevcmd = c->cmd ? c->cmd->proc : NULL;
 
-    // freeClientArgvInternal(c, free_argv);
-
-    parsedCommand *head = cmdQueueFirst(&c->cmd_queue);
+    pendingCommand *head = c->cmd_queue.head;
     if (head) {
         cmdQueuePutCommand(&c->cmd_queue, cmdQueueRemoveHead(&c->cmd_queue));
 
@@ -2772,12 +2771,12 @@ static inline void parseMultibulkBuffer(client *c) {
 
     uint8_t flag = 0;
     cmdQueue *queue = &c->cmd_queue;
-    parsedCommand *head = cmdQueueFirst(queue);
+    pendingCommand *head = queue->head;
     if (head) {
-        serverAssert(cmdQueueLength(queue) == 1 && head->read_flags & READ_FLAGS_PARSING_INCOMPLETED);
+        serverAssert(queue->length == 1 && head->flags & READ_FLAGS_PARSING_INCOMPLETED);
         parseMultibulk(c, &head->argc, &head->argv, &head->argv_len,
            &head->argv_len_sum, &head->input_bytes, &flag);
-        head->read_flags = flag;
+        head->flags = flag;
     }
 
     /* Try parsing pipelined commands. */
@@ -2785,15 +2784,10 @@ static inline void parseMultibulkBuffer(client *c) {
            sdslen(c->querybuf) > c->qb_pos &&
            c->querybuf[c->qb_pos] == '*') {
         c->reqtype = PROTO_REQ_MULTIBULK;
-        /* Push a new parser state to the command queue */
-        if (cmdQueueLength(queue) >= 512) {
-            break; /* Limit the length of the command queue. */
-        }
-
-        parsedCommand *p = cmdQueueGetCommand(queue);
+        pendingCommand *p = zcalloc(sizeof(pendingCommand));
         parseMultibulk(c, &p->argc, &p->argv, &p->argv_len,
                        &p->argv_len_sum, &p->input_bytes, &flag);
-        p->read_flags = flag;
+        p->flags = flag;
         cmdQueueAddTail(queue, p);
     }
 }
@@ -2893,7 +2887,7 @@ int processPendingCommandAndInputBuffer(client *c) {
      * Note: when a master client steps into this function,
      * it can always satisfy this condition, because its querybuf
      * contains data not applied. */
-    if ((c->querybuf && sdslen(c->querybuf) > 0) || cmdQueueLength(&c->cmd_queue) > 0) {
+    if ((c->querybuf && sdslen(c->querybuf) > 0) || c->cmd_queue.length > 0) {
         return processInputBuffer(c);
     }
     return C_OK;
@@ -2969,7 +2963,7 @@ void handleClientReadError(client *c) {
 
 void parseInputBuffer(client *c) {
     /* The command queue must be emptied before parsing. */
-    serverAssert(cmdQueueLength(&c->cmd_queue) == 0);
+    serverAssert(c->cmd_queue.length == 0);
 
     /* Determine request type when unknown. */
     if (!c->reqtype) {
@@ -2997,7 +2991,7 @@ void parseInputBuffer(client *c) {
 int processInputBuffer(client *c) {
     /* Keep processing while there is something in the input buffer */
     while ((c->querybuf && c->qb_pos < sdslen(c->querybuf)) ||
-           cmdQueueLength(&c->cmd_queue) > 0) {
+           c->cmd_queue.length > 0) {
         /* Immediately abort if the client is in the middle of something. */
         if (c->flags & CLIENT_BLOCKED) break;
 
@@ -4835,14 +4829,14 @@ static void discardCommandQueue(client *c) {
  * command. Returns true on success and false if the queue was empty. */
 static int consumeCommandQueue(client *c) {
     cmdQueue *queue = &c->cmd_queue;
-    parsedCommand *p = cmdQueueFirst(queue);
+    pendingCommand *p = queue->head;
     if (!p) return 0;
 
-    if (p->read_flags & READ_FLAGS_PARSING_INCOMPLETED) return 0;
+    if (p->flags & READ_FLAGS_PARSING_INCOMPLETED) return 0;
     /* Combine the command's read flags with the client's read flags. Some read
      * flags describe the client state (AUTH_REQUIRED) while others describe the
      * command parsing outcome (PARSING_COMPLETED). */
-    c->read_error |= p->read_flags;
+    c->read_error |= p->flags;
     c->argc = p->argc;
     c->argv = p->argv;
     c->argv_len = p->argv_len;
@@ -4851,8 +4845,8 @@ static int consumeCommandQueue(client *c) {
     c->parsed_cmd = p->cmd;
     c->slot = p->slot;
 
-    /* Remove the command from the queue and return parsedCommand to pool */
-    // parsedCommand *removed = cmdQueueRemoveHead(queue);
+    /* Remove the command from the queue and return pendingCommand to pool */
+    // pendingCommand *removed = cmdQueueRemoveHead(queue);
     // serverAssert(removed == p);  /* Should be the same command */
     /* Return the command to the pool immediately - the argv references are now owned by the client */
     // cmdQueuePutCommandNoFreeArgv(queue, removed);

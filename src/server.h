@@ -68,30 +68,6 @@ typedef long long ustime_t; /* microsecond time type. */
 #define REDISMODULE_CORE 1
 typedef struct redisObject robj;
 
-/* Parser state and parse result of a command from a client's input buffer. */
-typedef struct parsedCommand {
-    uint8_t read_flags; /* complete, error or 0 (parsing not complete) */
-    int argc;
-    robj **argv;
-    int argv_len;
-    int slot;
-    size_t argv_len_sum;
-    size_t input_bytes;
-    struct redisCommand *cmd;
-    /* Intrusive linked list pointers */
-    struct parsedCommand *next;
-    struct parsedCommand *prev;
-} parsedCommand;
-
-/* Queue of parsed commands with client-specific command pool. */
-typedef struct {
-    parsedCommand *head; /* Head of the intrusive linked list */
-    parsedCommand *tail; /* Tail of the intrusive linked list */
-    int length; /* Number of commands in the queue */
-    parsedCommand *pool[16]; /* Client-specific command pool, max 16 objects */
-    int pool_size; /* Current number of objects in pool */
-} cmdQueue;
-
 /* kvobj - A specific type of robj that holds also embedded key
  *
  * Since robj is being overused as general purpose object, `kvobj` distincts only
@@ -1229,6 +1205,14 @@ typedef struct readyList {
     robj *key;
 } readyList;
 
+/* Queue of parsed commands with client-specific command pool. */
+typedef struct pendingCommand pendingCommand;
+typedef struct cmdQueue {
+    pendingCommand *head; /* Head of the intrusive linked list */
+    pendingCommand *tail; /* Tail of the intrusive linked list */
+    int length; /* Number of commands in the queue */
+} cmdQueue;
+
 /* This structure represents a Redis user. This is useful for ACLs, the
  * user is associated to the connection after the connection is authenticated.
  * If there is no associated user, the connection uses the default user. */
@@ -2364,6 +2348,25 @@ typedef struct {
 } getKeysResult;
 #define GETKEYS_RESULT_INIT { 0, MAX_KEYS_BUFFER, {{0}}, NULL }
 
+/* Parser state and parse result of a command from a client's input buffer. */
+typedef struct pendingCommand {
+    int argc;                 /* Num of arguments of current command. */
+    int argv_len;             /* Size of argv array (may be more than argc) */
+    robj **argv;              /* Arguments of current command. */
+    size_t argv_len_sum;      /* Sum of lengths of objects in argv list. */
+    struct redisCommand *cmd;
+    getKeysResult keys_result;
+    int is_incomplete;
+    long long reploff;         /* c->reploff should be set to this value when the command is processed */
+    uint8_t flags;
+    int slot;         /* The slot the command is executing against. Set to INVALID_CLUSTER_SLOT if no slot is being used or if 
+                         the command has a cross slot error */
+    size_t input_bytes;
+
+    struct pendingCommand *next;
+    struct pendingCommand *prev;
+} pendingCommand;
+
 /* Key specs definitions.
  *
  * Brief: This is a scheme that tries to describe the location
@@ -3366,14 +3369,10 @@ int processCommand(client *c);
 void commandProcessed(client *c);
 
 /* Client command queue functions */
-void cmdQueueInit(cmdQueue *queue);
 void cmdQueueCleanup(cmdQueue *queue);
-parsedCommand *cmdQueueGetCommand(cmdQueue *queue);
-void cmdQueuePutCommand(cmdQueue *queue, parsedCommand *cmd);
-void cmdQueueAddTail(cmdQueue *queue, parsedCommand *cmd);
-parsedCommand *cmdQueueRemoveHead(cmdQueue *queue);
-int cmdQueueLength(cmdQueue *queue);
-parsedCommand *cmdQueueFirst(cmdQueue *queue);
+void cmdQueuePutCommand(cmdQueue *queue, pendingCommand *cmd);
+void cmdQueueAddTail(cmdQueue *queue, pendingCommand *cmd);
+pendingCommand *cmdQueueRemoveHead(cmdQueue *queue);
 int processPendingCommandAndInputBuffer(client *c);
 int processCommandAndResetClient(client *c);
 int areCommandKeysInSameSlot(client *c, int *hashslot);
