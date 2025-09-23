@@ -870,23 +870,6 @@ int clientsCronResizeQueryBuffer(client *c) {
     return 0;
 }
 
-/* If the client has been idle for too long, free the client's arguments. */
-int clientsCronFreeArgvIfIdle(client *c) {
-    /* If the client is in the middle of parsing a command, or if argv is in use
-     * (e.g. parsed in the IO thread but not yet executed, or blocked), exit ASAP. */
-    if (!c->argv || c->multibulklen || c->argc) return 0;
-
-    /* Free argv if the client has been idle for more than 2 seconds or if argv
-     * size is too large. */
-    time_t idletime = server.unixtime - c->lastinteraction;
-    if (idletime > 2 || c->argv_len > 128) {
-        c->argv_len = 0;
-        zfree(c->argv);
-        c->argv = NULL;
-    }
-    return 0;
-}
-
 /* The client output buffer can be adjusted to better fit the memory requirements.
  *
  * the logic is:
@@ -1110,7 +1093,6 @@ int clientsCronRunClient(client *c) {
      * terminated. */
     if (clientsCronHandleTimeout(c,now)) return 1;
     if (clientsCronResizeQueryBuffer(c)) return 1;
-    if (clientsCronFreeArgvIfIdle(c)) return 1;
     if (clientsCronResizeOutputBuffer(c,now)) return 1;
 
     if (clientsCronTrackExpansiveClients(c)) return 1;

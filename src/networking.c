@@ -4782,8 +4782,7 @@ static void discardCommandQueue(client *c) {
 /* Pops a command from the command queue and sets it as the client's current
  * command. Returns true on success and false if the queue was empty. */
 static int consumeCommandQueue(client *c) {
-    cmdQueue *queue = &c->cmd_queue;
-    pendingCommand *p = queue->head;
+    pendingCommand *p = c->cmd_queue.head;
     if (!p) return 0;
 
     if (p->flags & READ_FLAGS_PARSING_INCOMPLETED) return 0;
@@ -4798,13 +4797,6 @@ static int consumeCommandQueue(client *c) {
     c->net_input_bytes_curr_cmd = p->input_bytes;
     c->parsed_cmd = p->cmd;
     c->slot = p->slot;
-
-    /* Remove the command from the queue and return pendingCommand to pool */
-    // pendingCommand *removed = cmdQueueRemoveHead(queue);
-    // serverAssert(removed == p);  /* Should be the same command */
-    /* Return the command to the pool immediately - the argv references are now owned by the client */
-    // cmdQueuePutCommandNoFreeArgv(queue, removed);
-
     return 1;
 }
 
