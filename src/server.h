@@ -1138,16 +1138,11 @@ typedef struct rdbLoadingCtx {
     functionsLibCtx* functions_lib_ctx;
 }rdbLoadingCtx;
 
-/* Client MULTI/EXEC state */
-typedef struct multiCmd {
-    robj **argv;
-    int argv_len;
-    int argc;
-    struct redisCommand *cmd;
-} multiCmd;
-
+typedef struct pendingCommand pendingCommand;
 typedef struct multiState {
-    multiCmd *commands;     /* Array of MULTI commands */
+    pendingCommand **commands;     /* Array of pointers to MULTI commands */
+    int executing_cmd;      /* The index of the currently exeuted transaction 
+                               command (index in commands field) */
     int count;              /* Total number of MULTI commands */
     int cmd_flags;          /* The accumulated command flags OR-ed together.
                                So if at least a command has a given flag, it
@@ -1156,7 +1151,7 @@ typedef struct multiState {
                                is possible to know if all the commands have a
                                certain flag. */
     size_t argv_len_sums;    /* mem used by all commands arguments */
-    int alloc_count;         /* total number of multiCmd struct memory reserved. */
+    int alloc_count;         /* total number of pendingCommand struct memory reserved. */
 } multiState;
 
 /* This structure holds the blocking operation state for a client.
@@ -1206,7 +1201,6 @@ typedef struct readyList {
 } readyList;
 
 /* Queue of parsed commands with client-specific command pool. */
-typedef struct pendingCommand pendingCommand;
 typedef struct cmdQueue {
     pendingCommand *head; /* Head of the intrusive linked list */
     pendingCommand *tail; /* Tail of the intrusive linked list */

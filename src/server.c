@@ -4425,9 +4425,9 @@ int areCommandKeysInSameSlot(client *c, int *hashslot) {
     /* If client is in multi-exec, we need to check the slot of all keys
      * in the transaction. */
     for (int i = 0; i < (ms ? ms->count : 1); i++) {
-        struct redisCommand *cmd = ms ? ms->commands[i].cmd : c->cmd;
-        robj **argv = ms ? ms->commands[i].argv : c->argv;
-        int argc = ms ? ms->commands[i].argc : c->argc;
+        struct redisCommand *cmd = ms ? ms->commands[i]->cmd : c->cmd;
+        robj **argv = ms ? ms->commands[i]->argv : c->argv;
+        int argc = ms ? ms->commands[i]->argc : c->argc;
 
         getKeysResult result = GETKEYS_RESULT_INIT;
         int numkeys = getKeysFromCommand(cmd, argv, argc, &result);
