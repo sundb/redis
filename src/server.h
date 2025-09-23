@@ -201,6 +201,9 @@ struct hdr_histogram;
  * in order to make sure of not over provisioning more than 128 fds. */
 #define CONFIG_FDSET_INCR (CONFIG_MIN_RESERVED_FDS+96)
 
+/* Default lookahead value */
+#define REDIS_DEFAULT_LOOKAHEAD 16
+
 /* OOM Score Adjustment classes. */
 #define CONFIG_OOM_MASTER 0
 #define CONFIG_OOM_REPLICA 1
@@ -1974,6 +1977,7 @@ struct redisServer {
     int active_defrag_cycle_max;       /* maximal effort for defrag in CPU percentage */
     unsigned long active_defrag_max_scan_fields; /* maximum number of fields of set/hash/zset/list to process from within the main dict scan */
     size_t client_max_querybuf_len; /* Limit for client query buffer length */
+    int lookahead;                  /* how many commands in each client pipeline to decode and prefetch */
     int dbnum;                      /* Total number of configured DBs */
     int supervised;                 /* 1 if supervised, 0 otherwise. */
     int supervised_mode;            /* See SUPERVISED_* */

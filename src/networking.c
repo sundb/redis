@@ -2761,6 +2761,15 @@ static inline void parseMultibulkBuffer(client *c) {
     uint8_t flags = 0;
     pendingCommandList *queue = &c->pending_cmds;
     pendingCommand *head = queue->head;
+
+    /* We limit the lookahead for unauthenticated connections to 1.
+     * This is both to reduce memory overhead, and to prevent errors: AUTH can
+     * affect the handling of succeeding commands. Parsing of "large"
+     * unauthenticated multibulk commands is rejected, which would cause those
+     * commands to incorrectly return an error to the client. */
+    const int lookahead = authRequired(c) ? 1 : server.lookahead;
+
+    /* Process existing incomplete command if any. */
     if (head) {
         serverAssert(queue->length == 1 && head->flags & READ_FLAGS_PARSING_INCOMPLETED);
         parseMultibulk(c, head);
@@ -2768,10 +2777,10 @@ static inline void parseMultibulkBuffer(client *c) {
         resetClientQbufState(c);
     }
 
-    /* Try parsing pipelined commands. */
     while ((flags != READ_FLAGS_PARSING_INCOMPLETED) &&
            sdslen(c->querybuf) > c->qb_pos &&
-           c->querybuf[c->qb_pos] == '*')
+           c->querybuf[c->qb_pos] == '*' &&
+           c->pending_cmds.length < lookahead)
     {
         c->reqtype = PROTO_REQ_MULTIBULK;
         pendingCommand *p = zcalloc(sizeof(pendingCommand));
@@ -3021,6 +3030,7 @@ int processInputBuffer(client *c) {
             prepareCommandQueue(c);
             if (consumeCommandQueue(c) == 0) break;
 
+            /* Prefetch the commands. */
             resetCommandsBatch();
             addCommandToBatch(c);
             prefetchCommands();
