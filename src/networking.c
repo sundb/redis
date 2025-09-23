@@ -3031,7 +3031,7 @@ void parseInputBuffer(client *c) {
 
         if (!pcmd->flags) {
             pcmd->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
-            prepareCommand(c, pcmd);
+            reprocessCommand(c, pcmd);
             resetClientQbufState(c);
         }
     }

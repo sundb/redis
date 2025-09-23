@@ -7649,9 +7649,12 @@ int main(int argc, char **argv) {
     return 0;
 }
 
-void prepareCommand(client *c, pendingCommand *pcmd) {
+void reprocessCommand(client *c, pendingCommand *pcmd) {
+    if (pcmd->argc == 0)
+        return;
+
     /* Check if we can reuse the last command instead of looking it up.
-        * The last command is either the penultimate pending command (if it exists), or c->lastcmd. */
+     * The last command is either the penultimate pending command (if it exists), or c->lastcmd. */
     struct redisCommand *last_cmd = c->pending_cmds.tail->prev ? c->pending_cmds.head->cmd : c->lastcmd;
 
     if (isCommandReusable(last_cmd, pcmd->argv[0]))
