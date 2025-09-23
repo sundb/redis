@@ -2828,6 +2828,7 @@ void *moduleGetHandleByName(char *modulename);
 int moduleIsModuleCommand(void *module_handle, struct redisCommand *cmd);
 
 /* pcmd */
+void initPendingCommand(pendingCommand *pcmd);
 void freePendingCommand(client *c, pendingCommand *pcmd);
 
 /* Utils */
@@ -2858,6 +2859,7 @@ void clearClientConnectionState(client *c);
 void resetClient(client *c);
 void freeClientOriginalArgv(client *c);
 void freeClientArgv(client *c);
+void freeClientPendingCommands(client *c, int num_pcmds_to_free);
 void tryDeferFreeClientObject(client *c, robj *o);
 void freeClientDeferredObjects(client *c, int free_array);
 void sendReplyToClient(connection *conn);

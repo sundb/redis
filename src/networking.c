@@ -4800,6 +4800,12 @@ static int consumeCommandQueue(client *c) {
     return 1;
 }
 
+void initPendingCommand(pendingCommand *pcmd) {
+    memset(pcmd, 0, sizeof(pendingCommand));
+    pcmd->keys_result = (getKeysResult)GETKEYS_RESULT_INIT;
+    pcmd->slot = CLUSTER_INVALID_SLOT;
+}
+
 void freePendingCommand(client *c, pendingCommand *pcmd) {
     if (!pcmd)
         return;
