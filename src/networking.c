@@ -1840,7 +1840,6 @@ void freeClient(client *c) {
     listRelease(c->reply);
     zfree(c->buf);
     freeReplicaReferencedReplBuffer(c);
-    freeClientArgv(c);
     freeClientOriginalArgv(c);
     discardCommandQueue(c);
     freeClientDeferredObjects(c, 1);
@@ -1858,8 +1857,14 @@ void freeClient(client *c) {
 
     /* Unlink the client: this will close the socket, remove the I/O
      * handlers, and remove references of the client from different
-     * places where active clients may be referenced. */
+     * places where active clients may be referenced.
+     * This will also clean all remaining pending commands in the client,
+     * as they are no longer valid.
+     */
     unlinkClient(c);
+
+    freeClientMultiState(c);
+    cmdQueueCleanup(&c->pending_cmds);
 
     /* Master/slave cleanup Case 1:
      * we lost the connection with a slave. */
@@ -1915,7 +1920,7 @@ void freeClient(client *c) {
     if (c->name) decrRefCount(c->name);
     if (c->lib_name) decrRefCount(c->lib_name);
     if (c->lib_ver) decrRefCount(c->lib_ver);
-    freeClientMultiState(c);
+    serverAssert(c->all_argv_len_sum == 0);
     sdsfree(c->peerid);
     sdsfree(c->sockname);
     sdsfree(c->slave_addr);
@@ -2302,21 +2307,33 @@ int handleClientsWithPendingWrites(void) {
     return processed;
 }
 
-static inline void resetClientInternal(client *c, int free_argv) {
+/* Prepare the client for the parsing of the next command. */
+void resetClientQbufState(client *c) {
+    c->reqtype = 0;
+    c->multibulklen = 0;
+    c->bulklen = -1;
+}
+
+static inline void resetClientInternal(client *c, int num_pcmds_to_free) {
     redisCommandProc *prevcmd = c->cmd ? c->cmd->proc : NULL;
 
-    pendingCommand *head = c->pending_cmds.head;
-    if (head) {
-        cmdQueuePutCommand(&c->pending_cmds, cmdQueueRemoveHead(&c->pending_cmds));
-
-        c->argv_len = 0;
-        c->argv = NULL;
-        c->argc = 0;
-        c->cmd = NULL;
-    } else {
-        freeClientArgvInternal(c, free_argv);
+    /* We may get here with no pending commands but with an argv that needs freeing.
+     * An example is in the case of modules (RM_Call) */
+    if (c->pending_cmds.length > 0) {
+        freeClientPendingCommands(c, num_pcmds_to_free);
+        if (c->pending_cmds.length == 0)
+            serverAssert(c->all_argv_len_sum == 0);
+    } else if (c->argv) {
+        freeClientArgvInternal(c, 1 /* free_argv */);
+        /* If we're dealing with a client that doesn't create pendingCommand structs (e.g.: a Lua client),
+         * clear the all_argv_len_sum counter so we don't get to freeing the client with it non-zero. */
+        c->all_argv_len_sum = 0;
     }
 
+        c->argc = 0;
+        c->cmd = NULL;
+    c->argv_len = 0;
+    c->argv = NULL;
     c->cur_script = NULL;
     c->slot = -1;
     c->cluster_compatibility_check_slot = -2;
@@ -2357,8 +2374,8 @@ static inline void resetClientInternal(client *c, int free_argv) {
 }
 
 /* resetClient prepare the client to process the next command */
-void resetClient(client *c) {
-    resetClientInternal(c, 1);
+void resetClient(client *c, int num_pcmds_to_free) {
+    resetClientInternal(c, num_pcmds_to_free);
 }
 
 /* This function is used when we want to re-enter the event loop but there
@@ -2748,6 +2765,7 @@ static inline void parseMultibulkBuffer(client *c) {
         serverAssert(queue->length == 1 && head->flags & READ_FLAGS_PARSING_INCOMPLETED);
         parseMultibulk(c, head);
         flags = head->flags;
+        resetClientQbufState(c);
     }
 
     /* Try parsing pipelined commands. */
@@ -2763,7 +2781,20 @@ static inline void parseMultibulkBuffer(client *c) {
         }
         flags = p->flags;
         cmdQueueAddTail(queue, p);
+        resetClientQbufState(c);
     }
+}
+
+/* Prepare the client for executing the next command:
+ *
+ * 1. Append the response, if necessary.
+ * 2. Reset the client.
+ * 3. Update the all_argv_len_sum counter and advance the pending_cmd cyclic buffer.
+ */
+void prepareForNextCommand(client *c) {
+    reqresAppendResponse(c);
+    clusterSlotStatsAddNetworkBytesInForUserClient(c);
+    resetClientInternal(c, 1);
 }
 
 /* Perform necessary tasks after a command was executed:
@@ -2781,9 +2812,7 @@ void commandProcessed(client *c) {
      *    since we have not applied the command. */
     if (c->flags & CLIENT_BLOCKED) return;
 
-    reqresAppendResponse(c);
-    clusterSlotStatsAddNetworkBytesInForUserClient(c);
-    resetClientInternal(c, 0);
+    prepareForNextCommand(c);
 
     long long prev_offset = c->reploff;
     if (c->flags & CLIENT_MASTER && !(c->flags & CLIENT_MULTI)) {

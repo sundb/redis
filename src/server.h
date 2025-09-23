@@ -2849,7 +2849,8 @@ void deauthenticateAndCloseClient(client *c);
 void logInvalidUseAndFreeClientAsync(client *c, const char *fmt, ...);
 int beforeNextClient(client *c);
 void clearClientConnectionState(client *c);
-void resetClient(client *c);
+void resetClient(client *c, int num_pcmds_to_free);
+void resetClientQbufState(client *c);
 void freeClientOriginalArgv(client *c);
 void freeClientArgv(client *c);
 void freeClientPendingCommands(client *c, int num_pcmds_to_free);
@@ -3365,10 +3366,10 @@ uint64_t getCommandFlags(client *c);
 void prepareCommandQueue(client *c);
 int processCommand(client *c);
 void commandProcessed(client *c);
+void prepareForNextCommand(client *c);
 
 /* Client command queue functions */
 void cmdQueueCleanup(pendingCommandList *queue);
-void cmdQueuePutCommand(pendingCommandList *queue, pendingCommand *cmd);
 void cmdQueueAddTail(pendingCommandList *queue, pendingCommand *cmd);
 pendingCommand *cmdQueueRemoveHead(pendingCommandList *queue);
 int processPendingCommandAndInputBuffer(client *c);

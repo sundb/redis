@@ -31,20 +31,6 @@ void cmdQueueCleanup(pendingCommandList *queue) {
     }
 }
 
-/* Return a pendingCommand to the client's pool */
-void cmdQueuePutCommand(pendingCommandList *queue, pendingCommand *cmd) {
-    for (int j = 0; j < cmd->argc; j++)
-        decrRefCount(cmd->argv[j]);
-
-    if (cmd->argv) {
-        zfree(cmd->argv);
-        cmd->argv = NULL;
-    }
-
-    /* Pool is full, free the command */
-    zfree(cmd);
-}
-
 /* Add a command to the tail of the queue */
 void cmdQueueAddTail(pendingCommandList *queue, pendingCommand *cmd) {
     cmd->next = NULL;
