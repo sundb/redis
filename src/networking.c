@@ -2998,21 +2998,20 @@ int processInputBuffer(client *c) {
             prefetchCommands();
         }
 
+        /* Multibulk processing could see a <= 0 length. */
         if (c->argc == 0) {
             freeClientArgvInternal(c, 0);
             c->reqtype = 0;
             c->multibulklen = 0;
             c->bulklen = -1;
-            /* No command to process - continue parsing the query buf. */
-            continue;
-        }
-
-        /* We are finally ready to execute the command. */
-        if (processCommandAndResetClient(c) == C_ERR) {
-            /* If the client is no longer valid, we avoid exiting this
-             * loop and trimming the client buffer later. So we return
-             * ASAP in that case. */
-            return C_ERR;
+        } else {
+            /* We are finally ready to execute the command. */
+            if (processCommandAndResetClient(c) == C_ERR) {
+                /* If the client is no longer valid, we avoid exiting this
+                * loop and trimming the client buffer later. So we return
+                * ASAP in that case. */
+                return C_ERR;
+            }
         }
     }
 
