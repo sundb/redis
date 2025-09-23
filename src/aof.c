@@ -1644,7 +1644,7 @@ int loadSingleAppendOnlyFile(char *filename) {
              * for it to consume */
             pendingCommand *pcmd = zcalloc(sizeof(pendingCommand));
             initPendingCommand(pcmd);
-            cmdQueueAddTail(&fakeClient->cmd_queue, pcmd);
+            cmdQueueAddTail(&fakeClient->pending_cmds, pcmd);
 
             pcmd->argc = argc;
             pcmd->argv_len = argc;

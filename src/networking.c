@@ -174,8 +174,8 @@ client *createClient(connection *conn) {
     c->original_argv = NULL;
     c->deferred_objects = NULL;
     c->deferred_objects_num = 0;
-    c->cmd_queue.head = c->cmd_queue.tail = NULL;
-    c->cmd_queue.length = 0;
+    c->pending_cmds.head = c->pending_cmds.tail = NULL;
+    c->pending_cmds.length = 0;
     c->cmd = c->lastcmd = c->realcmd = NULL;
     c->cur_script = NULL;
     c->multibulklen = 0;
@@ -1552,10 +1552,10 @@ void freeClientArgv(client *c) {
 void freeClientPendingCommands(client *c, int num_pcmds_to_free) {
     /* (-1) means free all pending commands */
     if (num_pcmds_to_free == -1)
-        num_pcmds_to_free = c->cmd_queue.length;
+        num_pcmds_to_free = c->pending_cmds.length;
 
     while (num_pcmds_to_free--) {
-        pendingCommand *pcmd = cmdQueueRemoveHead(&c->cmd_queue);
+        pendingCommand *pcmd = cmdQueueRemoveHead(&c->pending_cmds);
         serverAssert(pcmd);
         freePendingCommand(c, pcmd);
     }
@@ -2306,9 +2306,9 @@ int handleClientsWithPendingWrites(void) {
 static inline void resetClientInternal(client *c, int free_argv) {
     redisCommandProc *prevcmd = c->cmd ? c->cmd->proc : NULL;
 
-    pendingCommand *head = c->cmd_queue.head;
+    pendingCommand *head = c->pending_cmds.head;
     if (head) {
-        cmdQueuePutCommand(&c->cmd_queue, cmdQueueRemoveHead(&c->cmd_queue));
+        cmdQueuePutCommand(&c->pending_cmds, cmdQueueRemoveHead(&c->pending_cmds));
 
         c->argv_len = 0;
         c->argv = NULL;
@@ -2743,7 +2743,7 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
  * to be '*'. Otherwise for inline commands processInlineBuffer() is called. */
 static inline void parseMultibulkBuffer(client *c) {
     uint8_t flags = 0;
-    cmdQueue *queue = &c->cmd_queue;
+    pendingCommandList *queue = &c->pending_cmds;
     pendingCommand *head = queue->head;
     if (head) {
         serverAssert(queue->length == 1 && head->flags & READ_FLAGS_PARSING_INCOMPLETED);
@@ -2862,7 +2862,7 @@ int processPendingCommandAndInputBuffer(client *c) {
      * Note: when a master client steps into this function,
      * it can always satisfy this condition, because its querybuf
      * contains data not applied. */
-    if ((c->querybuf && sdslen(c->querybuf) > 0) || c->cmd_queue.length > 0) {
+    if ((c->querybuf && sdslen(c->querybuf) > 0) || c->pending_cmds.length > 0) {
         return processInputBuffer(c);
     }
     return C_OK;
@@ -2938,7 +2938,7 @@ void handleClientReadError(client *c) {
 
 void parseInputBuffer(client *c) {
     /* The command queue must be emptied before parsing. */
-    serverAssert(c->cmd_queue.length == 0);
+    serverAssert(c->pending_cmds.length == 0);
 
     /* Determine request type when unknown. */
     if (!c->reqtype) {
@@ -2966,7 +2966,7 @@ void parseInputBuffer(client *c) {
 int processInputBuffer(client *c) {
     /* Keep processing while there is something in the input buffer */
     while ((c->querybuf && c->qb_pos < sdslen(c->querybuf)) ||
-           c->cmd_queue.length > 0) {
+           c->pending_cmds.length > 0) {
         /* Immediately abort if the client is in the middle of something. */
         if (c->flags & CLIENT_BLOCKED) break;
 
@@ -4776,13 +4776,13 @@ void evictClients(void) {
 }
 
 static void discardCommandQueue(client *c) {
-    cmdQueueCleanup(&c->cmd_queue);
+    cmdQueueCleanup(&c->pending_cmds);
 }
 
 /* Pops a command from the command queue and sets it as the client's current
  * command. Returns true on success and false if the queue was empty. */
 static int consumeCommandQueue(client *c) {
-    pendingCommand *p = c->cmd_queue.head;
+    pendingCommand *p = c->pending_cmds.head;
     if (!p) return 0;
 
     if (p->flags & READ_FLAGS_PARSING_INCOMPLETED) return 0;

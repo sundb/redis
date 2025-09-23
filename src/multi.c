@@ -52,7 +52,7 @@ void queueMultiCommand(client *c, uint64_t cmd_flags) {
     /* Move the pending command into the multi-state.
      * We leave the empty list node in 'pending_cmds' for freeClientPendingCommands to clean up
      * later, but set the value to NULL to indicate it has been moved out and should not be freed. */
-    pendingCommand *pcmd = cmdQueueRemoveHead(&c->cmd_queue);
+    pendingCommand *pcmd = cmdQueueRemoveHead(&c->pending_cmds);
     pendingCommand **mc = c->mstate.commands + c->mstate.count;
     *mc = pcmd;
 

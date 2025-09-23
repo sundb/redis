@@ -13,7 +13,7 @@
 #include <string.h>
 
 /* Cleanup a client command queue and its pool */
-void cmdQueueCleanup(cmdQueue *queue) {
+void cmdQueueCleanup(pendingCommandList *queue) {
     if (!queue) return;
 
     /* Free all commands in the queue */
@@ -32,7 +32,7 @@ void cmdQueueCleanup(cmdQueue *queue) {
 }
 
 /* Return a pendingCommand to the client's pool */
-void cmdQueuePutCommand(cmdQueue *queue, pendingCommand *cmd) {
+void cmdQueuePutCommand(pendingCommandList *queue, pendingCommand *cmd) {
     for (int j = 0; j < cmd->argc; j++)
         decrRefCount(cmd->argv[j]);
 
@@ -46,7 +46,7 @@ void cmdQueuePutCommand(cmdQueue *queue, pendingCommand *cmd) {
 }
 
 /* Add a command to the tail of the queue */
-void cmdQueueAddTail(cmdQueue *queue, pendingCommand *cmd) {
+void cmdQueueAddTail(pendingCommandList *queue, pendingCommand *cmd) {
     cmd->next = NULL;
     cmd->prev = queue->tail;
 
@@ -62,7 +62,7 @@ void cmdQueueAddTail(cmdQueue *queue, pendingCommand *cmd) {
 }
 
 /* Remove and return the head command from the queue */
-pendingCommand *cmdQueueRemoveHead(cmdQueue *queue) {
+pendingCommand *cmdQueueRemoveHead(pendingCommandList *queue) {
     pendingCommand *cmd = queue->head;
     queue->head = cmd->next;
 

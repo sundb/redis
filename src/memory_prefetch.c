@@ -384,7 +384,7 @@ int addCommandToBatch(client *c) {
 
     batch->clients[batch->client_count++] = c;
 
-    pendingCommand *p = c->cmd_queue.head;
+    pendingCommand *p = c->pending_cmds.head;
     while (p != NULL) {
         if (p->flags == READ_FLAGS_PARSING_INCOMPLETED) break;
         getKeysResult result = GETKEYS_RESULT_INIT;;

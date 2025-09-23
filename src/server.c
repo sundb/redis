@@ -7695,7 +7695,7 @@ void prepareCommandQueue(client *c) {
     // prepareCommand(c);
 
     /* Commands in client's command queue. */
-    pendingCommand *p = c->cmd_queue.head;
+    pendingCommand *p = c->pending_cmds.head;
     while (p != NULL) {
         if (p->flags == READ_FLAGS_PARSING_INCOMPLETED) break;
         prepareCommandGeneric(c, p->argv, p->argc, &p->flags, &p->cmd, &p->slot);

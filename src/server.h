@@ -1200,12 +1200,12 @@ typedef struct readyList {
     robj *key;
 } readyList;
 
-/* Queue of parsed commands with client-specific command pool. */
-typedef struct cmdQueue {
-    pendingCommand *head; /* Head of the intrusive linked list */
-    pendingCommand *tail; /* Tail of the intrusive linked list */
+/* List of pending commands. */
+typedef struct pendingCommandList {
+    pendingCommand *head;
+    pendingCommand *tail;
     int length; /* Number of commands in the queue */
-} cmdQueue;
+} pendingCommandList;
 
 /* This structure represents a Redis user. This is useful for ACLs, the
  * user is associated to the connection after the connection is authenticated.
@@ -1404,7 +1404,7 @@ typedef struct client {
     multiState mstate;      /* MULTI/EXEC state */
     blockingState bstate;     /* blocking state */
     long long woff;         /* Last write global replication offset. */
-    cmdQueue cmd_queue;  /* Parsed commands queue */
+    pendingCommandList pending_cmds;  /* List of parsed pending commands */
     list *watched_keys;     /* Keys WATCHED for MULTI/EXEC CAS */
     dict *pubsub_channels;  /* channels a client is interested in (SUBSCRIBE) */
     dict *pubsub_patterns;  /* patterns a client is interested in (PSUBSCRIBE) */
@@ -3368,10 +3368,10 @@ int processCommand(client *c);
 void commandProcessed(client *c);
 
 /* Client command queue functions */
-void cmdQueueCleanup(cmdQueue *queue);
-void cmdQueuePutCommand(cmdQueue *queue, pendingCommand *cmd);
-void cmdQueueAddTail(cmdQueue *queue, pendingCommand *cmd);
-pendingCommand *cmdQueueRemoveHead(cmdQueue *queue);
+void cmdQueueCleanup(pendingCommandList *queue);
+void cmdQueuePutCommand(pendingCommandList *queue, pendingCommand *cmd);
+void cmdQueueAddTail(pendingCommandList *queue, pendingCommand *cmd);
+pendingCommand *cmdQueueRemoveHead(pendingCommandList *queue);
 int processPendingCommandAndInputBuffer(client *c);
 int processCommandAndResetClient(client *c);
 int areCommandKeysInSameSlot(client *c, int *hashslot);
