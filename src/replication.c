@@ -4199,6 +4199,7 @@ void replicationCacheMaster(client *c) {
     server.master->qb_pos = 0;
     server.master->repl_applied = 0;
     server.master->read_reploff = server.master->reploff;
+    server.master->reploff_next = 0;
     if (c->flags & CLIENT_MULTI) discardTransaction(c);
     listEmpty(c->reply);
     c->sentlen = 0;

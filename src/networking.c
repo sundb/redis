@@ -191,6 +191,7 @@ client *createClient(connection *conn) {
     c->replstate = REPL_STATE_NONE;
     c->repl_start_cmd_stream_on_ack = 0;
     c->reploff = 0;
+    c->reploff_next = 0;
     c->read_reploff = 0;
     c->repl_applied = 0;
     c->repl_ack_off = 0;
@@ -2471,6 +2472,7 @@ int parseInlineBuffer(client *c) {
 
     pendingCommand *pcmd = zmalloc(sizeof(pendingCommand));
     initPendingCommand(pcmd);
+    pcmd->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
     cmdQueueAddTail(&c->pending_cmds, pcmd);
 
     /* Setup argv array on client structure */
@@ -2759,9 +2761,7 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
  * command is in RESP format, so the first byte in the command is found
  * to be '*'. Otherwise for inline commands processInlineBuffer() is called. */
 static inline void parseMultibulkBuffer(client *c) {
-    uint8_t flags = 0;
     pendingCommandList *queue = &c->pending_cmds;
-    pendingCommand *head = queue->head;
 
     /* We limit the lookahead for unauthenticated connections to 1.
      * This is both to reduce memory overhead, and to prevent errors: AUTH can
@@ -2771,13 +2771,16 @@ static inline void parseMultibulkBuffer(client *c) {
     const int lookahead = authRequired(c) ? 1 : server.lookahead;
 
     /* Process existing incomplete command if any. */
+    pendingCommand *head = queue->head;
     if (head) {
         serverAssert(queue->length == 1 && head->flags & CLIENT_READ_PARSING_INCOMPLETED);
-        parseMultibulk(c, head);
-        flags = head->flags;
+        if (parseMultibulk(c, head) == C_ERR)
+            return;
+        head->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
         resetClientQbufState(c);
     }
 
+    uint8_t flags = 0;
     while ((flags != CLIENT_READ_PARSING_INCOMPLETED) &&
            sdslen(c->querybuf) > c->qb_pos &&
            c->querybuf[c->qb_pos] == '*' &&
@@ -2790,6 +2793,7 @@ static inline void parseMultibulkBuffer(client *c) {
             freePendingCommand(c, pcmd);
             break;
         }
+        pcmd->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
         flags = pcmd->flags;
         cmdQueueAddTail(queue, pcmd);
         resetClientQbufState(c);
@@ -2828,7 +2832,8 @@ void commandProcessed(client *c) {
     long long prev_offset = c->reploff;
     if (c->flags & CLIENT_MASTER && !(c->flags & CLIENT_MULTI)) {
         /* Update the applied replication offset of our master. */
-        c->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
+        serverAssert(c->reploff_next > 0);
+        c->reploff = c->reploff_next;
     }
 
     /* If the client is a master we need to compute the difference
@@ -4869,19 +4874,17 @@ void evictClients(void) {
 /* Pops a command from the command queue and sets it as the client's current
  * command. Returns true on success and false if the queue was empty. */
 static int consumeCommandQueue(client *c) {
-    pendingCommand *p = c->pending_cmds.head;
-    if (!p) return 0;
+    pendingCommand *curcmd = c->pending_cmds.head;
+    if (!curcmd || curcmd->flags & CLIENT_READ_PARSING_INCOMPLETED) return 0;
 
-    if (p->flags & CLIENT_READ_PARSING_INCOMPLETED) return 0;
-    /* Combine the command's read flags with the client's read flags. Some read
-     * flags describe the client state (AUTH_REQUIRED) while others describe the
-     * command parsing outcome (PARSING_COMPLETED). */
-    c->read_error |= p->flags;
-    c->argc = p->argc;
-    c->argv = p->argv;
-    c->argv_len = p->argv_len;
-    c->parsed_cmd = p->cmd;
-    c->slot = p->slot;
+    /* We populate the old client fields so we don't have to modify all existing logic to work with pendingCommands */
+    c->argc = curcmd->argc;
+    c->argv = curcmd->argv;
+    c->argv_len = curcmd->argv_len;
+    c->reploff_next = curcmd->reploff;
+    c->slot = curcmd->slot;
+    c->parsed_cmd = curcmd->cmd;
+    c->read_error |= curcmd->flags;
     return 1;
 }
 
