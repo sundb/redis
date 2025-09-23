@@ -2502,7 +2502,7 @@ int parseInlineBuffer(client *c) {
      * Command) SET key value
      * Inline) SET key value\r\n
      */
-    pcmd->input_bytes = (c->all_argv_len_sum + (c->argc - 1) + 2);
+    c->net_input_bytes_curr_cmd = (c->all_argv_len_sum + (c->argc - 1) + 2);
     c->reqtype = 0;
 
     return C_OK;
@@ -2620,7 +2620,7 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
          *
          * The 1st component is calculated within the below line.
          * */
-        pcmd->input_bytes += (multibulklen_slen + 3);
+        c->net_input_bytes_curr_cmd += (multibulklen_slen + 3);
     }
 
     serverAssertWithInfo(c,NULL,c->multibulklen > 0);
@@ -2686,7 +2686,7 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
             }
             c->bulklen = ll;
             /* Per-slot network bytes-in calculation, 2nd component. */
-            pcmd->input_bytes += (bulklen_slen + 3);
+            c->net_input_bytes_curr_cmd += (bulklen_slen + 3);
         } else {
             serverAssert(pcmd->flags == CLIENT_READ_PARSING_INCOMPLETED);
         }
@@ -2737,7 +2737,7 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
     /* We're done when c->multibulk == 0 */
     if (c->multibulklen == 0) {
         /* Per-slot network bytes-in calculation, 3rd and 4th components. */
-        pcmd->input_bytes += (pcmd->argv_len_sum + (pcmd->argc * 2));
+        c->net_input_bytes_curr_cmd += (c->all_argv_len_sum + (c->argc * 2));
         c->reqtype = 0;
         return C_OK;
     }
@@ -4880,7 +4880,6 @@ static int consumeCommandQueue(client *c) {
     c->argc = p->argc;
     c->argv = p->argv;
     c->argv_len = p->argv_len;
-    c->net_input_bytes_curr_cmd = p->input_bytes;
     c->parsed_cmd = p->cmd;
     c->slot = p->slot;
     return 1;

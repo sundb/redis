@@ -2357,7 +2357,6 @@ typedef struct pendingCommand {
     uint8_t flags;
     int slot;         /* The slot the command is executing against. Set to INVALID_CLUSTER_SLOT if no slot is being used or if 
                          the command has a cross slot error */
-    size_t input_bytes;
 
     struct pendingCommand *next;
     struct pendingCommand *prev;
