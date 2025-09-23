@@ -169,7 +169,7 @@ client *createClient(connection *conn) {
     c->argc = 0;
     c->argv = NULL;
     c->argv_len = 0;
-    c->argv_len_sum = 0;
+    c->all_argv_len_sum = 0;
     c->original_argc = 0;
     c->original_argv = NULL;
     c->deferred_objects = NULL;
@@ -1537,7 +1537,6 @@ static inline void freeClientArgvInternal(client *c, int free_argv) {
     }
     c->argc = 0;
     c->cmd = NULL;
-    c->argv_len_sum = 0;
     if (free_argv) {
         c->argv_len = 0;
         zfree(c->argv);
@@ -2463,14 +2462,14 @@ int parseInlineBuffer(client *c) {
             c->argv = zmalloc(sizeof(robj*)*argc);
             c->argv_len = argc;
         }
-        c->argv_len_sum = 0;
+        c->all_argv_len_sum = 0;
     }
 
     /* Create redis objects for all arguments. */
     for (c->argc = 0, j = 0; j < argc; j++) {
         c->argv[c->argc] = createObject(OBJ_STRING,argv[j]);
         c->argc++;
-        c->argv_len_sum += sdslen(argv[j]);
+        c->all_argv_len_sum += sdslen(argv[j]);
     }
     zfree(argv);
 
@@ -2487,7 +2486,7 @@ int parseInlineBuffer(client *c) {
      * Command) SET key value
      * Inline) SET key value\r\n
      */
-    c->net_input_bytes_curr_cmd = (c->argv_len_sum + (c->argc - 1) + 2);
+    c->net_input_bytes_curr_cmd = (c->all_argv_len_sum + (c->argc - 1) + 2);
     c->reqtype = 0;
 
     return C_OK;
@@ -2533,7 +2532,7 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
     size_t querybuf_len = sdslen(c->querybuf); /* Cache sdslen */
 
     if (c->multibulklen == 0) {
-        /* The client should have been reset */
+        /* TODO: The client should have been reset */
         serverAssertWithInfo(c,NULL,pcmd->argc == 0);
 
         /* Multi bulk length cannot be read without a \r\n */
@@ -3331,7 +3330,7 @@ sds catClientInfoString(sds s, client *client) {
         " watch=%i", (int) listLength(client->watched_keys),
         " qbuf=%U", client->querybuf ? (unsigned long long) sdslen(client->querybuf) : 0,
         " qbuf-free=%U", client->querybuf ? (unsigned long long) sdsavail(client->querybuf) : 0,
-        " argv-mem=%U", (unsigned long long) client->argv_len_sum,
+        " argv-mem=%U", (unsigned long long) client->all_argv_len_sum,
         " multi-mem=%U", (unsigned long long) client->mstate.argv_len_sums,
         " rbs=%U", (unsigned long long) client->buf_usable_size,
         " rbp=%U", (unsigned long long) client->buf_peak,
@@ -4240,14 +4239,49 @@ void rewriteClientCommandVector(client *c, int argc, ...) {
 void replaceClientCommandVector(client *c, int argc, robj **argv) {
     int j;
     retainOriginalCommandVector(c);
+
+    /* We don't need to just fix the client argv, we also need to fix the pending command (same argv),
+     * But sometimes we reach here not from a real client, but from a Lua 'scriptRunCtx'. This flow bypasses the
+     * pending-command system entirely and uses c->argv directly. In this case there's no pending commands
+     * to update, so we skip that code. */
+    pendingCommand *pcmd = NULL;
+    int is_mstate = 0;
+    if (c->mstate.executing_cmd < 0) {
+        is_mstate = 0;
+        if (c->pending_cmds.length > 0)
+            pcmd = c->pending_cmds.head;
+    } else {
+        is_mstate = 1;
+        serverAssert(c->mstate.executing_cmd < c->mstate.count);
+        pcmd = c->mstate.commands[c->mstate.executing_cmd];
+    }
+
+    if (pcmd) {
+        serverAssert(pcmd->argv == c->argv);
+        pcmd->argv = argv;
+        pcmd->argc = argc;
+    }
     freeClientArgv(c);
     c->argv = argv;
     c->argc = c->argv_len = argc;
-    c->argv_len_sum = 0;
-    for (j = 0; j < c->argc; j++)
-        if (c->argv[j])
-            c->argv_len_sum += getStringObjectLen(c->argv[j]);
+
+    if (!is_mstate) {  /* multi-state does not track all_argv_len_sum, see code in queueMultiCommand */
+        size_t new_argv_len_sum = 0;
+        for (j = 0; j < c->argc; j++)
+            if (c->argv[j])
+                new_argv_len_sum += getStringObjectLen(c->argv[j]);
+
+        if (!pcmd) {
+            c->all_argv_len_sum = new_argv_len_sum;
+        } else {
+            c->all_argv_len_sum -= pcmd->argv_len_sum;
+            pcmd->argv_len_sum = new_argv_len_sum;
+            c->all_argv_len_sum += pcmd->argv_len_sum;
+        }
+    }
     c->cmd = lookupCommandOrOriginal(c->argv,c->argc);
+    if (pcmd)
+        pcmd->cmd = c->cmd;
     serverAssertWithInfo(c,NULL,c->cmd != NULL);
 }
 
@@ -4268,6 +4302,13 @@ void rewriteClientCommandArgument(client *c, int i, robj *newval) {
     robj *oldval;
     retainOriginalCommandVector(c);
 
+    /* We don't need to just fix the client argv, we also need to fix the pending command (same argv),
+     * But sometimes we reach here not from a real client, but from a Lua 'scriptRunCtx'. This flow bypasses the
+     * pending-command system entirely and uses c->argv directly. In this case there's no pending commands
+     * to update, so we skip that code. */
+    pendingCommand *pcmd = c->pending_cmds.head ? c->pending_cmds.head: NULL;
+    int update_pcmd = pcmd && pcmd->argv == c->argv;
+
     /* We need to handle both extending beyond argc (just update it and
      * initialize the new element) or beyond argv_len (realloc is needed).
      */
@@ -4280,12 +4321,12 @@ void rewriteClientCommandArgument(client *c, int i, robj *newval) {
         c->argv[i] = NULL;
     }
     oldval = c->argv[i];
-    if (oldval) c->argv_len_sum -= getStringObjectLen(oldval);
+    if (oldval) c->all_argv_len_sum -= getStringObjectLen(oldval);
 
     if (newval) {
         c->argv[i] = newval;
         incrRefCount(newval);
-        c->argv_len_sum += getStringObjectLen(newval);
+        c->all_argv_len_sum += getStringObjectLen(newval);
     } else {
         /* move the remaining arguments one step left */
         for (int j = i+1; j < c->argc; j++) {
@@ -4295,10 +4336,20 @@ void rewriteClientCommandArgument(client *c, int i, robj *newval) {
     }
     if (oldval) decrRefCount(oldval);
 
+    if (update_pcmd) {
+        pcmd->argv = c->argv;
+        pcmd->argc = c->argc;
+        pcmd->argv_len = c->argv_len;
+        if (oldval) pcmd->argv_len_sum -= getStringObjectLen(oldval);
+        if (newval) pcmd->argv_len_sum += getStringObjectLen(newval);
+    }
+
     /* If this is the command name make sure to fix c->cmd. */
     if (i == 0) {
         c->cmd = lookupCommandOrOriginal(c->argv,c->argc);
         serverAssertWithInfo(c,NULL,c->cmd != NULL);
+        if (update_pcmd)
+            pcmd->cmd = c->cmd;
     }
 }
 
@@ -4340,7 +4391,7 @@ size_t getClientMemoryUsage(client *c, size_t *output_buffer_mem_usage) {
     /* For efficiency (less work keeping track of the argv memory), it doesn't include the used memory
      * i.e. unused sds space and internal fragmentation, just the string length. but this is enough to
      * spot problematic clients. */
-    mem += c->argv_len_sum + sizeof(robj*)*c->argc;
+    mem += c->all_argv_len_sum + sizeof(robj*)*c->argc;
     mem += multiStateMemOverhead(c);
 
     /* Add memory overhead of pubsub channels and patterns. Note: this is just the overhead of the robj pointers
@@ -4793,7 +4844,7 @@ static int consumeCommandQueue(client *c) {
     c->argc = p->argc;
     c->argv = p->argv;
     c->argv_len = p->argv_len;
-    c->argv_len_sum = p->argv_len_sum;
+    c->all_argv_len_sum += p->argv_len_sum;
     c->net_input_bytes_curr_cmd = p->input_bytes;
     c->parsed_cmd = p->cmd;
     c->slot = p->slot;
