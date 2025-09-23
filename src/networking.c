@@ -2998,6 +2998,11 @@ int processInputBuffer(client *c) {
             prefetchCommands();
         }
 
+        if (c->running_tid != IOTHREAD_MAIN_THREAD_ID && c->read_error) {
+            enqueuePendingClientsToMainThread(c, 0);
+            break;
+        }
+
         /* Multibulk processing could see a <= 0 length. */
         if (c->argc == 0) {
             freeClientArgvInternal(c, 0);
@@ -3005,11 +3010,20 @@ int processInputBuffer(client *c) {
             c->multibulklen = 0;
             c->bulklen = -1;
         } else {
+            /* If we are in the context of an I/O thread, we can't really
+             * execute the command here. All we can do is to flag the client
+             * as one that needs to process the command. */
+            if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
+                c->io_flags |= CLIENT_IO_PENDING_COMMAND;
+                enqueuePendingClientsToMainThread(c, 0);
+                break;
+            }
+
             /* We are finally ready to execute the command. */
             if (processCommandAndResetClient(c) == C_ERR) {
                 /* If the client is no longer valid, we avoid exiting this
-                * loop and trimming the client buffer later. So we return
-                * ASAP in that case. */
+                 * loop and trimming the client buffer later. So we return
+                 * ASAP in that case. */
                 return C_ERR;
             }
         }
