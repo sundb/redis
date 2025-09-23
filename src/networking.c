@@ -39,7 +39,6 @@ __thread int thread_reusable_qb_used = 0; /* Avoid multiple clients using reusab
                                          * buffer due to nested command execution. */
 
 static int consumeCommandQueue(client *c);
-static void discardCommandQueue(client *c);
 static int parseMultibulk(client *c, pendingCommand *pcmd);
 
 /* COMMAND_QUEUE_MIN_CAPACITY no longer needed with linked list implementation */
@@ -1841,7 +1840,6 @@ void freeClient(client *c) {
     zfree(c->buf);
     freeReplicaReferencedReplBuffer(c);
     freeClientOriginalArgv(c);
-    discardCommandQueue(c);
     freeClientDeferredObjects(c, 1);
     if (c->deferred_reply_errors)
         listRelease(c->deferred_reply_errors);
@@ -1864,7 +1862,7 @@ void freeClient(client *c) {
     unlinkClient(c);
 
     freeClientMultiState(c);
-    cmdQueueCleanup(&c->pending_cmds);
+    serverAssert(c->pending_cmds.length == 0);
 
     /* Master/slave cleanup Case 1:
      * we lost the connection with a slave. */
@@ -2487,6 +2485,7 @@ int parseInlineBuffer(client *c) {
         pcmd->argv[pcmd->argc] = createObject(OBJ_STRING,argv[j]);
         pcmd->argc++;
         pcmd->argv_len_sum += sdslen(argv[j]);
+        c->all_argv_len_sum += sdslen(argv[j]);
     }
     zfree(argv);
 
@@ -2712,6 +2711,7 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
             {
                 (pcmd->argv)[(pcmd->argc)++] = createObject(OBJ_STRING,c->querybuf);
                 pcmd->argv_len_sum += c->bulklen;
+                c->all_argv_len_sum += c->bulklen;
                 sdsIncrLen(c->querybuf,-2); /* remove CRLF */
                 /* Assume that if we saw a fat argument we'll see another one likely...
                  * But only if that fat argument is not too big compared to the memory limit. */
@@ -2726,6 +2726,7 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
                 (pcmd->argv)[(pcmd->argc)++] =
                     createStringObject(c->querybuf+c->qb_pos,c->bulklen);
                 pcmd->argv_len_sum += c->bulklen;
+                c->all_argv_len_sum += c->bulklen;
                 c->qb_pos += c->bulklen+2;
             }
             c->bulklen = -1;
@@ -3043,11 +3044,10 @@ int processInputBuffer(client *c) {
         }
 
         /* Multibulk processing could see a <= 0 length. */
-        if (c->argc == 0) {
-            freeClientArgvInternal(c, 0);
-            c->reqtype = 0;
-            c->multibulklen = 0;
-            c->bulklen = -1;
+        if (!c->argc) {
+            /* A naked newline can be sent from masters as a keep-alive, or from slaves to refresh
+             * the last ACK time. In that case there's no command to actually execute. */
+            prepareForNextCommand(c);
         } else {
             /* If we are in the context of an I/O thread, we can't really
              * execute the command here. All we can do is to flag the client
@@ -4866,10 +4866,6 @@ void evictClients(void) {
     }
 }
 
-static void discardCommandQueue(client *c) {
-    cmdQueueCleanup(&c->pending_cmds);
-}
-
 /* Pops a command from the command queue and sets it as the client's current
  * command. Returns true on success and false if the queue was empty. */
 static int consumeCommandQueue(client *c) {
@@ -4884,7 +4880,6 @@ static int consumeCommandQueue(client *c) {
     c->argc = p->argc;
     c->argv = p->argv;
     c->argv_len = p->argv_len;
-    c->all_argv_len_sum += p->argv_len_sum;
     c->net_input_bytes_curr_cmd = p->input_bytes;
     c->parsed_cmd = p->cmd;
     c->slot = p->slot;

@@ -1114,6 +1114,7 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
     int multiple_keys = 0;
     multiState *ms, _ms;
     pendingCommand mc;
+    initPendingCommand(&mc);
     pendingCommand *mcp = &mc;
     int i, slot = CLUSTER_INVALID_SLOT, migrating_slot = 0, importing_slot = 0, missing_keys = 0,
             existing_keys = 0;

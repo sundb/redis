@@ -12,25 +12,6 @@
 #include "zmalloc.h"
 #include <string.h>
 
-/* Cleanup a client command queue and its pool */
-void cmdQueueCleanup(pendingCommandList *queue) {
-    if (!queue) return;
-
-    /* Free all commands in the queue */
-    pendingCommand *cmd = queue->head;
-    while (cmd) {
-        pendingCommand *next = cmd->next;
-        if (cmd->argv) {
-            for (int j = 0; j < cmd->argc; j++) {
-                decrRefCount(cmd->argv[j]);
-            }
-            zfree(cmd->argv);
-        }
-        zfree(cmd);
-        cmd = next;
-    }
-}
-
 /* Add a command to the tail of the queue */
 void cmdQueueAddTail(pendingCommandList *queue, pendingCommand *cmd) {
     cmd->next = NULL;

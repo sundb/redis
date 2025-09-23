@@ -1642,7 +1642,7 @@ int loadSingleAppendOnlyFile(char *filename) {
         {
             /* queueMultiCommand requires a pendingCommand, so we create a "fake" one here
              * for it to consume */
-            pendingCommand *pcmd = zcalloc(sizeof(pendingCommand));
+            pendingCommand *pcmd = zmalloc(sizeof(pendingCommand));
             initPendingCommand(pcmd);
             cmdQueueAddTail(&fakeClient->pending_cmds, pcmd);
 

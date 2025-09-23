@@ -3372,7 +3372,6 @@ void commandProcessed(client *c);
 void prepareForNextCommand(client *c);
 
 /* Client command queue functions */
-void cmdQueueCleanup(pendingCommandList *queue);
 void cmdQueueAddTail(pendingCommandList *queue, pendingCommand *cmd);
 pendingCommand *cmdQueueRemoveHead(pendingCommandList *queue);
 int processPendingCommandAndInputBuffer(client *c);
