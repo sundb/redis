@@ -2353,7 +2353,6 @@ typedef struct pendingCommand {
     size_t argv_len_sum;      /* Sum of lengths of objects in argv list. */
     struct redisCommand *cmd;
     getKeysResult keys_result;
-    int is_incomplete;
     long long reploff;         /* c->reploff should be set to this value when the command is processed */
     uint8_t flags;
     int slot;         /* The slot the command is executing against. Set to INVALID_CLUSTER_SLOT if no slot is being used or if 
