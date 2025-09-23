@@ -2471,22 +2471,22 @@ int parseInlineBuffer(client *c) {
     /* Move querybuffer position to the next query in the buffer. */
     c->qb_pos += querylen+linefeed_chars;
 
+    pendingCommand *pcmd = zmalloc(sizeof(pendingCommand));
+    initPendingCommand(pcmd);
+    cmdQueueAddTail(&c->pending_cmds, pcmd);
+
     /* Setup argv array on client structure */
     if (argc) {
-        /* Create new argv if space is insufficient. */
-        if (unlikely(argc > c->argv_len)) {
-            zfree(c->argv);
-            c->argv = zmalloc(sizeof(robj*)*argc);
-            c->argv_len = argc;
-        }
-        c->all_argv_len_sum = 0;
+        pcmd->argv = zmalloc(sizeof(robj*)*argc);
+        pcmd->argv_len = argc;
+        pcmd->argv_len_sum = 0;
     }
 
     /* Create redis objects for all arguments. */
-    for (c->argc = 0, j = 0; j < argc; j++) {
-        c->argv[c->argc] = createObject(OBJ_STRING,argv[j]);
-        c->argc++;
-        c->all_argv_len_sum += sdslen(argv[j]);
+    for (pcmd->argc = 0, j = 0; j < argc; j++) {
+        pcmd->argv[pcmd->argc] = createObject(OBJ_STRING,argv[j]);
+        pcmd->argc++;
+        pcmd->argv_len_sum += sdslen(argv[j]);
     }
     zfree(argv);
 
@@ -2503,7 +2503,7 @@ int parseInlineBuffer(client *c) {
      * Command) SET key value
      * Inline) SET key value\r\n
      */
-    c->net_input_bytes_curr_cmd = (c->all_argv_len_sum + (c->argc - 1) + 2);
+    pcmd->input_bytes = (c->all_argv_len_sum + (c->argc - 1) + 2);
     c->reqtype = 0;
 
     return C_OK;
@@ -2783,13 +2783,14 @@ static inline void parseMultibulkBuffer(client *c) {
            c->pending_cmds.length < lookahead)
     {
         c->reqtype = PROTO_REQ_MULTIBULK;
-        pendingCommand *p = zcalloc(sizeof(pendingCommand));
-        if (unlikely(parseMultibulk(c, p) == C_ERR)) {
-            freePendingCommand(c, p);
+        pendingCommand *pcmd = zmalloc(sizeof(pendingCommand));
+        initPendingCommand(pcmd);
+        if (unlikely(parseMultibulk(c, pcmd) == C_ERR)) {
+            freePendingCommand(c, pcmd);
             break;
         }
-        flags = p->flags;
-        cmdQueueAddTail(queue, p);
+        flags = pcmd->flags;
+        cmdQueueAddTail(queue, pcmd);
         resetClientQbufState(c);
     }
 }
