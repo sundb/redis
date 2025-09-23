@@ -7651,54 +7651,57 @@ int main(int argc, char **argv) {
 
 /* The End */
 
-static void prepareCommandGeneric(client *c, robj **argv, int argc, uint8_t *flags, struct redisCommand **cmd, int *slot) {
-    if ((*flags == READ_FLAGS_PARSING_INCOMPLETED) || argc == 0) return;
-    // *cmd = lookupCommand(argv, argc);
-
-    if (isCommandReusable(c->lastcmd, argv[0]))
-        *cmd = c->lastcmd;
-    else
-        *cmd = lookupCommand(argv, argc);
-
-    // long long start_time = ustime();
-    // for (int i = 0; i < 1000000000; i++) {
-    //     *cmd = lookupCommand(argv, argc);
-    // }
-    // long long end_time = ustime();
-    // long long duration_us = end_time - start_time;
-    
-    // printf("lookupCommand loop took %lld microseconds (%.3f ms)\n", 
-    //        duration_us, duration_us / 1000.0);
-
-    /* Make sure we don't do this twice. */
-    // debugServerAssert(*cmd == NULL && !(*read_flags & READ_FLAGS_COMMAND_NOT_FOUND));
-    // *cmd = lookupCommand(argv, argc);
-    // if (!*cmd) {
-    //     *read_flags |= READ_FLAGS_COMMAND_NOT_FOUND;
-    // } else if (!commandCheckArity(*cmd, argc, NULL)) {
-    //     *read_flags |= READ_FLAGS_BAD_ARITY;
-    // } else if (server.cluster_enabled) {
-    //     debugServerAssert(*slot == -1 &&
-    //                       !(*read_flags & READ_FLAGS_CROSSSLOT) &&
-    //                       !(*read_flags & READ_FLAGS_NO_KEYS));
-    //     *slot = clusterSlotByCommand(*cmd, argv, argc, read_flags);
-    // }
-}
-
-void prepareCommand(client *c) {
-    prepareCommandGeneric(c, c->argv, c->argc, &c->read_error, &c->parsed_cmd, &c->slot);
-}
-
 /* Prepare all parsed commands in the client's queue. See prepareCommand(). */
 void prepareCommandQueue(client *c) {
-    /* First AKA current command (c->argv). */
-    // prepareCommand(c);
-
     /* Commands in client's command queue. */
-    pendingCommand *p = c->pending_cmds.head;
-    while (p != NULL) {
-        if (p->flags == READ_FLAGS_PARSING_INCOMPLETED) break;
-        prepareCommandGeneric(c, p->argv, p->argc, &p->flags, &p->cmd, &p->slot);
-        p = p->next;
+    pendingCommand *pcmd = c->pending_cmds.head;
+    while (pcmd != NULL) {
+        if (pcmd->flags == CLIENT_READ_PARSING_INCOMPLETED || pcmd->argc == 0)
+            break;
+
+        /* Check if we can reuse the last command instead of looking it up.
+         * The last command is either the penultimate pending command (if it exists), or c->lastcmd. */
+        struct redisCommand *last_cmd = c->pending_cmds.tail->prev ? c->pending_cmds.head->cmd : c->lastcmd;
+
+        if (isCommandReusable(last_cmd, pcmd->argv[0]))
+            pcmd->cmd = last_cmd;
+        else
+            pcmd->cmd = lookupCommand(pcmd->argv, pcmd->argc);
+
+        if (!pcmd->cmd) {
+            continue;
+        }
+
+        if ((pcmd->cmd->arity > 0 && pcmd->cmd->arity != pcmd->argc) ||
+            (pcmd->argc < -pcmd->cmd->arity))
+        {
+            continue;
+        }
+
+        pcmd->keys_result = (getKeysResult)GETKEYS_RESULT_INIT;
+        int num_keys = getKeysFromCommandWithSpecs(pcmd->cmd, pcmd->argv, pcmd->argc, GET_KEYSPEC_DEFAULT, &pcmd->keys_result);
+        if (num_keys < 0)
+            /* We skip the checks below since We expect the command to be rejected in this case */
+            return;
+
+        if (server.cluster_enabled) {
+            robj **margv = pcmd->argv;
+            for (int j = 0; j < pcmd->keys_result.numkeys; j++) {
+                robj *thiskey = margv[pcmd->keys_result.keys[j].pos];
+                int thisslot = (int)keyHashSlot((char*)thiskey->ptr, sdslen(thiskey->ptr));
+
+                if (pcmd->slot == CLUSTER_INVALID_SLOT)
+                    pcmd->slot = thisslot;
+                else if (pcmd->slot != thisslot) {
+                    serverLog(LL_NOTICE, "preprocessCommand: CROSS SLOT ERROR");
+                    /* Invalidate the slot to indicate that there is a cross-slot error */
+                    pcmd->slot = CLUSTER_INVALID_SLOT;
+                    /* Cross slot error. */
+                    return;
+                }
+            }
+        }
+
+        pcmd = pcmd->next;
     }
 }

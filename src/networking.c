@@ -2689,7 +2689,7 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
             /* Per-slot network bytes-in calculation, 2nd component. */
             pcmd->input_bytes += (bulklen_slen + 3);
         } else {
-            serverAssert(pcmd->flags == READ_FLAGS_PARSING_INCOMPLETED);
+            serverAssert(pcmd->flags == CLIENT_READ_PARSING_INCOMPLETED);
         }
 
         /* Read bulk argument */
@@ -2742,7 +2742,7 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
     }
 
     /* Still not ready to process the command */
-    pcmd->flags = READ_FLAGS_PARSING_INCOMPLETED;
+    pcmd->flags = CLIENT_READ_PARSING_INCOMPLETED;
     return C_ERR;
 }
 
@@ -2771,13 +2771,13 @@ static inline void parseMultibulkBuffer(client *c) {
 
     /* Process existing incomplete command if any. */
     if (head) {
-        serverAssert(queue->length == 1 && head->flags & READ_FLAGS_PARSING_INCOMPLETED);
+        serverAssert(queue->length == 1 && head->flags & CLIENT_READ_PARSING_INCOMPLETED);
         parseMultibulk(c, head);
         flags = head->flags;
         resetClientQbufState(c);
     }
 
-    while ((flags != READ_FLAGS_PARSING_INCOMPLETED) &&
+    while ((flags != CLIENT_READ_PARSING_INCOMPLETED) &&
            sdslen(c->querybuf) > c->qb_pos &&
            c->querybuf[c->qb_pos] == '*' &&
            c->pending_cmds.length < lookahead)
@@ -3225,7 +3225,7 @@ void readQueryFromClient(connection *conn) {
          c = NULL;
 
 done:
-    if (c && c->read_error && c->read_error != READ_FLAGS_PARSING_INCOMPLETED) {
+    if (c && c->read_error && c->read_error != CLIENT_READ_PARSING_INCOMPLETED) {
         if (c->running_tid == IOTHREAD_MAIN_THREAD_ID) {
             handleClientReadError(c);
         }
@@ -4876,7 +4876,7 @@ static int consumeCommandQueue(client *c) {
     pendingCommand *p = c->pending_cmds.head;
     if (!p) return 0;
 
-    if (p->flags & READ_FLAGS_PARSING_INCOMPLETED) return 0;
+    if (p->flags & CLIENT_READ_PARSING_INCOMPLETED) return 0;
     /* Combine the command's read flags with the client's read flags. Some read
      * flags describe the client state (AUTH_REQUIRED) while others describe the
      * command parsing outcome (PARSING_COMPLETED). */

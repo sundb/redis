@@ -56,6 +56,12 @@ void queueMultiCommand(client *c, uint64_t cmd_flags) {
     pendingCommand **mc = c->mstate.commands + c->mstate.count;
     *mc = pcmd;
 
+    c->mstate.count++;
+    c->mstate.cmd_flags |= cmd_flags;
+    c->mstate.cmd_inv_flags |= ~cmd_flags;
+    c->mstate.argv_len_sums += (*mc)->argv_len_sum;
+    c->all_argv_len_sum -= (*mc)->argv_len_sum;
+
     (*mc)->argv_len_sum = 0; /* This is no longer tracked through all_argv_len_sum, so we don't want */
                              /* to subtract it from there later. */
 

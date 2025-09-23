@@ -384,19 +384,16 @@ int addCommandToBatch(client *c) {
 
     batch->clients[batch->client_count++] = c;
 
-    pendingCommand *p = c->pending_cmds.head;
-    while (p != NULL) {
-        if (p->flags == READ_FLAGS_PARSING_INCOMPLETED) break;
-        getKeysResult result = GETKEYS_RESULT_INIT;;
-        int num_keys = getKeysFromCommand(p->cmd, p->argv, p->argc, &result);
-        for (int i = 0; i < num_keys && batch->key_count < batch->max_prefetch_size; i++) {
-            batch->keys[batch->key_count] = p->argv[result.keys[i].pos];
+    pendingCommand *pcmd = c->pending_cmds.head;
+    while (pcmd != NULL) {
+        if (pcmd->flags == CLIENT_READ_PARSING_INCOMPLETED) break;
+        for (int i = 0; i < pcmd->keys_result.numkeys && batch->key_count < batch->max_prefetch_size; i++) {
+            batch->keys[batch->key_count] = pcmd->argv[pcmd->keys_result.keys[i].pos];
             batch->keys_dicts[batch->key_count] =
-                kvstoreGetDict(c->db->keys, p->slot > 0 ? p->slot : 0);
+                kvstoreGetDict(c->db->keys, pcmd->slot > 0 ? pcmd->slot : 0);
             batch->key_count++;
         }
-        getKeysFreeResult(&result);
-        p = p->next;
+        pcmd = pcmd->next;
     } 
 
     return C_OK;
