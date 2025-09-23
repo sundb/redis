@@ -7649,59 +7649,47 @@ int main(int argc, char **argv) {
     return 0;
 }
 
-/* The End */
+void prepareCommand(client *c, pendingCommand *pcmd) {
+    /* Check if we can reuse the last command instead of looking it up.
+        * The last command is either the penultimate pending command (if it exists), or c->lastcmd. */
+    struct redisCommand *last_cmd = c->pending_cmds.tail->prev ? c->pending_cmds.head->cmd : c->lastcmd;
 
-/* Prepare all parsed commands in the client's queue. See prepareCommand(). */
-void prepareCommandQueue(client *c) {
-    /* Commands in client's command queue. */
-    pendingCommand *pcmd = c->pending_cmds.head;
-    while (pcmd != NULL) {
-        if (pcmd->flags == CLIENT_READ_PARSING_INCOMPLETED || pcmd->argc == 0)
-            break;
+    if (isCommandReusable(last_cmd, pcmd->argv[0]))
+        pcmd->cmd = last_cmd;
+    else
+        pcmd->cmd = lookupCommand(pcmd->argv, pcmd->argc);
 
-        /* Check if we can reuse the last command instead of looking it up.
-         * The last command is either the penultimate pending command (if it exists), or c->lastcmd. */
-        struct redisCommand *last_cmd = c->pending_cmds.tail->prev ? c->pending_cmds.head->cmd : c->lastcmd;
+    if (!pcmd->cmd) return;
 
-        if (isCommandReusable(last_cmd, pcmd->argv[0]))
-            pcmd->cmd = last_cmd;
-        else
-            pcmd->cmd = lookupCommand(pcmd->argv, pcmd->argc);
+    if ((pcmd->cmd->arity > 0 && pcmd->cmd->arity != pcmd->argc) ||
+        (pcmd->argc < -pcmd->cmd->arity))
+    {
+        return;
+    }
 
-        if (!pcmd->cmd) {
-            continue;
-        }
+    pcmd->keys_result = (getKeysResult)GETKEYS_RESULT_INIT;
+    int num_keys = getKeysFromCommandWithSpecs(pcmd->cmd, pcmd->argv, pcmd->argc, GET_KEYSPEC_DEFAULT, &pcmd->keys_result);
+    if (num_keys < 0)
+        /* We skip the checks below since We expect the command to be rejected in this case */
+        return;
 
-        if ((pcmd->cmd->arity > 0 && pcmd->cmd->arity != pcmd->argc) ||
-            (pcmd->argc < -pcmd->cmd->arity))
-        {
-            continue;
-        }
+    if (server.cluster_enabled) {
+        robj **margv = pcmd->argv;
+        for (int j = 0; j < pcmd->keys_result.numkeys; j++) {
+            robj *thiskey = margv[pcmd->keys_result.keys[j].pos];
+            int thisslot = (int)keyHashSlot((char*)thiskey->ptr, sdslen(thiskey->ptr));
 
-        pcmd->keys_result = (getKeysResult)GETKEYS_RESULT_INIT;
-        int num_keys = getKeysFromCommandWithSpecs(pcmd->cmd, pcmd->argv, pcmd->argc, GET_KEYSPEC_DEFAULT, &pcmd->keys_result);
-        if (num_keys < 0)
-            /* We skip the checks below since We expect the command to be rejected in this case */
-            return;
-
-        if (server.cluster_enabled) {
-            robj **margv = pcmd->argv;
-            for (int j = 0; j < pcmd->keys_result.numkeys; j++) {
-                robj *thiskey = margv[pcmd->keys_result.keys[j].pos];
-                int thisslot = (int)keyHashSlot((char*)thiskey->ptr, sdslen(thiskey->ptr));
-
-                if (pcmd->slot == CLUSTER_INVALID_SLOT)
-                    pcmd->slot = thisslot;
-                else if (pcmd->slot != thisslot) {
-                    serverLog(LL_NOTICE, "preprocessCommand: CROSS SLOT ERROR");
-                    /* Invalidate the slot to indicate that there is a cross-slot error */
-                    pcmd->slot = CLUSTER_INVALID_SLOT;
-                    /* Cross slot error. */
-                    return;
-                }
+            if (pcmd->slot == CLUSTER_INVALID_SLOT)
+                pcmd->slot = thisslot;
+            else if (pcmd->slot != thisslot) {
+                serverLog(LL_NOTICE, "preprocessCommand: CROSS SLOT ERROR");
+                /* Invalidate the slot to indicate that there is a cross-slot error */
+                pcmd->slot = CLUSTER_INVALID_SLOT;
+                /* Cross slot error. */
+                return;
             }
         }
-
-        pcmd = pcmd->next;
     }
 }
+
+/* The End */

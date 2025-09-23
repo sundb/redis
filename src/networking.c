@@ -2417,7 +2417,7 @@ void unprotectClient(client *c) {
  * have a well formed command. The function also returns C_ERR when there is
  * a protocol error: in such a case the client structure is setup to reply
  * with the error and close the connection. */
-int parseInlineBuffer(client *c) {
+int parseInlineBuffer(client *c, pendingCommand *pcmd) {
     char *newline;
     int argc, j, linefeed_chars = 1;
     sds *argv, aux;
@@ -2469,11 +2469,6 @@ int parseInlineBuffer(client *c) {
 
     /* Move querybuffer position to the next query in the buffer. */
     c->qb_pos += querylen+linefeed_chars;
-
-    pendingCommand *pcmd = zmalloc(sizeof(pendingCommand));
-    initPendingCommand(pcmd);
-    pcmd->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
-    cmdQueueAddTail(&c->pending_cmds, pcmd);
 
     /* Setup argv array on client structure */
     if (argc) {
@@ -2581,7 +2576,10 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
 
         c->qb_pos = (newline-c->querybuf)+2;
 
-        if (ll <= 0) return C_OK;
+        if (ll <= 0) {
+            pcmd->flags = 0;
+            return C_OK;
+        }
 
         c->multibulklen = ll;
         c->bulklen = -1;
@@ -2741,12 +2739,13 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
         /* Per-slot network bytes-in calculation, 3rd and 4th components. */
         c->net_input_bytes_curr_cmd += (c->all_argv_len_sum + (c->argc * 2));
         c->reqtype = 0;
+        pcmd->flags = 0;
         return C_OK;
     }
 
     /* Still not ready to process the command */
     pcmd->flags = CLIENT_READ_PARSING_INCOMPLETED;
-    return C_ERR;
+    return C_OK;
 }
 
 /* Process the query buffer for client 'c', setting up the client argument
@@ -2774,15 +2773,14 @@ static inline void parseMultibulkBuffer(client *c) {
     pendingCommand *head = queue->head;
     if (head) {
         serverAssert(queue->length == 1 && head->flags & CLIENT_READ_PARSING_INCOMPLETED);
-        if (parseMultibulk(c, head) == C_ERR)
+        parseMultibulk(c, head);
+        if (unlikely(head->flags == CLIENT_READ_PARSING_INCOMPLETED))
             return;
         head->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
         resetClientQbufState(c);
     }
 
-    uint8_t flags = 0;
-    while ((flags != CLIENT_READ_PARSING_INCOMPLETED) &&
-           sdslen(c->querybuf) > c->qb_pos &&
+    while (sdslen(c->querybuf) > c->qb_pos &&
            c->querybuf[c->qb_pos] == '*' &&
            c->pending_cmds.length < lookahead)
     {
@@ -2794,8 +2792,9 @@ static inline void parseMultibulkBuffer(client *c) {
             break;
         }
         pcmd->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
-        flags = pcmd->flags;
         cmdQueueAddTail(queue, pcmd);
+        if (unlikely(pcmd->flags == CLIENT_READ_PARSING_INCOMPLETED))
+            return;
         resetClientQbufState(c);
     }
 }
@@ -2981,24 +2980,60 @@ void handleClientReadError(client *c) {
 }
 
 void parseInputBuffer(client *c) {
-    /* The command queue must be emptied before parsing. */
-    serverAssert(c->pending_cmds.length == 0);
+    /* We limit the lookahead for unauthenticated connections to 1.
+     * This is both to reduce memory overhead, and to prevent errors: AUTH can
+     * affect the handling of succeeding commands. Parsing of "large"
+     * unauthenticated multibulk commands is rejected, which would cause those
+     * commands to incorrectly return an error to the client. */
+    const int lookahead = authRequired(c) ? 1 : server.lookahead;
 
-    /* Determine request type when unknown. */
-    if (!c->reqtype) {
-        if (c->querybuf[c->qb_pos] == '*') {
-            c->reqtype = PROTO_REQ_MULTIBULK;
-        } else {
-            c->reqtype = PROTO_REQ_INLINE;
+    /* Parse up to lookahead commands */
+    while (c->pending_cmds.length < lookahead && c->querybuf && c->qb_pos < sdslen(c->querybuf)) {
+        /* Determine request type when unknown. */
+        if (!c->reqtype) {
+            if (c->querybuf[c->qb_pos] == '*') {
+                c->reqtype = PROTO_REQ_MULTIBULK;
+            } else {
+                c->reqtype = PROTO_REQ_INLINE;
+            }
         }
-    }
 
-    if (c->reqtype == PROTO_REQ_INLINE) {
-        parseInlineBuffer(c);
-    } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
-        parseMultibulkBuffer(c);
-    } else {
-        serverPanic("Unknown request type");
+        pendingCommand *pcmd = NULL;
+        if (c->reqtype == PROTO_REQ_INLINE) {
+            pcmd = zmalloc(sizeof(pendingCommand));
+            initPendingCommand(pcmd);
+
+            if (parseInlineBuffer(c, pcmd) != C_OK) {
+                freePendingCommand(c, pcmd);
+                break;
+            }
+            cmdQueueAddTail(&c->pending_cmds, pcmd);
+        } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
+            int incomplete = c->pending_cmds.tail && c->pending_cmds.tail->flags == CLIENT_READ_PARSING_INCOMPLETED;
+            if (unlikely(incomplete)) {
+                serverAssert(c->pending_cmds.length == 1);
+                pcmd = c->pending_cmds.tail;
+            } else {
+                pcmd = zmalloc(sizeof(pendingCommand));
+                initPendingCommand(pcmd);
+            }
+
+            if (unlikely(parseMultibulk(c, pcmd) != C_OK)) {
+                freePendingCommand(c, pcmd);
+                break;
+            }
+
+            if (!incomplete)
+                cmdQueueAddTail(&c->pending_cmds, pcmd);
+        } else {
+            serverPanic("Unknown request type");
+        }
+
+        if (!pcmd->flags) {
+            pcmd->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
+            prepareCommand(c, pcmd);
+            resetClientQbufState(c);
+        }
     }
 }
 
@@ -3034,7 +3069,6 @@ int processInputBuffer(client *c) {
         /* If commands are queued up, pop from the queue first */
         if (!consumeCommandQueue(c)) {
             parseInputBuffer(c);
-            prepareCommandQueue(c);
             if (consumeCommandQueue(c) == 0) break;
 
             /* Prefetch the commands. */

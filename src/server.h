@@ -3366,7 +3366,7 @@ void updatePeakMemory(size_t used_memory);
 size_t freeMemoryGetNotCountedMemory(void);
 int overMaxmemoryAfterAlloc(size_t moremem);
 uint64_t getCommandFlags(client *c);
-void prepareCommandQueue(client *c);
+void prepareCommand(client *c, pendingCommand *pcmd);
 int processCommand(client *c);
 void commandProcessed(client *c);
 void prepareForNextCommand(client *c);
