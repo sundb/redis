@@ -1107,7 +1107,9 @@ void clusterCommand(client *c) {
  *
  * CLUSTER_REDIR_DOWN_STATE and CLUSTER_REDIR_DOWN_RO_STATE if the cluster is
  * down but the user attempts to execute a command that addresses one or more keys. */
-clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, int argc, int *hashslot, uint64_t cmd_flags, int *error_code) {
+clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv,
+    uint64_t cmd_flags, int *error_code, int precalculated_slot, getKeysResult *keys_result)
+{
     clusterNode *myself = getMyClusterNode();
     clusterNode *n = NULL;
     robj *firstkey = NULL;
@@ -1145,9 +1147,19 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
         ms = &_ms;
         _ms.commands = &mcp;
         _ms.count = 1;
+
+        /* Properly initialize the fake pendingCommand */
+        initPendingCommand(&mc);
         mc.argv = argv;
-        mc.argc = argc;
         mc.cmd = cmd;
+        mc.keys_result = *keys_result;
+
+        /* Always extract keys for other logic, but use pre-calculated slot if provided */
+        if (keys_result->numkeys >= 0) {
+            if (precalculated_slot != CLUSTER_INVALID_SLOT) {
+                mc.slot = precalculated_slot;
+            }
+        }
     }
 
     /* Check that all the keys are in the same hash slot, and obtain this
@@ -1164,9 +1176,19 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
 
         /* Only valid for sharded pubsub as regular pubsub can operate on any node and bypasses this layer. */
         if (!pubsubshard_included &&
-            doesCommandHaveChannelsWithFlags(mcmd, CMD_CHANNEL_PUBLISH | CMD_CHANNEL_SUBSCRIBE))
+            doesCommandHaveChannelsWithFlags(mcmd, CMD_CHANNEL_PUBLISH | CMD_CHANNEL_SUBSCRIBE) &&
+            mcmd->key_specs_num > 0)
         {
             pubsubshard_included = 1;
+        }
+
+        /* If this command has keys/channels and we already have a slot,
+         * check if this command's slot matches */
+        if (pcmd->keys_result.numkeys > 0 && slot != CLUSTER_INVALID_SLOT && pcmd->slot != slot) {
+            /* Error: commands operate on keys from different slots */
+            if (error_code)
+                *error_code = CLUSTER_REDIR_CROSS_SLOT;
+            return NULL;
         }
 
         for (j = 0; j < pcmd->keys_result.numkeys; j++) {
@@ -1259,10 +1281,6 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
              * true and the command is not a write command */
         }
     }
-
-    /* Return the hashslot by reference. */
-    if (hashslot) *hashslot = slot;
-
     /* MIGRATE always works in the context of the local node if the slot
      * is open (migrating or importing state). We need to be able to freely
      * move keys among instances in this case. */

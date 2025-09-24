@@ -4043,7 +4043,8 @@ uint64_t getCommandFlags(client *c) {
     return cmd_flags;
 }
 
-void reprocessCommand(client *c, pendingCommand *pcmd) {
+void preprocessCommand(client *c, pendingCommand *pcmd) {
+    pcmd->slot = CLUSTER_INVALID_SLOT;
     if (pcmd->argc == 0)
         return;
 
@@ -4070,15 +4071,18 @@ void reprocessCommand(client *c, pendingCommand *pcmd) {
         /* We skip the checks below since We expect the command to be rejected in this case */
         return;
 
+    printf("getNodeByQuery preprocessCommand, %s, %d\n", pcmd->cmd->declared_name, pcmd->keys_result.numkeys);
     if (server.cluster_enabled) {
         robj **margv = pcmd->argv;
         for (int j = 0; j < pcmd->keys_result.numkeys; j++) {
             robj *thiskey = margv[pcmd->keys_result.keys[j].pos];
             int thisslot = (int)keyHashSlot((char*)thiskey->ptr, sdslen(thiskey->ptr));
 
-            if (pcmd->slot == CLUSTER_INVALID_SLOT)
+            if (pcmd->slot == CLUSTER_INVALID_SLOT) {
+                printf("preprocessCommand: 111111, thisslot: %d\n", thisslot);
                 pcmd->slot = thisslot;
-            else if (pcmd->slot != thisslot) {
+            } else if (pcmd->slot != thisslot) {
+                printf("preprocessCommand: 22222222\n");
                 serverLog(LL_NOTICE, "preprocessCommand: CROSS SLOT ERROR");
                 /* Invalidate the slot to indicate that there is a cross-slot error */
                 pcmd->slot = CLUSTER_INVALID_SLOT;
@@ -4230,8 +4234,9 @@ int processCommand(client *c) {
           c->cmd->proc != execCommand))
     {
         int error_code;
-        clusterNode *n = getNodeByQuery(c,c->cmd,c->argv,c->argc,
-                                        &c->slot,cmd_flags,&error_code);
+        getKeysResult* keys_result = &c->pending_cmds.head->keys_result;
+        clusterNode *n = getNodeByQuery(c,c->cmd,c->argv,
+                                        cmd_flags,&error_code,c->slot, keys_result);
         if (n == NULL || !clusterNodeIsMyself(n)) {
             if (c->cmd->proc == execCommand) {
                 discardTransaction(c);

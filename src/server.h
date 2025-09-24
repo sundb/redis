@@ -2353,7 +2353,7 @@ typedef struct pendingCommand {
     struct redisCommand *cmd;
     getKeysResult keys_result;
     long long reploff;         /* c->reploff should be set to this value when the command is processed */
-    int slot;         /* The slot the command is executing against. Set to INVALID_CLUSTER_SLOT if no slot is being used or if 
+    int slot;         /* The slot the command is executing against. Set to CLUSTER_INVALID_SLOT if no slot is being used or if 
                          the command has a cross slot error */
     uint8_t flags;
     int parsing_incomplete;
@@ -3365,7 +3365,7 @@ void updatePeakMemory(size_t used_memory);
 size_t freeMemoryGetNotCountedMemory(void);
 int overMaxmemoryAfterAlloc(size_t moremem);
 uint64_t getCommandFlags(client *c);
-void reprocessCommand(client *c, pendingCommand *pcmd);
+void preprocessCommand(client *c, pendingCommand *pcmd);
 int processCommand(client *c);
 void commandProcessed(client *c);
 void prepareForNextCommand(client *c);
@@ -3782,6 +3782,7 @@ int doesCommandHaveKeys(struct redisCommand *cmd);
 int getChannelsFromCommand(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result);
 int doesCommandHaveChannelsWithFlags(struct redisCommand *cmd, int flags);
 void getKeysFreeResult(getKeysResult *result);
+int extractKeysAndSlot(struct redisCommand *cmd, robj **argv, int argc, getKeysResult *result, int *slot);
 int sintercardGetKeys(struct redisCommand *cmd,robj **argv, int argc, getKeysResult *result);
 int zunionInterDiffGetKeys(struct redisCommand *cmd,robj **argv, int argc, getKeysResult *result);
 int zunionInterDiffStoreGetKeys(struct redisCommand *cmd,robj **argv, int argc, getKeysResult *result);
