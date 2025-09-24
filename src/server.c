@@ -4071,7 +4071,6 @@ void preprocessCommand(client *c, pendingCommand *pcmd) {
         /* We skip the checks below since We expect the command to be rejected in this case */
         return;
 
-    printf("getNodeByQuery preprocessCommand, %s, %d\n", pcmd->cmd->declared_name, pcmd->keys_result.numkeys);
     if (server.cluster_enabled) {
         robj **margv = pcmd->argv;
         for (int j = 0; j < pcmd->keys_result.numkeys; j++) {
