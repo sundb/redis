@@ -3371,8 +3371,8 @@ void commandProcessed(client *c);
 void prepareForNextCommand(client *c);
 
 /* Client command queue functions */
-void cmdQueueAddTail(pendingCommandList *queue, pendingCommand *cmd);
-pendingCommand *cmdQueueRemoveHead(pendingCommandList *queue);
+void addPengingCommand(pendingCommandList *queue, pendingCommand *cmd);
+pendingCommand *removePendingCommandFromHead(pendingCommandList *queue);
 int processPendingCommandAndInputBuffer(client *c);
 int processCommandAndResetClient(client *c);
 int areCommandKeysInSameSlot(client *c, int *hashslot);

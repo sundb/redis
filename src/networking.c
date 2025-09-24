@@ -38,7 +38,7 @@ __thread sds thread_reusable_qb = NULL;
 __thread int thread_reusable_qb_used = 0; /* Avoid multiple clients using reusable query
                                          * buffer due to nested command execution. */
 
-static int consumeCommandQueue(client *c);
+static int consumePendingCommand(client *c);
 static int parseMultibulk(client *c, pendingCommand *pcmd);
 
 /* COMMAND_QUEUE_MIN_CAPACITY no longer needed with linked list implementation */
@@ -1554,7 +1554,7 @@ void freeClientPendingCommands(client *c, int num_pcmds_to_free) {
         num_pcmds_to_free = c->pending_cmds.length;
 
     while (num_pcmds_to_free--) {
-        pendingCommand *pcmd = cmdQueueRemoveHead(&c->pending_cmds);
+        pendingCommand *pcmd = removePendingCommandFromHead(&c->pending_cmds);
         serverAssert(pcmd);
         freePendingCommand(c, pcmd);
     }
@@ -2961,7 +2961,7 @@ void parseInputBuffer(client *c) {
             int incomplete = c->pending_cmds.head && c->pending_cmds.head->flags == CLIENT_READ_PARSING_INCOMPLETED;
             if (unlikely(incomplete)) {
                 serverAssert(c->pending_cmds.length == 1);
-                pcmd = cmdQueueRemoveHead(&c->pending_cmds);
+                pcmd = removePendingCommandFromHead(&c->pending_cmds);
             } else {
                 pcmd = zmalloc(sizeof(pendingCommand));
                 initPendingCommand(pcmd);
@@ -2972,7 +2972,7 @@ void parseInputBuffer(client *c) {
             serverPanic("Unknown request type");
         }
 
-        cmdQueueAddTail(&c->pending_cmds, pcmd);
+        addPengingCommand(&c->pending_cmds, pcmd);
         if (!pcmd->flags) {
             pcmd->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
             reprocessCommand(c, pcmd);
@@ -3013,9 +3013,9 @@ int processInputBuffer(client *c) {
         if (c->flags & (CLIENT_CLOSE_AFTER_REPLY|CLIENT_CLOSE_ASAP)) break;
 
         /* If commands are queued up, pop from the queue first */
-        if (!consumeCommandQueue(c)) {
+        if (!consumePendingCommand(c)) {
             parseInputBuffer(c);
-            if (consumeCommandQueue(c) == 0) break;
+            if (consumePendingCommand(c) == 0) break;
 
             /* Prefetch the commands. */
             resetCommandsBatch();
@@ -4856,23 +4856,6 @@ void evictClients(void) {
     }
 }
 
-/* Pops a command from the command queue and sets it as the client's current
- * command. Returns true on success and false if the queue was empty. */
-static int consumeCommandQueue(client *c) {
-    pendingCommand *curcmd = c->pending_cmds.head;
-    if (!curcmd || curcmd->flags == CLIENT_READ_PARSING_INCOMPLETED) return 0;
-
-    /* We populate the old client fields so we don't have to modify all existing logic to work with pendingCommands */
-    c->argc = curcmd->argc;
-    c->argv = curcmd->argv;
-    c->argv_len = curcmd->argv_len;
-    c->reploff_next = curcmd->reploff;
-    c->slot = curcmd->slot;
-    c->parsed_cmd = curcmd->cmd;
-    c->read_error |= curcmd->flags;
-    return 1;
-}
-
 void initPendingCommand(pendingCommand *pcmd) {
     memset(pcmd, 0, sizeof(pendingCommand));
     pcmd->keys_result = (getKeysResult)GETKEYS_RESULT_INIT;
@@ -4895,4 +4878,55 @@ void freePendingCommand(client *c, pendingCommand *pcmd) {
     }
 
     zfree(pcmd);
+}
+
+/* Pops a command from the command queue and sets it as the client's current
+ * command. Returns true on success and false if the queue was empty. */
+static int consumePendingCommand(client *c) {
+    pendingCommand *curcmd = c->pending_cmds.head;
+    if (!curcmd || curcmd->flags == CLIENT_READ_PARSING_INCOMPLETED) return 0;
+
+    /* We populate the old client fields so we don't have to modify all existing logic to work with pendingCommands */
+    c->argc = curcmd->argc;
+    c->argv = curcmd->argv;
+    c->argv_len = curcmd->argv_len;
+    c->reploff_next = curcmd->reploff;
+    c->slot = curcmd->slot;
+    c->parsed_cmd = curcmd->cmd;
+    c->read_error |= curcmd->flags;
+    return 1;
+}
+
+/* Add a command to the tail of the queue */
+void addPengingCommand(pendingCommandList *queue, pendingCommand *cmd) {
+    cmd->next = NULL;
+    cmd->prev = queue->tail;
+
+    if (queue->tail) {
+        queue->tail->next = cmd;
+    } else {
+        /* Queue was empty */
+        queue->head = cmd;
+    }
+
+    queue->tail = cmd;
+    queue->length++;
+}
+
+pendingCommand *removePendingCommandFromHead(pendingCommandList *queue) {
+    pendingCommand *cmd = queue->head;
+    queue->head = cmd->next;
+
+    if (queue->head) {
+        queue->head->prev = NULL;
+    } else {
+        /* Queue is now empty */
+        queue->tail = NULL;
+    }
+
+    cmd->next = NULL;
+    cmd->prev = NULL;
+    queue->length--;
+
+    return cmd;
 }
