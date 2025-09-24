@@ -1655,10 +1655,6 @@ int loadSingleAppendOnlyFile(char *filename) {
              * since this is AOF, the checks in processCommand are not made
              * anyway.*/
             queueMultiCommand(fakeClient, cmd->flags);
-
-            /* Since freeClientPendingCommands doesn't get called in this flow to free the queued
-             * command, we do it manually. */
-            freeClientPendingCommands(fakeClient, 1);
         } else {
             cmd->proc(fakeClient);
             fakeClient->all_argv_len_sum = 0; /* Otherwise no one cleans this up and we reach cleanup with it non-zero */
