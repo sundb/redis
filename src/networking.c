@@ -169,12 +169,12 @@ client *createClient(connection *conn) {
     c->argv = NULL;
     c->argv_len = 0;
     c->all_argv_len_sum = 0;
+    c->pending_cmds.head = c->pending_cmds.tail = NULL;
+    c->pending_cmds.length = 0;
     c->original_argc = 0;
     c->original_argv = NULL;
     c->deferred_objects = NULL;
     c->deferred_objects_num = 0;
-    c->pending_cmds.head = c->pending_cmds.tail = NULL;
-    c->pending_cmds.length = 0;
     c->cmd = c->lastcmd = c->realcmd = NULL;
     c->cur_script = NULL;
     c->multibulklen = 0;
@@ -1659,6 +1659,12 @@ void unlinkClient(client *c) {
         c->flags &= ~CLIENT_UNBLOCKED;
     }
 
+    freeClientPendingCommands(c, -1);
+    c->argv_len = 0;
+    c->argv = NULL;
+    c->argc = 0;
+    c->cmd = NULL;
+
     /* Clear the tracking status. */
     if (c->flags & CLIENT_TRACKING) disableTracking(c);
 }
@@ -3033,6 +3039,8 @@ void parseInputBuffer(client *c) {
             pcmd->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
             reprocessCommand(c, pcmd);
             resetClientQbufState(c);
+        } else {
+            return;
         }
     }
 }

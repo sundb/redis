@@ -1349,6 +1349,7 @@ typedef struct client {
     int original_argc;      /* Num of arguments of original command if arguments were rewritten. */
     robj **original_argv;   /* Arguments of original command if arguments were rewritten. */
     size_t all_argv_len_sum;    /* Sum of lengths of objects in all pendingCommand argv lists */
+    pendingCommandList pending_cmds;  /* List of parsed pending commands */
     robj **deferred_objects;    /* Array of deferred objects to free. */
     int deferred_objects_num;   /* Number of deferred objects to free. */
     struct redisCommand *cmd, *lastcmd;  /* Last command executed. */
@@ -1406,7 +1407,6 @@ typedef struct client {
     multiState mstate;      /* MULTI/EXEC state */
     blockingState bstate;     /* blocking state */
     long long woff;         /* Last write global replication offset. */
-    pendingCommandList pending_cmds;  /* List of parsed pending commands */
     list *watched_keys;     /* Keys WATCHED for MULTI/EXEC CAS */
     dict *pubsub_channels;  /* channels a client is interested in (SUBSCRIBE) */
     dict *pubsub_patterns;  /* patterns a client is interested in (PSUBSCRIBE) */
