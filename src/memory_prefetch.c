@@ -386,7 +386,7 @@ int addCommandToBatch(client *c) {
 
     pendingCommand *pcmd = c->pending_cmds.head;
     while (pcmd != NULL) {
-        if (pcmd->flags == CLIENT_READ_PARSING_INCOMPLETED) break;
+        if (pcmd->parsing_incomplete) break;
         for (int i = 0; i < pcmd->keys_result.numkeys && batch->key_count < batch->max_prefetch_size; i++) {
             batch->keys[batch->key_count] = pcmd->argv[pcmd->keys_result.keys[i].pos];
             batch->keys_dicts[batch->key_count] =

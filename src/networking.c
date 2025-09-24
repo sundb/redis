@@ -2582,10 +2582,7 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
 
         c->qb_pos = (newline-c->querybuf)+2;
 
-        if (ll <= 0) {
-            pcmd->flags = 0;
-            return C_OK;
-        }
+        if (ll <= 0) return C_OK;
 
         c->multibulklen = ll;
         c->bulklen = -1;
@@ -2694,7 +2691,7 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
             /* Per-slot network bytes-in calculation, 2nd component. */
             c->net_input_bytes_curr_cmd += (bulklen_slen + 3);
         } else {
-            serverAssert(pcmd->flags == CLIENT_READ_PARSING_INCOMPLETED);
+            serverAssert(pcmd->parsing_incomplete);
         }
 
         /* Read bulk argument */
@@ -2744,12 +2741,12 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
     if (c->multibulklen == 0) {
         /* Per-slot network bytes-in calculation, 3rd and 4th components. */
         c->net_input_bytes_curr_cmd += (c->all_argv_len_sum + (c->argc * 2));
-        pcmd->flags = 0;
+        pcmd->parsing_incomplete = 0;
         return C_OK;
     }
 
     /* Still not ready to process the command */
-    pcmd->flags = CLIENT_READ_PARSING_INCOMPLETED;
+    pcmd->parsing_incomplete = 1;
     return C_OK;
 }
 
@@ -2958,7 +2955,7 @@ void parseInputBuffer(client *c) {
             initPendingCommand(pcmd);
             parseInlineBuffer(c, pcmd);
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
-            int incomplete = c->pending_cmds.head && c->pending_cmds.head->flags == CLIENT_READ_PARSING_INCOMPLETED;
+            int incomplete = c->pending_cmds.head && c->pending_cmds.head->parsing_incomplete;
             if (unlikely(incomplete)) {
                 serverAssert(c->pending_cmds.length == 1);
                 pcmd = removePendingCommandFromHead(&c->pending_cmds);
@@ -2973,12 +2970,13 @@ void parseInputBuffer(client *c) {
         }
 
         addPengingCommand(&c->pending_cmds, pcmd);
-        if (!pcmd->flags) {
+        if (unlikely(pcmd->flags || pcmd->parsing_incomplete))
+            break;
+
+        if (!pcmd->parsing_incomplete) {
             pcmd->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
             reprocessCommand(c, pcmd);
             resetClientQbufState(c);
-        } else {
-            return;
         }
     }
 }
@@ -4884,7 +4882,7 @@ void freePendingCommand(client *c, pendingCommand *pcmd) {
  * command. Returns true on success and false if the queue was empty. */
 static int consumePendingCommand(client *c) {
     pendingCommand *curcmd = c->pending_cmds.head;
-    if (!curcmd || curcmd->flags == CLIENT_READ_PARSING_INCOMPLETED) return 0;
+    if (!curcmd || curcmd->parsing_incomplete) return 0;
 
     /* We populate the old client fields so we don't have to modify all existing logic to work with pendingCommands */
     c->argc = curcmd->argc;
@@ -4893,7 +4891,7 @@ static int consumePendingCommand(client *c) {
     c->reploff_next = curcmd->reploff;
     c->slot = curcmd->slot;
     c->parsed_cmd = curcmd->cmd;
-    c->read_error |= curcmd->flags;
+    c->read_error = curcmd->flags;
     return 1;
 }
 
