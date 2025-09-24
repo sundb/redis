@@ -162,6 +162,7 @@ proc search_pattern_list {value pattern_list {glob_pattern false}} {
 }
 
 proc test {name code {okpattern undefined} {tags {}}} {
+    puts $name
     # abort if test name in skiptests
     if {[search_pattern_list $name $::skiptests]} {
         incr ::num_skipped

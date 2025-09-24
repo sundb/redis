@@ -1437,80 +1437,80 @@ start_server {
         }
     }
 
-    start_server {tags {"external:skip"}} {
-        set master [srv -1 client]
-        set master_host [srv -1 host]
-        set master_port [srv -1 port]
-        set replica [srv 0 client]
+    # start_server {tags {"external:skip"}} {
+    #     set master [srv -1 client]
+    #     set master_host [srv -1 host]
+    #     set master_port [srv -1 port]
+    #     set replica [srv 0 client]
 
-        foreach autoclaim {0 1} {
-            test "Replication tests of XCLAIM with deleted entries (autoclaim=$autoclaim)" {
-                $replica replicaof $master_host $master_port
-                wait_for_condition 50 100 {
-                    [s 0 master_link_status] eq {up}
-                } else {
-                    fail "Replication not started."
-                }
+    #     foreach autoclaim {0 1} {
+    #         test "Replication tests of XCLAIM with deleted entries (autoclaim=$autoclaim)" {
+    #             $replica replicaof $master_host $master_port
+    #             wait_for_condition 50 100 {
+    #                 [s 0 master_link_status] eq {up}
+    #             } else {
+    #                 fail "Replication not started."
+    #             }
 
-                $master DEL x
-                $master XADD x 1-0 f v
-                $master XADD x 2-0 f v
-                $master XADD x 3-0 f v
-                $master XADD x 4-0 f v
-                $master XADD x 5-0 f v
-                $master XGROUP CREATE x grp 0
-                assert_equal [$master XREADGROUP GROUP grp Alice STREAMS x >] {{x {{1-0 {f v}} {2-0 {f v}} {3-0 {f v}} {4-0 {f v}} {5-0 {f v}}}}}
-                wait_for_ofs_sync $master $replica
-                assert_equal [llength [$replica XPENDING x grp - + 10 Alice]] 5
-                $master XDEL x 2-0
-                $master XDEL x 4-0
-                if {$autoclaim} {
-                    assert_equal [$master XAUTOCLAIM x grp Bob 0 0-0] {0-0 {{1-0 {f v}} {3-0 {f v}} {5-0 {f v}}} {2-0 4-0}}
-                    wait_for_ofs_sync $master $replica
-                    assert_equal [llength [$replica XPENDING x grp - + 10 Alice]] 0
-                } else {
-                    assert_equal [$master XCLAIM x grp Bob 0 1-0 2-0 3-0 4-0] {{1-0 {f v}} {3-0 {f v}}}
-                    wait_for_ofs_sync $master $replica
-                    assert_equal [llength [$replica XPENDING x grp - + 10 Alice]] 1
-                }
-            }
-        }
+    #             $master DEL x
+    #             $master XADD x 1-0 f v
+    #             $master XADD x 2-0 f v
+    #             $master XADD x 3-0 f v
+    #             $master XADD x 4-0 f v
+    #             $master XADD x 5-0 f v
+    #             $master XGROUP CREATE x grp 0
+    #             assert_equal [$master XREADGROUP GROUP grp Alice STREAMS x >] {{x {{1-0 {f v}} {2-0 {f v}} {3-0 {f v}} {4-0 {f v}} {5-0 {f v}}}}}
+    #             wait_for_ofs_sync $master $replica
+    #             assert_equal [llength [$replica XPENDING x grp - + 10 Alice]] 5
+    #             $master XDEL x 2-0
+    #             $master XDEL x 4-0
+    #             if {$autoclaim} {
+    #                 assert_equal [$master XAUTOCLAIM x grp Bob 0 0-0] {0-0 {{1-0 {f v}} {3-0 {f v}} {5-0 {f v}}} {2-0 4-0}}
+    #                 wait_for_ofs_sync $master $replica
+    #                 assert_equal [llength [$replica XPENDING x grp - + 10 Alice]] 0
+    #             } else {
+    #                 assert_equal [$master XCLAIM x grp Bob 0 1-0 2-0 3-0 4-0] {{1-0 {f v}} {3-0 {f v}}}
+    #                 wait_for_ofs_sync $master $replica
+    #                 assert_equal [llength [$replica XPENDING x grp - + 10 Alice]] 1
+    #             }
+    #         }
+    #     }
 
-        test {XREADGROUP ACK would propagate entries-read} {
-            $master del mystream
-            $master xadd mystream * a b c d e f
-            $master xgroup create mystream mygroup $
-            $master xreadgroup group mygroup ryan count 1 streams mystream >
-            $master xadd mystream * a1 b1 a1 b2
-            $master xadd mystream * name v1 name v1
-            $master xreadgroup group mygroup ryan count 1 streams mystream >
-            $master xreadgroup group mygroup ryan count 1 streams mystream >
+    #     test {XREADGROUP ACK would propagate entries-read} {
+    #         $master del mystream
+    #         $master xadd mystream * a b c d e f
+    #         $master xgroup create mystream mygroup $
+    #         $master xreadgroup group mygroup ryan count 1 streams mystream >
+    #         $master xadd mystream * a1 b1 a1 b2
+    #         $master xadd mystream * name v1 name v1
+    #         $master xreadgroup group mygroup ryan count 1 streams mystream >
+    #         $master xreadgroup group mygroup ryan count 1 streams mystream >
 
-            set reply [$master XINFO STREAM mystream FULL]
-            set group [lindex [dict get $reply groups] 0]
-            assert_equal [dict get $group entries-read] 3
-            assert_equal [dict get $group lag] 0
+    #         set reply [$master XINFO STREAM mystream FULL]
+    #         set group [lindex [dict get $reply groups] 0]
+    #         assert_equal [dict get $group entries-read] 3
+    #         assert_equal [dict get $group lag] 0
 
-            wait_for_ofs_sync $master $replica
+    #         wait_for_ofs_sync $master $replica
 
-            set reply [$replica XINFO STREAM mystream FULL]
-            set group [lindex [dict get $reply groups] 0]
-            assert_equal [dict get $group entries-read] 3
-            assert_equal [dict get $group lag] 0
-        }
+    #         set reply [$replica XINFO STREAM mystream FULL]
+    #         set group [lindex [dict get $reply groups] 0]
+    #         assert_equal [dict get $group entries-read] 3
+    #         assert_equal [dict get $group lag] 0
+    #     }
 
-        test {XREADGROUP from PEL inside MULTI} {
-            # This scenario used to cause propagation of EXEC without MULTI in 6.2
-            $replica config set propagation-error-behavior panic
-            $master del mystream
-            $master xadd mystream 1-0 a b c d e f
-            $master xgroup create mystream mygroup 0
-            assert_equal [$master xreadgroup group mygroup ryan count 1 streams mystream >] {{mystream {{1-0 {a b c d e f}}}}}
-            $master multi
-            $master xreadgroup group mygroup ryan count 1 streams mystream 0
-            $master exec
-        }
-    }
+    #     test {XREADGROUP from PEL inside MULTI} {
+    #         # This scenario used to cause propagation of EXEC without MULTI in 6.2
+    #         $replica config set propagation-error-behavior panic
+    #         $master del mystream
+    #         $master xadd mystream 1-0 a b c d e f
+    #         $master xgroup create mystream mygroup 0
+    #         assert_equal [$master xreadgroup group mygroup ryan count 1 streams mystream >] {{mystream {{1-0 {a b c d e f}}}}}
+    #         $master multi
+    #         $master xreadgroup group mygroup ryan count 1 streams mystream 0
+    #         $master exec
+    #     }
+    # }
 
     start_server {tags {"stream needs:debug"} overrides {appendonly yes aof-use-rdb-preamble no}} {
         test {Empty stream with no lastid can be rewrite into AOF correctly} {

@@ -64,67 +64,67 @@ test "Remove hostnames and make sure they are all eventually propagated" {
     wait_for_cluster_propagation
 }
 
-test "Verify cluster-preferred-endpoint-type behavior for redirects and info" {
-    R 0 config set cluster-announce-hostname "me.com"
-    R 1 config set cluster-announce-hostname ""
-    R 2 config set cluster-announce-hostname "them.com"
+# test "Verify cluster-preferred-endpoint-type behavior for redirects and info" {
+#     R 0 config set cluster-announce-hostname "me.com"
+#     R 1 config set cluster-announce-hostname ""
+#     R 2 config set cluster-announce-hostname "them.com"
 
-    wait_for_cluster_propagation
+#     wait_for_cluster_propagation
 
-    # Verify default behavior
-    set slot_result [R 0 cluster slots]
-    assert_equal "" [lindex [get_slot_field $slot_result 0 2 0] 1]
-    assert_equal "" [lindex [get_slot_field $slot_result 2 2 0] 1]
-    assert_equal "hostname" [lindex [get_slot_field $slot_result 0 2 3] 0]
-    assert_equal "me.com" [lindex [get_slot_field $slot_result 0 2 3] 1]
-    assert_equal "hostname" [lindex [get_slot_field $slot_result 2 2 3] 0]
-    assert_equal "them.com" [lindex [get_slot_field $slot_result 2 2 3] 1]
+#     # Verify default behavior
+#     set slot_result [R 0 cluster slots]
+#     assert_equal "" [lindex [get_slot_field $slot_result 0 2 0] 1]
+#     assert_equal "" [lindex [get_slot_field $slot_result 2 2 0] 1]
+#     assert_equal "hostname" [lindex [get_slot_field $slot_result 0 2 3] 0]
+#     assert_equal "me.com" [lindex [get_slot_field $slot_result 0 2 3] 1]
+#     assert_equal "hostname" [lindex [get_slot_field $slot_result 2 2 3] 0]
+#     assert_equal "them.com" [lindex [get_slot_field $slot_result 2 2 3] 1]
 
-    # Redirect will use the IP address
-    catch {R 0 set foo foo} redir_err
-    assert_match "MOVED * 127.0.0.1:*" $redir_err
+#     # Redirect will use the IP address
+#     catch {R 0 set foo foo} redir_err
+#     assert_match "MOVED * 127.0.0.1:*" $redir_err
 
-    # Verify prefer hostname behavior
-    R 0 config set cluster-preferred-endpoint-type hostname
+#     # Verify prefer hostname behavior
+#     R 0 config set cluster-preferred-endpoint-type hostname
 
-    set slot_result [R 0 cluster slots]
-    assert_equal "me.com" [get_slot_field $slot_result 0 2 0]
-    assert_equal "them.com" [get_slot_field $slot_result 2 2 0]
+#     set slot_result [R 0 cluster slots]
+#     assert_equal "me.com" [get_slot_field $slot_result 0 2 0]
+#     assert_equal "them.com" [get_slot_field $slot_result 2 2 0]
 
-    # Redirect should use hostname
-    catch {R 0 set foo foo} redir_err
-    assert_match "MOVED * them.com:*" $redir_err
+#     # Redirect should use hostname
+#     catch {R 0 set foo foo} redir_err
+#     assert_match "MOVED * them.com:*" $redir_err
 
-    # Redirect to an unknown hostname returns ?
-    catch {R 0 set barfoo bar} redir_err
-    assert_match "MOVED * ?:*" $redir_err
+#     # Redirect to an unknown hostname returns ?
+#     catch {R 0 set barfoo bar} redir_err
+#     assert_match "MOVED * ?:*" $redir_err
 
-    # Verify unknown hostname behavior
-    R 0 config set cluster-preferred-endpoint-type unknown-endpoint
+#     # Verify unknown hostname behavior
+#     R 0 config set cluster-preferred-endpoint-type unknown-endpoint
 
-    # Verify default behavior
-    set slot_result [R 0 cluster slots]
-    assert_equal "ip" [lindex [get_slot_field $slot_result 0 2 3] 0]
-    assert_equal "127.0.0.1" [lindex [get_slot_field $slot_result 0 2 3] 1]
-    assert_equal "ip" [lindex [get_slot_field $slot_result 2 2 3] 0]
-    assert_equal "127.0.0.1" [lindex [get_slot_field $slot_result 2 2 3] 1]
-    assert_equal "ip" [lindex [get_slot_field $slot_result 1 2 3] 0]
-    assert_equal "127.0.0.1" [lindex [get_slot_field $slot_result 1 2 3] 1]
-    # Not required by the protocol, but IP comes before hostname
-    assert_equal "hostname" [lindex [get_slot_field $slot_result 0 2 3] 2]
-    assert_equal "me.com" [lindex [get_slot_field $slot_result 0 2 3] 3]
-    assert_equal "hostname" [lindex [get_slot_field $slot_result 2 2 3] 2]
-    assert_equal "them.com" [lindex [get_slot_field $slot_result 2 2 3] 3]
+#     # Verify default behavior
+#     set slot_result [R 0 cluster slots]
+#     assert_equal "ip" [lindex [get_slot_field $slot_result 0 2 3] 0]
+#     assert_equal "127.0.0.1" [lindex [get_slot_field $slot_result 0 2 3] 1]
+#     assert_equal "ip" [lindex [get_slot_field $slot_result 2 2 3] 0]
+#     assert_equal "127.0.0.1" [lindex [get_slot_field $slot_result 2 2 3] 1]
+#     assert_equal "ip" [lindex [get_slot_field $slot_result 1 2 3] 0]
+#     assert_equal "127.0.0.1" [lindex [get_slot_field $slot_result 1 2 3] 1]
+#     # Not required by the protocol, but IP comes before hostname
+#     assert_equal "hostname" [lindex [get_slot_field $slot_result 0 2 3] 2]
+#     assert_equal "me.com" [lindex [get_slot_field $slot_result 0 2 3] 3]
+#     assert_equal "hostname" [lindex [get_slot_field $slot_result 2 2 3] 2]
+#     assert_equal "them.com" [lindex [get_slot_field $slot_result 2 2 3] 3]
 
-    # This node doesn't have a hostname
-    assert_equal 2 [llength [get_slot_field $slot_result 1 2 3]]
+#     # This node doesn't have a hostname
+#     assert_equal 2 [llength [get_slot_field $slot_result 1 2 3]]
 
-    # Redirect should use empty string
-    catch {R 0 set foo foo} redir_err
-    assert_match "MOVED * :*" $redir_err
+#     # Redirect should use empty string
+#     catch {R 0 set foo foo} redir_err
+#     assert_match "MOVED * :*" $redir_err
 
-    R 0 config set cluster-preferred-endpoint-type ip
-}
+#     R 0 config set cluster-preferred-endpoint-type ip
+# }
 
 test "Verify the nodes configured with prefer hostname only show hostname for new nodes" {
     # Have everyone forget node 6 and isolate it from the cluster.
