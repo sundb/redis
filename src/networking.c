@@ -2953,7 +2953,12 @@ void parseInputBuffer(client *c) {
         if (c->reqtype == PROTO_REQ_INLINE) {
             pcmd = zmalloc(sizeof(pendingCommand));
             initPendingCommand(pcmd);
-            parseInlineBuffer(c, pcmd);
+            if (parseInlineBuffer(c, pcmd) == C_ERR && !pcmd->flags) {
+                /* If it fails but there are no errors, it means that it might just be
+                 * that the desired content cannot be parsed. At this point, we exit and wait for the next time. */
+                freePendingCommand(c, pcmd);
+                return;
+            }
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
             int incomplete = c->pending_cmds.head && c->pending_cmds.head->parsing_incomplete;
             if (unlikely(incomplete)) {
@@ -2964,7 +2969,12 @@ void parseInputBuffer(client *c) {
                 initPendingCommand(pcmd);
             }
 
-            parseMultibulk(c, pcmd);
+            if (parseMultibulk(c, pcmd) == C_ERR && !pcmd->flags) {
+                /* If it fails but there are no errors, it means that it might just be
+                 * that the desired content cannot be parsed. At this point, we exit and wait for the next time. */
+                freePendingCommand(c, pcmd);
+                return;
+            }
         } else {
             serverPanic("Unknown request type");
         }
