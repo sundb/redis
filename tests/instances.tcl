@@ -413,7 +413,6 @@ proc pause_on_error {} {
 # We redefine 'test' as for Sentinel we don't use the server-client
 # architecture for the test, everything is sequential.
 proc test {descr code} {
-    puts descr
     set ts [clock format [clock seconds] -format %H:%M:%S]
     puts -nonewline "$ts> $descr: "
     flush stdout
