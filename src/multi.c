@@ -53,6 +53,7 @@ void queueMultiCommand(client *c, uint64_t cmd_flags) {
      * We leave the empty list node in 'pending_cmds' for freeClientPendingCommands to clean up
      * later, but set the value to NULL to indicate it has been moved out and should not be freed. */
     pendingCommand *pcmd = removePendingCommandFromHead(&c->pending_cmds);
+    c->current_pending_cmd = NULL;
     pendingCommand **mc = c->mstate.commands + c->mstate.count;
     *mc = pcmd;
 

@@ -171,6 +171,7 @@ client *createClient(connection *conn) {
     c->all_argv_len_sum = 0;
     c->pending_cmds.head = c->pending_cmds.tail = NULL;
     c->pending_cmds.length = 0;
+    c->current_pending_cmd = NULL;
     c->original_argc = 0;
     c->original_argv = NULL;
     c->deferred_objects = NULL;
@@ -2324,10 +2325,11 @@ static inline void resetClientInternal(client *c, int num_pcmds_to_free) {
 
     /* We may get here with no pending commands but with an argv that needs freeing.
      * An example is in the case of modules (RM_Call) */
-    if (c->pending_cmds.length > 0) {
+    if (c->current_pending_cmd) {
         freeClientPendingCommands(c, num_pcmds_to_free);
         if (c->pending_cmds.length == 0)
             serverAssert(c->all_argv_len_sum == 0);
+        c->current_pending_cmd = NULL;
     } else if (c->argv) {
         freeClientArgvInternal(c, 1 /* free_argv */);
         /* If we're dealing with a client that doesn't create pendingCommand structs (e.g.: a Lua client),
@@ -4902,6 +4904,7 @@ static int consumePendingCommand(client *c) {
     c->slot = curcmd->slot;
     c->parsed_cmd = curcmd->cmd;
     c->read_error = curcmd->flags;
+    c->current_pending_cmd = curcmd;
     return 1;
 }
 
