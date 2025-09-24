@@ -2346,7 +2346,7 @@ typedef struct {
 #define GETKEYS_RESULT_INIT { 0, MAX_KEYS_BUFFER, {{0}}, NULL }
 
 /* Parser state and parse result of a command from a client's input buffer. */
-typedef struct pendingCommand {
+struct pendingCommand {
     int argc;                 /* Num of arguments of current command. */
     int argv_len;             /* Size of argv array (may be more than argc) */
     robj **argv;              /* Arguments of current command. */
@@ -2361,7 +2361,7 @@ typedef struct pendingCommand {
 
     struct pendingCommand *next;
     struct pendingCommand *prev;
-} pendingCommand;
+};
 
 /* Key specs definitions.
  *
