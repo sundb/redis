@@ -2335,8 +2335,8 @@ static inline void resetClientInternal(client *c, int num_pcmds_to_free) {
         c->all_argv_len_sum = 0;
     }
 
-        c->argc = 0;
-        c->cmd = NULL;
+    c->argc = 0;
+    c->cmd = NULL;
     c->argv_len = 0;
     c->argv = NULL;
     c->cur_script = NULL;
