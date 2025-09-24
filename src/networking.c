@@ -2478,6 +2478,7 @@ int parseInlineBuffer(client *c, pendingCommand *pcmd) {
 
     /* Setup argv array on client structure */
     if (argc) {
+        zfree(pcmd->argv);
         pcmd->argv = zmalloc(sizeof(robj*)*argc);
         pcmd->argv_len = argc;
         pcmd->argv_len_sum = 0;
@@ -2506,7 +2507,6 @@ int parseInlineBuffer(client *c, pendingCommand *pcmd) {
      * Inline) SET key value\r\n
      */
     c->net_input_bytes_curr_cmd = (c->all_argv_len_sum + (c->argc - 1) + 2);
-    c->reqtype = 0;
 
     return C_OK;
 }
@@ -2744,7 +2744,6 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
     if (c->multibulklen == 0) {
         /* Per-slot network bytes-in calculation, 3rd and 4th components. */
         c->net_input_bytes_curr_cmd += (c->all_argv_len_sum + (c->argc * 2));
-        c->reqtype = 0;
         pcmd->flags = 0;
         return C_OK;
     }
@@ -2752,57 +2751,6 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
     /* Still not ready to process the command */
     pcmd->flags = CLIENT_READ_PARSING_INCOMPLETED;
     return C_OK;
-}
-
-/* Process the query buffer for client 'c', setting up the client argument
- * vector for command execution. Returns C_OK if after running the function
- * the client has a well-formed ready to be processed command, otherwise
- * C_ERR if there is still to read more buffer to get the full command.
- * The function also returns C_ERR when there is a protocol error: in such a
- * case the client structure is setup to reply with the error and close
- * the connection.
- *
- * This function is called if processInputBuffer() detects that the next
- * command is in RESP format, so the first byte in the command is found
- * to be '*'. Otherwise for inline commands processInlineBuffer() is called. */
-static inline void parseMultibulkBuffer(client *c) {
-    pendingCommandList *queue = &c->pending_cmds;
-
-    /* We limit the lookahead for unauthenticated connections to 1.
-     * This is both to reduce memory overhead, and to prevent errors: AUTH can
-     * affect the handling of succeeding commands. Parsing of "large"
-     * unauthenticated multibulk commands is rejected, which would cause those
-     * commands to incorrectly return an error to the client. */
-    const int lookahead = authRequired(c) ? 1 : server.lookahead;
-
-    /* Process existing incomplete command if any. */
-    pendingCommand *head = queue->head;
-    if (head) {
-        serverAssert(queue->length == 1 && head->flags & CLIENT_READ_PARSING_INCOMPLETED);
-        parseMultibulk(c, head);
-        if (unlikely(head->flags == CLIENT_READ_PARSING_INCOMPLETED))
-            return;
-        head->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
-        resetClientQbufState(c);
-    }
-
-    while (sdslen(c->querybuf) > c->qb_pos &&
-           c->querybuf[c->qb_pos] == '*' &&
-           c->pending_cmds.length < lookahead)
-    {
-        c->reqtype = PROTO_REQ_MULTIBULK;
-        pendingCommand *pcmd = zmalloc(sizeof(pendingCommand));
-        initPendingCommand(pcmd);
-        if (unlikely(parseMultibulk(c, pcmd) == C_ERR)) {
-            freePendingCommand(c, pcmd);
-            break;
-        }
-        pcmd->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
-        cmdQueueAddTail(queue, pcmd);
-        if (unlikely(pcmd->flags == CLIENT_READ_PARSING_INCOMPLETED))
-            return;
-        resetClientQbufState(c);
-    }
 }
 
 /* Prepare the client for executing the next command:
@@ -3013,12 +2961,11 @@ void parseInputBuffer(client *c) {
                 freePendingCommand(c, pcmd);
                 break;
             }
-            cmdQueueAddTail(&c->pending_cmds, pcmd);
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
-            int incomplete = c->pending_cmds.tail && c->pending_cmds.tail->flags == CLIENT_READ_PARSING_INCOMPLETED;
+            int incomplete = c->pending_cmds.head && c->pending_cmds.head->flags == CLIENT_READ_PARSING_INCOMPLETED;
             if (unlikely(incomplete)) {
                 serverAssert(c->pending_cmds.length == 1);
-                pcmd = c->pending_cmds.tail;
+                pcmd = cmdQueueRemoveHead(&c->pending_cmds);
             } else {
                 pcmd = zmalloc(sizeof(pendingCommand));
                 initPendingCommand(pcmd);
@@ -3028,13 +2975,11 @@ void parseInputBuffer(client *c) {
                 freePendingCommand(c, pcmd);
                 break;
             }
-
-            if (!incomplete)
-                cmdQueueAddTail(&c->pending_cmds, pcmd);
         } else {
             serverPanic("Unknown request type");
         }
 
+        cmdQueueAddTail(&c->pending_cmds, pcmd);
         if (!pcmd->flags) {
             pcmd->reploff = c->read_reploff - sdslen(c->querybuf) + c->qb_pos;
             reprocessCommand(c, pcmd);
@@ -3130,6 +3075,7 @@ int processInputBuffer(client *c) {
          * so the repl_applied is not equal to qb_pos. */
         if (c->repl_applied) {
             sdsrange(c->querybuf,c->repl_applied,-1);
+            serverAssert(c->qb_pos >= (size_t)c->repl_applied);
             c->qb_pos -= c->repl_applied;
             c->repl_applied = 0;
         }
@@ -3272,7 +3218,7 @@ void readQueryFromClient(connection *conn) {
          c = NULL;
 
 done:
-    if (c && c->read_error && c->read_error != CLIENT_READ_PARSING_INCOMPLETED) {
+    if (c && c->read_error) {
         if (c->running_tid == IOTHREAD_MAIN_THREAD_ID) {
             handleClientReadError(c);
         }
