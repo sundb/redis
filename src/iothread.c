@@ -719,11 +719,6 @@ void *IOThreadMain(void *ptr) {
 
 /* Initialize the data structures needed for threaded I/O. */
 void initThreadedIO(void) {
-    /* IO Threads are incompatible with ROF code due to the Look-Ahead feature. */
-    serverLog(LL_WARNING, "ROF with Look-Ahead is incompatible with IOThreads."
-                          "Exiting without initializing IOThreads support.");
-    return;
-
     if (server.io_threads_num <= 1) return;
 
     server.io_threads_active = 1;

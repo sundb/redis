@@ -3027,10 +3027,12 @@ int processInputBuffer(client *c) {
             parseInputBuffer(c);
             if (consumePendingCommand(c) == 0) break;
 
-            /* Prefetch the commands. */
-            resetCommandsBatch();
-            addCommandToBatch(c);
-            prefetchCommands();
+            if (c->running_tid == IOTHREAD_MAIN_THREAD_ID) {
+                /* Prefetch the commands. */
+                resetCommandsBatch();
+                addCommandToBatch(c);
+                prefetchCommands();
+            }
         }
 
         if (c->read_error) {
