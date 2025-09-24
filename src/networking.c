@@ -2956,11 +2956,7 @@ void parseInputBuffer(client *c) {
         if (c->reqtype == PROTO_REQ_INLINE) {
             pcmd = zmalloc(sizeof(pendingCommand));
             initPendingCommand(pcmd);
-
-            if (parseInlineBuffer(c, pcmd) != C_OK) {
-                freePendingCommand(c, pcmd);
-                break;
-            }
+            parseInlineBuffer(c, pcmd);
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
             int incomplete = c->pending_cmds.head && c->pending_cmds.head->flags == CLIENT_READ_PARSING_INCOMPLETED;
             if (unlikely(incomplete)) {
@@ -2971,10 +2967,7 @@ void parseInputBuffer(client *c) {
                 initPendingCommand(pcmd);
             }
 
-            if (unlikely(parseMultibulk(c, pcmd) != C_OK)) {
-                freePendingCommand(c, pcmd);
-                break;
-            }
+            parseMultibulk(c, pcmd);
         } else {
             serverPanic("Unknown request type");
         }
@@ -3028,6 +3021,10 @@ int processInputBuffer(client *c) {
             resetCommandsBatch();
             addCommandToBatch(c);
             prefetchCommands();
+        }
+
+        if (c->read_error) {
+            break;
         }
 
         if (c->running_tid != IOTHREAD_MAIN_THREAD_ID && c->read_error) {
@@ -4863,7 +4860,7 @@ void evictClients(void) {
  * command. Returns true on success and false if the queue was empty. */
 static int consumeCommandQueue(client *c) {
     pendingCommand *curcmd = c->pending_cmds.head;
-    if (!curcmd || curcmd->flags & CLIENT_READ_PARSING_INCOMPLETED) return 0;
+    if (!curcmd || curcmd->flags == CLIENT_READ_PARSING_INCOMPLETED) return 0;
 
     /* We populate the old client fields so we don't have to modify all existing logic to work with pendingCommands */
     c->argc = curcmd->argc;
