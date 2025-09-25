@@ -2760,7 +2760,6 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
  */
 void prepareForNextCommand(client *c) {
     reqresAppendResponse(c);
-    clusterSlotStatsAddNetworkBytesInForUserClient(c);
     resetClientInternal(c, 1);
 }
 
@@ -2779,6 +2778,7 @@ void commandProcessed(client *c) {
      *    since we have not applied the command. */
     if (c->flags & CLIENT_BLOCKED) return;
 
+    clusterSlotStatsAddNetworkBytesInForUserClient(c);
     prepareForNextCommand(c);
 
     long long prev_offset = c->reploff;
