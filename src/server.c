@@ -4066,30 +4066,11 @@ void preprocessCommand(client *c, pendingCommand *pcmd) {
     }
 
     pcmd->keys_result = (getKeysResult)GETKEYS_RESULT_INIT;
-    int num_keys = getKeysFromCommandWithSpecs(pcmd->cmd, pcmd->argv, pcmd->argc, GET_KEYSPEC_DEFAULT, &pcmd->keys_result);
+    int num_keys = extractKeysAndSlot(pcmd->cmd, pcmd->argv, pcmd->argc,
+                                      &pcmd->keys_result, &pcmd->slot);
     if (num_keys < 0)
         /* We skip the checks below since We expect the command to be rejected in this case */
         return;
-
-    if (server.cluster_enabled) {
-        robj **margv = pcmd->argv;
-        for (int j = 0; j < pcmd->keys_result.numkeys; j++) {
-            robj *thiskey = margv[pcmd->keys_result.keys[j].pos];
-            int thisslot = (int)keyHashSlot((char*)thiskey->ptr, sdslen(thiskey->ptr));
-
-            if (pcmd->slot == CLUSTER_INVALID_SLOT) {
-                printf("preprocessCommand: 111111, thisslot: %d\n", thisslot);
-                pcmd->slot = thisslot;
-            } else if (pcmd->slot != thisslot) {
-                printf("preprocessCommand: 22222222\n");
-                serverLog(LL_NOTICE, "preprocessCommand: CROSS SLOT ERROR");
-                /* Invalidate the slot to indicate that there is a cross-slot error */
-                pcmd->slot = CLUSTER_INVALID_SLOT;
-                /* Cross slot error. */
-                return;
-            }
-        }
-    }
 }
 
 /* If this function gets called we already read a whole
