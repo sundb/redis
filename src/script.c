@@ -490,7 +490,7 @@ static int scriptVerifyClusterState(scriptRunCtx *run_ctx, client *c, client *or
     getKeysResult keys_result = GETKEYS_RESULT_INIT;
     extractKeysAndSlot(c->cmd, c->argv, c->argc,
                       &keys_result, &hashslot);
-    if (getNodeByQuery(c, c->cmd, c->argv, cmd_flags, &error_code, hashslot, &keys_result) != getMyClusterNode()) {
+    if (getNodeByQuery(c, c->cmd, c->argv, cmd_flags, &error_code, &hashslot, &keys_result) != getMyClusterNode()) {
         if (error_code == CLUSTER_REDIR_DOWN_RO_STATE) {
             *err = sdsnew(
                     "Script attempted to execute a write command while the "

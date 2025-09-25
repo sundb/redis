@@ -2351,6 +2351,7 @@ struct pendingCommand {
     int argv_len;             /* Size of argv array (may be more than argc) */
     robj **argv;              /* Arguments of current command. */
     size_t argv_len_sum;      /* Sum of lengths of objects in argv list. */
+    unsigned long long input_bytes;
     struct redisCommand *cmd;
     getKeysResult keys_result;
     long long reploff;         /* c->reploff should be set to this value when the command is processed */

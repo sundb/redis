@@ -1108,7 +1108,7 @@ void clusterCommand(client *c) {
  * CLUSTER_REDIR_DOWN_STATE and CLUSTER_REDIR_DOWN_RO_STATE if the cluster is
  * down but the user attempts to execute a command that addresses one or more keys. */
 clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv,
-    uint64_t cmd_flags, int *error_code, int precalculated_slot, getKeysResult *keys_result)
+    uint64_t cmd_flags, int *error_code, int *precalculated_slot, getKeysResult *keys_result)
 {
     clusterNode *myself = getMyClusterNode();
     clusterNode *n = NULL;
@@ -1156,8 +1156,8 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv,
 
         /* Always extract keys for other logic, but use pre-calculated slot if provided */
         if (keys_result->numkeys >= 0) {
-            if (precalculated_slot != CLUSTER_INVALID_SLOT) {
-                mc.slot = precalculated_slot;
+            if (*precalculated_slot != CLUSTER_INVALID_SLOT) {
+                mc.slot = *precalculated_slot;
             }
         }
     }
@@ -1281,6 +1281,10 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv,
              * true and the command is not a write command */
         }
     }
+
+    /* Return the hashslot by reference. */
+    if (precalculated_slot) *precalculated_slot = slot;
+
     /* MIGRATE always works in the context of the local node if the slot
      * is open (migrating or importing state). We need to be able to freely
      * move keys among instances in this case. */

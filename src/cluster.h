@@ -150,7 +150,7 @@ int getSlotOrReply(client *c, robj *o);
 
 /* functions with shared implementations */
 clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv,
-    uint64_t cmd_flags, int *error_code, int precalculated_slot, getKeysResult *keys_result);
+    uint64_t cmd_flags, int *error_code, int *precalculated_slot, getKeysResult *keys_result);
 int clusterRedirectBlockedClientIfNeeded(client *c);
 void clusterRedirectClient(client *c, clusterNode *n, int hashslot, int error_code);
 void migrateCloseTimedoutSockets(void);

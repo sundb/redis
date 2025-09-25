@@ -6662,7 +6662,7 @@ RedisModuleCallReply *RM_Call(RedisModuleCtx *ctx, const char *cmdname, const ch
         getKeysResult keys_result = GETKEYS_RESULT_INIT;
         extractKeysAndSlot(c->cmd, c->argv, c->argc,
                           &keys_result, &hashslot);
-        if (getNodeByQuery(c,c->cmd,c->argv,cmd_flags,&error_code,hashslot, &keys_result) !=
+        if (getNodeByQuery(c,c->cmd,c->argv,cmd_flags,&error_code,&hashslot, &keys_result) !=
                            getMyClusterNode())
         {
             sds msg = NULL;

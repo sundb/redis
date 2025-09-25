@@ -4216,7 +4216,7 @@ int processCommand(client *c) {
         int error_code;
         getKeysResult* keys_result = &c->pending_cmds.head->keys_result;
         clusterNode *n = getNodeByQuery(c,c->cmd,c->argv,
-                                        cmd_flags,&error_code,c->slot, keys_result);
+                                        cmd_flags,&error_code,&c->slot, keys_result);
         if (n == NULL || !clusterNodeIsMyself(n)) {
             if (c->cmd->proc == execCommand) {
                 discardTransaction(c);
