@@ -41,6 +41,7 @@ __thread int thread_reusable_qb_used = 0; /* Avoid multiple clients using reusab
 static int consumePendingCommand(client *c);
 static void discardCommandQueue(client *c);
 static int parseMultibulk(client *c, pendingCommand *pcmd);
+static void freePendingCommandForList(void *ptr);
 
 /* COMMAND_QUEUE_MIN_CAPACITY no longer needed with linked list implementation */
 
@@ -170,8 +171,8 @@ client *createClient(connection *conn) {
     c->argv = NULL;
     c->argv_len = 0;
     c->argv_len_sum = 0;
-    c->pending_cmds.head = c->pending_cmds.tail = NULL;
-    c->pending_cmds.length = 0;
+    c->pending_cmds = listCreate();
+    listSetFreeMethod(c->pending_cmds, freePendingCommandForList);
     c->original_argc = 0;
     c->original_argv = NULL;
     c->deferred_objects = NULL;
@@ -2811,7 +2812,7 @@ int processPendingCommandAndInputBuffer(client *c) {
      * Note: when a master client steps into this function,
      * it can always satisfy this condition, because its querybuf
      * contains data not applied. */
-    if ((c->querybuf && sdslen(c->querybuf) > 0) || c->pending_cmds.length > 0) {
+    if ((c->querybuf && sdslen(c->querybuf) > 0) || listLength(c->pending_cmds) > 0) {
         return processInputBuffer(c);
     }
     return C_OK;
@@ -2901,7 +2902,7 @@ void parseInputBuffer(client *c) {
     const int lookahead = authRequired(c) ? 1 : server.lookahead;
 
     /* Parse up to lookahead commands */
-    while (c->pending_cmds.length < lookahead && c->querybuf && c->qb_pos < sdslen(c->querybuf)) {
+    while (listLength(c->pending_cmds) < lookahead && c->querybuf && c->qb_pos < sdslen(c->querybuf)) {
         /* Determine request type when unknown. */
         if (!c->reqtype) {
             if (c->querybuf[c->qb_pos] == '*') {
@@ -2922,10 +2923,11 @@ void parseInputBuffer(client *c) {
                 return;
             }
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
-            int incomplete = c->pending_cmds.head && c->pending_cmds.head->parsing_incomplete;
+            listNode *head = listFirst(c->pending_cmds);
+            int incomplete = head && ((pendingCommand*)listNodeValue(head))->parsing_incomplete;
             if (unlikely(incomplete)) {
-                serverAssert(c->pending_cmds.length == 1);
-                pcmd = removePendingCommandFromHead(&c->pending_cmds);
+                serverAssert(listLength(c->pending_cmds) == 1);
+                pcmd = removePendingCommandFromHead(c->pending_cmds);
             } else {
                 pcmd = zmalloc(sizeof(pendingCommand));
                 initPendingCommand(pcmd);
@@ -2941,7 +2943,7 @@ void parseInputBuffer(client *c) {
             serverPanic("Unknown request type");
         }
 
-        addPengingCommand(&c->pending_cmds, pcmd);
+        addPendingCommand(c->pending_cmds, pcmd);
         if (unlikely(pcmd->flags || pcmd->parsing_incomplete))
             break;
 
@@ -2961,7 +2963,7 @@ void parseInputBuffer(client *c) {
 int processInputBuffer(client *c) {
     /* Keep processing while there is something in the input buffer */
     while ((c->querybuf && c->qb_pos < sdslen(c->querybuf)) ||
-           c->pending_cmds.length > 0) {
+           listLength(c->pending_cmds) > 0) {
         /* Immediately abort if the client is in the middle of something. */
         if (c->flags & CLIENT_BLOCKED) break;
 
@@ -4801,12 +4803,14 @@ void freePendingCommand(client *c, pendingCommand *pcmd) {
 /* Pops a command from the command queue and sets it as the client's current
  * command. Returns true on success and false if the queue was empty. */
 static int consumePendingCommand(client *c) {
-    pendingCommand *curcmd = c->pending_cmds.head;
-    if (!curcmd || curcmd->parsing_incomplete) return 0;
+    listNode *head = listFirst(c->pending_cmds);
+    if (!head) return 0;
+
+    pendingCommand *curcmd = listNodeValue(head);
+    if (curcmd->parsing_incomplete) return 0;
     serverAssert(!c->argc);
 
     /* We populate the old client fields so we don't have to modify all existing logic to work with pendingCommands */
-    removePendingCommandFromHead(&c->pending_cmds);
     c->argc = curcmd->argc;
     c->argv = curcmd->argv;
     c->argv_len = curcmd->argv_len;
@@ -4817,52 +4821,38 @@ static int consumePendingCommand(client *c) {
     c->parsed_cmd = curcmd->cmd;
     c->read_error = curcmd->flags;
 
-    /* Free the keys result and the pendingCommand structure itself.
-     * Note: we don't free curcmd->argv here in normal cases because it's now owned by the client */
-    getKeysFreeResult(&curcmd->keys_result);
-    zfree(curcmd);
+    /* Transfer ownership of argv to client, so freePendingCommandForList won't try to free it */
+    curcmd->argv = NULL;
+    curcmd->argc = 0;
+
+    /* Remove and free the pendingCommand structure (adlist will call freePendingCommandForList) */
+    removePendingCommandFromHead(c->pending_cmds);
     return 1;
 }
 
+/* Free function for pendingCommand used by adlist */
+void freePendingCommandForList(void *ptr) {
+    pendingCommand *pcmd = (pendingCommand*)ptr;
+    freePendingCommand(NULL, pcmd);
+}
+
 /* Add a command to the tail of the queue */
-void addPengingCommand(pendingCommandList *queue, pendingCommand *cmd) {
-    cmd->next = NULL;
-    cmd->prev = queue->tail;
-
-    if (queue->tail) {
-        queue->tail->next = cmd;
-    } else {
-        /* Queue was empty */
-        queue->head = cmd;
-    }
-
-    queue->tail = cmd;
-    queue->length++;
+void addPendingCommand(list *queue, pendingCommand *cmd) {
+    listAddNodeTail(queue, cmd);
 }
 
 static void discardCommandQueue(client *c) {
-    pendingCommand *pcmd = c->pending_cmds.head;
-    while (pcmd) {
-        pendingCommand *next = pcmd->next;
-        freePendingCommand(c, pcmd);
-        pcmd = next;
+    if (c->pending_cmds) {
+        listRelease(c->pending_cmds);
+        c->pending_cmds = NULL;
     }
 }
 
-pendingCommand *removePendingCommandFromHead(pendingCommandList *queue) {
-    pendingCommand *cmd = queue->head;
-    queue->head = cmd->next;
+pendingCommand *removePendingCommandFromHead(list *queue) {
+    listNode *head = listFirst(queue);
+    if (!head) return NULL;
 
-    if (queue->head) {
-        queue->head->prev = NULL;
-    } else {
-        /* Queue is now empty */
-        queue->tail = NULL;
-    }
-
-    cmd->next = NULL;
-    cmd->prev = NULL;
-    queue->length--;
-
+    pendingCommand *cmd = listNodeValue(head);
+    listDelNode(queue, head);
     return cmd;
 }

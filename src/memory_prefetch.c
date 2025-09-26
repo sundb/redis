@@ -382,8 +382,11 @@ int addCommandToBatch(client *c) {
 
     batch->clients[batch->client_count++] = c;
 
-    pendingCommand *pcmd = c->pending_cmds.head;
-    while (pcmd != NULL) {
+    listIter li;
+    listNode *ln;
+    listRewind(c->pending_cmds, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        pendingCommand *pcmd = listNodeValue(ln);
         if (!pcmd) break;
         for (int i = 0; i < pcmd->keys_result.numkeys && batch->key_count < batch->max_prefetch_size; i++) {
             batch->keys[batch->key_count] = pcmd->argv[pcmd->keys_result.keys[i].pos];
@@ -391,7 +394,6 @@ int addCommandToBatch(client *c) {
                 kvstoreGetDict(c->db->keys, pcmd->slot > 0 ? pcmd->slot : 0);
             batch->key_count++;
         }
-        pcmd = pcmd->next;
     }
 
     return C_OK;

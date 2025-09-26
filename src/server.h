@@ -1209,12 +1209,7 @@ typedef struct readyList {
     robj *key;
 } readyList;
 
-/* List of pending commands. */
-typedef struct pendingCommandList {
-    pendingCommand *head;
-    pendingCommand *tail;
-    int length; /* Number of commands in the queue */
-} pendingCommandList;
+/* List of pending commands is now using adlist */
 
 /* This structure represents a Redis user. This is useful for ACLs, the
  * user is associated to the connection after the connection is authenticated.
@@ -1356,7 +1351,7 @@ typedef struct client {
     int original_argc;      /* Num of arguments of original command if arguments were rewritten. */
     robj **original_argv;   /* Arguments of original command if arguments were rewritten. */
     size_t argv_len_sum;    /* Sum of lengths of objects in all pendingCommand argv lists */
-    pendingCommandList pending_cmds;  /* List of parsed pending commands */
+    list *pending_cmds;  /* List of parsed pending commands using adlist */
     robj **deferred_objects;    /* Array of deferred objects to free. */
     int deferred_objects_num;   /* Number of deferred objects to free. */
     struct redisCommand *cmd, *lastcmd;  /* Last command executed. */
@@ -2366,9 +2361,6 @@ struct pendingCommand {
                          the command has a cross slot error */
     uint8_t flags;
     int parsing_incomplete;
-
-    struct pendingCommand *next;
-    struct pendingCommand *prev;
 };
 
 /* Key specs definitions.
@@ -3378,8 +3370,8 @@ void commandProcessed(client *c);
 void prepareForNextCommand(client *c);
 
 /* Client command queue functions */
-void addPengingCommand(pendingCommandList *queue, pendingCommand *cmd);
-pendingCommand *removePendingCommandFromHead(pendingCommandList *queue);
+void addPendingCommand(list *queue, pendingCommand *cmd);
+pendingCommand *removePendingCommandFromHead(list *queue);
 int processPendingCommandAndInputBuffer(client *c);
 int processCommandAndResetClient(client *c);
 int areCommandKeysInSameSlot(client *c, int *hashslot);
