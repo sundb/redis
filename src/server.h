@@ -2833,7 +2833,7 @@ int moduleIsModuleCommand(void *module_handle, struct redisCommand *cmd);
 
 /* pcmd */
 void initPendingCommand(pendingCommand *pcmd);
-void freePendingCommand(client *c, pendingCommand *pcmd);
+void freePendingCommand(pendingCommand *pcmd);
 
 /* Utils */
 long long ustime(void);

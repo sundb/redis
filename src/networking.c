@@ -1526,7 +1526,7 @@ void freeClientOriginalArgv(client *c) {
     c->original_argc = 0;
 }
 
-static inline void freeClientArgvInternal(client *c, int free_argv) {
+void freeClientArgv(client *c) {
     int j;
     if (c->tid == IOTHREAD_MAIN_THREAD_ID) {
         for (j = 0; j < c->argc; j++)
@@ -1541,10 +1541,6 @@ static inline void freeClientArgvInternal(client *c, int free_argv) {
     c->argv_len = 0;
     zfree(c->argv);
     c->argv = NULL;
-}
-
-void freeClientArgv(client *c) {
-    freeClientArgvInternal(c, 1);
 }
 
 /* Close all the slaves connections. This is useful in chained replication
@@ -2289,14 +2285,11 @@ int handleClientsWithPendingWrites(void) {
     return processed;
 }
 
-static inline void resetClientInternal(client *c, int free_argv) {
+void resetClient(client *c) {
     redisCommandProc *prevcmd = c->cmd ? c->cmd->proc : NULL;
 
-    freeClientArgvInternal(c, free_argv);
+    freeClientArgv(c);
     c->cur_script = NULL;
-    // c->reqtype = 0;
-    // c->multibulklen = 0;
-    // c->bulklen = -1;
     c->slot = -1;
     c->cluster_compatibility_check_slot = -2;
     c->flags &= ~CLIENT_EXECUTING_COMMAND;
@@ -2333,11 +2326,6 @@ static inline void resetClientInternal(client *c, int free_argv) {
 
     c->net_input_bytes_curr_cmd = 0;
     c->net_output_bytes_curr_cmd = 0;
-}
-
-/* resetClient prepare the client to process the next command */
-void resetClient(client *c) {
-    resetClientInternal(c, 1);
 }
 
 /* This function is used when we want to re-enter the event loop but there
@@ -2712,7 +2700,7 @@ static int parseMultibulk(client *c, pendingCommand *pcmd) {
  */
 void prepareForNextCommand(client *c) {
     reqresAppendResponse(c);
-    resetClientInternal(c, 1);
+    resetClient(c);
 }
 
 /* Perform necessary tasks after a command was executed:
@@ -2732,7 +2720,7 @@ void commandProcessed(client *c) {
 
     reqresAppendResponse(c);
     clusterSlotStatsAddNetworkBytesInForUserClient(c);
-    resetClientInternal(c, 0);
+    resetClient(c);
 
     long long prev_offset = c->reploff;
     if (c->flags & CLIENT_MASTER && !(c->flags & CLIENT_MULTI)) {
@@ -2918,7 +2906,7 @@ void parseInputBuffer(client *c) {
             if (parseInlineBuffer(c, pcmd) == C_ERR && !pcmd->flags) {
                 /* If it fails but there are no errors, it means that it might just be
                  * that the desired content cannot be parsed. At this point, we exit and wait for the next time. */
-                freePendingCommand(c, pcmd);
+                freePendingCommand(pcmd);
                 return;
             }
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
@@ -2934,7 +2922,7 @@ void parseInputBuffer(client *c) {
             if (parseMultibulk(c, pcmd) == C_ERR && !pcmd->flags) {
                 /* If it fails but there are no errors, it means that it might just be
                  * that the desired content cannot be parsed. At this point, we exit and wait for the next time. */
-                freePendingCommand(c, pcmd);
+                freePendingCommand(pcmd);
                 return;
             }
         } else {
@@ -3005,7 +2993,7 @@ int processInputBuffer(client *c) {
 
         /* Multibulk processing could see a <= 0 length. */
         if (c->argc == 0) {
-            freeClientArgvInternal(c, 0);
+            freeClientArgv(c);
             c->reqtype = 0;
             c->multibulklen = 0;
             c->bulklen = -1;
@@ -4782,7 +4770,7 @@ void initPendingCommand(pendingCommand *pcmd) {
     pcmd->slot = CLUSTER_INVALID_SLOT;
 }
 
-void freePendingCommand(client *c, pendingCommand *pcmd) {
+void freePendingCommand(pendingCommand *pcmd) {
     if (!pcmd)
         return;
 
@@ -4844,7 +4832,7 @@ static void discardCommandQueue(client *c) {
     pendingCommand *pcmd = c->pending_cmds.head;
     while (pcmd) {
         pendingCommand *next = pcmd->next;
-        freePendingCommand(c, pcmd);
+        freePendingCommand(pcmd);
         pcmd = next;
     }
 }
