@@ -2978,6 +2978,8 @@ void initServer(void) {
 
     if (server.maxmemory_clients != 0)
         initServerClientMemUsageBuckets();
+
+    prefetchCommandsBatchInit();
 }
 
 void initListeners(void) {
@@ -4059,6 +4061,53 @@ uint64_t getCommandFlags(client *c) {
     return cmd_flags;
 }
 
+void preprocessCommand(client *c, pendingCommand *pcmd) {
+    pcmd->slot = CLUSTER_INVALID_SLOT;
+    if (pcmd->argc == 0)
+        return;
+
+    /* Check if we can reuse the last command instead of looking it up.
+     * The last command is either the penultimate pending command (if it exists), or c->lastcmd. */
+    struct redisCommand *last_cmd = c->pending_cmds.tail->prev ? c->pending_cmds.head->cmd : c->lastcmd;
+
+    if (isCommandReusable(last_cmd, pcmd->argv[0]))
+        pcmd->cmd = last_cmd;
+    else
+        pcmd->cmd = lookupCommand(pcmd->argv, pcmd->argc);
+
+    if (!pcmd->cmd) return;
+
+    if ((pcmd->cmd->arity > 0 && pcmd->cmd->arity != pcmd->argc) ||
+        (pcmd->argc < -pcmd->cmd->arity))
+    {
+        return;
+    }
+
+    pcmd->keys_result = (getKeysResult)GETKEYS_RESULT_INIT;
+    int num_keys = getKeysFromCommand(pcmd->cmd, pcmd->argv, pcmd->argc, &pcmd->keys_result);
+    if (num_keys < 0)
+        /* We skip the checks below since We expect the command to be rejected in this case */
+        return;
+
+    if (server.cluster_enabled) {
+        robj **margv = pcmd->argv;
+        for (int j = 0; j < pcmd->keys_result.numkeys; j++) {
+            robj *thiskey = margv[pcmd->keys_result.keys[j].pos];
+            int thisslot = (int)keyHashSlot((char*)thiskey->ptr, sdslen(thiskey->ptr));
+
+            if (pcmd->slot == CLUSTER_INVALID_SLOT) {
+                pcmd->slot = thisslot;
+            } else if (pcmd->slot != thisslot) {
+                serverLog(LL_NOTICE, "preprocessCommand: CROSS SLOT ERROR");
+                /* Invalidate the slot to indicate that there is a cross-slot error */
+                pcmd->slot = CLUSTER_INVALID_SLOT;
+                /* Cross slot error. */
+                return;
+            }
+        }
+    }
+}
+
 /* If this function gets called we already read a whole
  * command, arguments are in the client argv/argc fields.
  * processCommand() execute the command or prepare the
@@ -4102,11 +4151,8 @@ int processCommand(client *c) {
      * we do not have to repeat the same checks */
     if (!client_reprocessing_command) {
         /* check if we can reuse the last command instead of looking up if we already have that info */
-        struct redisCommand *cmd = NULL;
-        if (isCommandReusable(c->lastcmd, c->argv[0]))
-            cmd = c->lastcmd;
-        else
-            cmd = c->iolookedcmd ? c->iolookedcmd : lookupCommand(c->argv, c->argc);
+        struct redisCommand *cmd = c->parsed_cmd;
+
         if (!cmd) {
             /* Handle possible security attacks. */
             if (!strcasecmp(c->argv[0]->ptr,"host:") || !strcasecmp(c->argv[0]->ptr,"post")) {
