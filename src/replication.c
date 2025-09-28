@@ -3871,7 +3871,7 @@ static void rdbChannelStreamReplDataToDb(void) {
             c->read_reploff += (long long int) bytes;
 
             /* We don't expect error return value but just in case. */
-            ret = processInputBuffer(c);
+            ret = processInputBuffer(c, 0);
             if (ret != C_OK)
                 break;
 
