@@ -71,6 +71,7 @@ void queueMultiCommand(client *c, uint64_t cmd_flags) {
      * reference them from c anymore. */
     c->argv = NULL;
     c->argc = 0;
+    c->all_argv_len_sum -= c->argv_len_sum;
     c->argv_len_sum = 0;
     c->argv_len = 0;
 }

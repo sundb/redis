@@ -170,6 +170,7 @@ client *createClient(connection *conn) {
     c->argv = NULL;
     c->argv_len = 0;
     c->argv_len_sum = 0;
+    c->all_argv_len_sum = 0;
     c->pending_cmds.head = c->pending_cmds.tail = NULL;
     c->pending_cmds.length = 0;
     c->original_argc = 0;
@@ -1537,6 +1538,7 @@ void freeClientArgv(client *c) {
     }
     c->argc = 0;
     c->cmd = NULL;
+    c->all_argv_len_sum -= c->argv_len_sum;
     c->argv_len_sum = 0;
     c->argv_len = 0;
     zfree(c->argv);
@@ -2929,6 +2931,7 @@ void parseInputBuffer(client *c) {
             serverPanic("Unknown request type");
         }
 
+        c->all_argv_len_sum += pcmd->argv_len_sum;
         addPengingCommand(&c->pending_cmds, pcmd);
         if (unlikely(pcmd->flags || pcmd->parsing_incomplete))
             break;
@@ -4231,10 +4234,12 @@ void replaceClientCommandVector(client *c, int argc, robj **argv) {
     freeClientArgv(c);
     c->argv = argv;
     c->argc = c->argv_len = argc;
+    c->all_argv_len_sum -= c->argv_len_sum;
     c->argv_len_sum = 0;
     for (j = 0; j < c->argc; j++)
         if (c->argv[j])
             c->argv_len_sum += getStringObjectLen(c->argv[j]);
+    c->all_argv_len_sum += c->argv_len_sum;
     c->cmd = lookupCommandOrOriginal(c->argv,c->argc);
     serverAssertWithInfo(c,NULL,c->cmd != NULL);
 }
@@ -4268,6 +4273,7 @@ void rewriteClientCommandArgument(client *c, int i, robj *newval) {
         c->argv[i] = NULL;
     }
     oldval = c->argv[i];
+    c->all_argv_len_sum -= c->argv_len_sum;
     if (oldval) c->argv_len_sum -= getStringObjectLen(oldval);
 
     if (newval) {
@@ -4282,6 +4288,7 @@ void rewriteClientCommandArgument(client *c, int i, robj *newval) {
         c->argv[--c->argc] = NULL;
     }
     if (oldval) decrRefCount(oldval);
+    c->all_argv_len_sum += c->argv_len_sum;
 
     /* If this is the command name make sure to fix c->cmd. */
     if (i == 0) {
@@ -4328,7 +4335,7 @@ size_t getClientMemoryUsage(client *c, size_t *output_buffer_mem_usage) {
     /* For efficiency (less work keeping track of the argv memory), it doesn't include the used memory
      * i.e. unused sds space and internal fragmentation, just the string length. but this is enough to
      * spot problematic clients. */
-    mem += c->argv_len_sum + sizeof(robj*)*c->argc;
+    mem += c->all_argv_len_sum + sizeof(robj*)*c->argc;
     mem += multiStateMemOverhead(c);
 
     /* Add memory overhead of pubsub channels and patterns. Note: this is just the overhead of the robj pointers

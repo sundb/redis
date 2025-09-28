@@ -958,7 +958,7 @@ int CurrentPeakMemUsageSlot = 0;
 int clientsCronTrackExpansiveClients(client *c) {
     size_t qb_size = c->querybuf ? sdsZmallocSize(c->querybuf) : 0;
     size_t argv_size = c->argv ? zmalloc_size(c->argv) : 0;
-    size_t in_usage = qb_size + c->argv_len_sum + argv_size;
+    size_t in_usage = qb_size + c->all_argv_len_sum + argv_size;
     size_t out_usage = getClientOutputBufferMemoryUsage(c);
 
     /* Track the biggest values observed so far in this slot. */
@@ -7009,7 +7009,7 @@ void dismissClientMemory(client *c) {
     dismissMemory(c->buf, c->buf_usable_size);
     if (c->querybuf) dismissSds(c->querybuf);
     /* Dismiss argv array only if we estimate it contains a big buffer. */
-    if (c->argc && c->argv_len_sum/c->argc >= server.page_size) {
+    if (c->argc && c->all_argv_len_sum/c->argc >= server.page_size) {
         for (int i = 0; i < c->argc; i++) {
             dismissObject(c->argv[i], 0);
         }
