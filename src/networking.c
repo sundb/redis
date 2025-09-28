@@ -2802,7 +2802,7 @@ int processPendingCommandAndInputBuffer(client *c) {
      * it can always satisfy this condition, because its querybuf
      * contains data not applied. */
     if ((c->querybuf && sdslen(c->querybuf) > 0) || c->pending_cmds.length > 0) {
-        return processInputBuffer(c);
+        return processInputBuffer(c, 0);
     }
     return C_OK;
 }
@@ -2949,7 +2949,7 @@ void parseInputBuffer(client *c) {
  * or because a client was blocked and later reactivated, so there could be
  * pending query buffer, already representing a full command, to process.
  * return C_ERR in case the client was freed during the processing */
-int processInputBuffer(client *c) {
+int processInputBuffer(client *c, int prefetch) {
     /* Keep processing while there is something in the input buffer */
     while ((c->querybuf && c->qb_pos < sdslen(c->querybuf)) ||
            c->pending_cmds.length > 0) {
@@ -2976,7 +2976,7 @@ int processInputBuffer(client *c) {
         /* If commands are queued up, pop from the queue first */
         if (!consumePendingCommand(c)) {
             parseInputBuffer(c);
-            if (c->running_tid == IOTHREAD_MAIN_THREAD_ID) {
+            if (c->running_tid == IOTHREAD_MAIN_THREAD_ID && prefetch) {
                 /* Prefetch the commands. */
                 resetCommandsBatch();
                 addCommandToBatch(c);
@@ -2990,8 +2990,8 @@ int processInputBuffer(client *c) {
             }
 
         if (c->running_tid != IOTHREAD_MAIN_THREAD_ID && c->read_error) {
-                    enqueuePendingClientsToMainThread(c, 0);
-                break;
+            enqueuePendingClientsToMainThread(c, 0);
+            break;
         }
 
         /* Multibulk processing could see a <= 0 length. */
@@ -3174,7 +3174,7 @@ void readQueryFromClient(connection *conn) {
 
     /* There is more data in the client input buffer, continue parsing it
      * and check if there is a full command to execute. */
-    if (processInputBuffer(c) == C_ERR)
+    if (processInputBuffer(c, 1) == C_ERR)
          c = NULL;
 
 done:

@@ -2873,7 +2873,7 @@ void setDeferredMapLen(client *c, void *node, long length);
 void setDeferredSetLen(client *c, void *node, long length);
 void setDeferredAttributeLen(client *c, void *node, long length);
 void setDeferredPushLen(client *c, void *node, long length);
-int processInputBuffer(client *c);
+int processInputBuffer(client *c, int prefetch);
 void acceptCommonHandler(connection *conn, int flags, char *ip);
 void readQueryFromClient(connection *conn);
 int prepareClientToWrite(client *c);
