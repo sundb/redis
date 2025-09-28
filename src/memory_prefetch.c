@@ -84,9 +84,6 @@ typedef struct PrefetchCommandsBatch {
 
 static PrefetchCommandsBatch *batch = NULL;
 
-/* Flag to prevent recursive prefetch operations */
-static int prefetch_in_progress = 0;
-
 void freePrefetchCommandsBatch(void) {
     if (batch == NULL) {
         return;
@@ -292,9 +289,6 @@ static void *getObjectValuePtr(const void *value) {
 }
 
 void resetCommandsBatch(void) {
-    /* Clear the prefetch in progress flag when resetting batch */
-    prefetch_in_progress = 0;
-
     if (batch == NULL) {
         /* Handle the case where prefetching becomes enabled from disabled. */
         if (server.prefetch_batch_max_size) prefetchCommandsBatchInit();
@@ -335,10 +329,6 @@ int determinePrefetchCount(int len) {
 void prefetchCommands(void) {
     if (!batch) return;
 
-    /* Prevent recursive prefetch operations */
-    if (prefetch_in_progress) return;
-    prefetch_in_progress = 1;
-
     /* Prefetch argv's for all clients */
     for (size_t i = 0; i < batch->client_count; i++) {
         client *c = batch->clients[i];
@@ -373,15 +363,6 @@ void prefetchCommands(void) {
         /* Prefetch keys from the main dict */
         dictPrefetch(batch->keys_dicts, getObjectValuePtr);
     }
-
-    /* Clear the prefetch in progress flag */
-    prefetch_in_progress = 0;
-}
-
-/* Check if prefetch operation is currently in progress.
- * Returns 1 if prefetch is in progress, 0 otherwise. */
-int isPrefetchInProgress(void) {
-    return prefetch_in_progress;
 }
 
 /* Adds the client's command to the current batch.

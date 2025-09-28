@@ -2976,10 +2976,11 @@ int processInputBuffer(client *c) {
         /* If commands are queued up, pop from the queue first */
         if (!consumePendingCommand(c)) {
             parseInputBuffer(c);
-            if (c->running_tid == IOTHREAD_MAIN_THREAD_ID && !isPrefetchInProgress()) {
+            if (c->running_tid == IOTHREAD_MAIN_THREAD_ID) {
+                /* Prefetch the commands. */
+                resetCommandsBatch();
                 addCommandToBatch(c);
                 prefetchCommands();
-                resetCommandsBatch();
             }
             if (consumePendingCommand(c) == 0) break;
         }
