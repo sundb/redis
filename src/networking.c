@@ -4895,7 +4895,7 @@ void evictClients(void) {
 
 void initPendingCommand(pendingCommand *pcmd) {
     memset(pcmd, 0, sizeof(pendingCommand));
-    pcmd->slot = CLUSTER_INVALID_SLOT;
+    pcmd->slot = INVALID_CLUSTER_SLOT;
 }
 
 void freePendingCommand(client *c, pendingCommand *pcmd) {

@@ -2359,7 +2359,7 @@ struct pendingCommand {
     struct redisCommand *cmd;
     // getKeysResult keys_result;
     long long reploff;         /* c->reploff should be set to this value when the command is processed */
-    int slot;         /* The slot the command is executing against. Set to CLUSTER_INVALID_SLOT if no slot is being used or if 
+    int slot;         /* The slot the command is executing against. Set to INVALID_CLUSTER_SLOT if no slot is being used or if 
                          the command has a cross slot error */
     uint8_t flags;
     int parsing_incomplete;

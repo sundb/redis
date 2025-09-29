@@ -4046,7 +4046,7 @@ uint64_t getCommandFlags(client *c) {
 }
 
 void preprocessCommand(client *c, pendingCommand *pcmd) {
-    pcmd->slot = CLUSTER_INVALID_SLOT;
+    pcmd->slot = INVALID_CLUSTER_SLOT;
     if (pcmd->argc == 0)
         return;
 
@@ -4069,6 +4069,25 @@ void preprocessCommand(client *c, pendingCommand *pcmd) {
     {
         pcmd->flags = CLIENT_READ_BAD_ARITY;
         return;
+    }
+
+    if (server.cluster_enabled) {
+        getKeysResult result = (getKeysResult)GETKEYS_RESULT_INIT;
+        int numkeys = getKeysFromCommand(pcmd->cmd, pcmd->argv, pcmd->argc, &result); 
+        for (int i = 0; i < numkeys; i++) {
+            robj *thiskey = pcmd->argv[result.keys[i].pos];
+            int thisslot = (int)keyHashSlot((char*)thiskey->ptr, sdslen(thiskey->ptr));
+            if (pcmd->slot == INVALID_CLUSTER_SLOT) {
+                pcmd->slot = thisslot;
+            } else if (pcmd->slot != thisslot) {
+                serverLog(LL_NOTICE, "preprocessCommand: CROSS SLOT ERROR");
+                /* Invalidate the slot to indicate that there is a cross-slot error */
+                pcmd->slot = INVALID_CLUSTER_SLOT;
+                /* Cross slot error. */
+                break;
+            }
+        }
+        getKeysFreeResult(&result);
     }
 }
 
