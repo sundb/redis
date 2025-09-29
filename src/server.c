@@ -4134,7 +4134,7 @@ int processCommand(client *c) {
      * we do not have to repeat the same checks */
     if (!client_reprocessing_command) {
         /* check if we can reuse the last command instead of looking up if we already have that info */
-        struct redisCommand *cmd = c->parsed_cmd;
+        struct redisCommand *cmd = c->lookedcmd;
 
         /* The command may have been modified by modules (e.g., in CommandFilters callbacks),
          * so we need to look it up again. */

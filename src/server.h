@@ -1357,7 +1357,7 @@ typedef struct client {
     robj **deferred_objects;    /* Array of deferred objects to free. */
     int deferred_objects_num;   /* Number of deferred objects to free. */
     struct redisCommand *cmd, *lastcmd;  /* Last command executed. */
-    struct redisCommand *parsed_cmd; /* The command that was parsed. */
+    struct redisCommand *lookedcmd; /* Command looked up in lookahead. */
     struct redisCommand *realcmd; /* The original command that was executed by the client,
                                      Used to update error stats in case the c->cmd was modified
                                      during the command invocation (like on GEOADD for example). */

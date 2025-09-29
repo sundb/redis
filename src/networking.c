@@ -173,7 +173,7 @@ client *createClient(connection *conn) {
     c->original_argv = NULL;
     c->deferred_objects = NULL;
     c->deferred_objects_num = 0;
-    c->cmd = c->lastcmd = c->realcmd = NULL;
+    c->cmd = c->lastcmd = c->realcmd = c->lookedcmd = NULL;
     c->cur_script = NULL;
     c->multibulklen = 0;
     c->bulklen = -1;
@@ -1535,6 +1535,7 @@ static inline void freeClientArgvInternal(client *c, int free_argv) {
     }
     c->argc = 0;
     c->cmd = NULL;
+    c->lookedcmd = NULL;
     if (free_argv) {
         c->argv_len = 0;
         zfree(c->argv);
@@ -3009,7 +3010,7 @@ static int consumePendingCommand(client *c) {
     c->net_input_bytes_curr_cmd += curcmd->input_bytes;
     c->reploff_next = curcmd->reploff;
     c->slot = curcmd->slot;
-    c->parsed_cmd = curcmd->cmd;
+    c->lookedcmd = curcmd->cmd;
     c->read_error = curcmd->flags;
     c->current_pending_cmd = curcmd;
     return 1;

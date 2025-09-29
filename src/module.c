@@ -11035,10 +11035,13 @@ void moduleCallCommandFilters(client *c) {
         f->callback(&filter);
     }
 
+    /* If the filter sets a new command, including command or subcommand,
+     * the command looked up will be invalid. */
+    c->lookedcmd = NULL;
+
     c->argv = filter.argv;
     c->argv_len = filter.argv_len;
     c->argc = filter.argc;
-    c->parsed_cmd = NULL; /* Reset cmd so it will be looked up again. */
 
     /* Update pending command if it exists. */
     pendingCommand *pcmd = c->current_pending_cmd;
