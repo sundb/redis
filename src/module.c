@@ -6657,12 +6657,7 @@ RedisModuleCallReply *RM_Call(RedisModuleCtx *ctx, const char *cmdname, const ch
         c->flags &= ~(CLIENT_READONLY|CLIENT_ASKING);
         c->flags |= ctx->client->flags & (CLIENT_READONLY|CLIENT_ASKING);
         const uint64_t cmd_flags = getCommandFlags(c);
-        int hashslot = CLUSTER_INVALID_SLOT;
-        /* Calculate slot beforehand for modules */
-        getKeysResult keys_result = GETKEYS_RESULT_INIT;
-        extractKeysAndSlot(c->cmd, c->argv, c->argc,
-                          &keys_result, &hashslot);
-        if (getNodeByQuery(c,c->cmd,c->argv,cmd_flags,&error_code,&hashslot, &keys_result) !=
+        if (getNodeByQuery(c,c->cmd,c->argv,c->argc,NULL,cmd_flags,&error_code) !=
                            getMyClusterNode())
         {
             sds msg = NULL;

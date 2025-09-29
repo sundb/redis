@@ -1107,18 +1107,15 @@ void clusterCommand(client *c) {
  *
  * CLUSTER_REDIR_DOWN_STATE and CLUSTER_REDIR_DOWN_RO_STATE if the cluster is
  * down but the user attempts to execute a command that addresses one or more keys. */
-clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv,
-    uint64_t cmd_flags, int *error_code, int *precalculated_slot, getKeysResult *keys_result)
-{
+clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, int argc, int *hashslot, uint64_t cmd_flags, int *error_code) {
     clusterNode *myself = getMyClusterNode();
     clusterNode *n = NULL;
     robj *firstkey = NULL;
     int multiple_keys = 0;
     multiState *ms, _ms;
     pendingCommand mc;
-    initPendingCommand(&mc);
     pendingCommand *mcp = &mc;
-    int i, slot = CLUSTER_INVALID_SLOT, migrating_slot = 0, importing_slot = 0, missing_keys = 0,
+    int i, slot = 0, migrating_slot = 0, importing_slot = 0, missing_keys = 0,
             existing_keys = 0;
     int pubsubshard_included = 0; /* Flag to indicate if a pubsub shard cmd is included. */
 
@@ -1151,15 +1148,8 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv,
         /* Properly initialize the fake pendingCommand */
         initPendingCommand(&mc);
         mc.argv = argv;
+        mc.argc = argc;
         mc.cmd = cmd;
-        mc.keys_result = *keys_result;
-
-        /* Always extract keys for other logic, but use pre-calculated slot if provided */
-        if (keys_result->numkeys >= 0) {
-            if (*precalculated_slot != CLUSTER_INVALID_SLOT) {
-                mc.slot = *precalculated_slot;
-            }
-        }
     }
 
     /* Check that all the keys are in the same hash slot, and obtain this
@@ -1167,46 +1157,36 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv,
     for (i = 0; i < ms->count; i++) {
         struct redisCommand *mcmd;
         robj **margv;
-        int j;
+        int margc, numkeys, j;
+        keyReference *keyindex;
 
         pendingCommand *pcmd = ms->commands[i];
 
         mcmd = pcmd->cmd;
+        margc = pcmd->argc;
         margv = pcmd->argv;
 
         /* Only valid for sharded pubsub as regular pubsub can operate on any node and bypasses this layer. */
         if (!pubsubshard_included &&
-            doesCommandHaveChannelsWithFlags(mcmd, CMD_CHANNEL_PUBLISH | CMD_CHANNEL_SUBSCRIBE) &&
-            mcmd->key_specs_num > 0)
+            doesCommandHaveChannelsWithFlags(mcmd, CMD_CHANNEL_PUBLISH | CMD_CHANNEL_SUBSCRIBE))
         {
             pubsubshard_included = 1;
         }
 
-        /* If this command has keys/channels and we already have a slot,
-         * check if this command's slot matches */
-        if (pcmd->keys_result.numkeys > 0 && slot != CLUSTER_INVALID_SLOT && pcmd->slot != slot) {
-            /* Error: commands operate on keys from different slots */
-            if (error_code)
-                *error_code = CLUSTER_REDIR_CROSS_SLOT;
-            return NULL;
-        }
+        getKeysResult result = GETKEYS_RESULT_INIT;
+        numkeys = getKeysFromCommand(mcmd,margv,margc,&result);
+        keyindex = result.keys;
 
-        for (j = 0; j < pcmd->keys_result.numkeys; j++) {
-            /* The command has keys and was checked for cross-slot between its keys in preprocessCommand() */
-            if (pcmd->slot == CLUSTER_INVALID_SLOT) {
-                /* Error: multiple keys from different slots. */
-                if (error_code)
-                    *error_code = CLUSTER_REDIR_CROSS_SLOT;
-                return NULL;
-            }
-
-            robj *thiskey = margv[pcmd->keys_result.keys[j].pos];
+        for (j = 0; j < numkeys; j++) {
+            robj *thiskey = margv[keyindex[j].pos];
+            int thisslot = keyHashSlot((char*)thiskey->ptr,
+                                       sdslen(thiskey->ptr));
 
             if (firstkey == NULL) {
                 /* This is the first key we see. Check what is the slot
                  * and node. */
                 firstkey = thiskey;
-                slot = pcmd->slot;
+                slot = thisslot;
                 n = getNodeBySlot(slot);
 
                 /* Error: If a slot is not served, we are in "cluster down"
@@ -1214,6 +1194,7 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv,
                  * not trapped earlier in processCommand(). Report the same
                  * error to the client. */
                 if (n == NULL) {
+                    getKeysFreeResult(&result);
                     if (error_code)
                         *error_code = CLUSTER_REDIR_DOWN_UNBOUND;
                     return NULL;
@@ -1232,6 +1213,15 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv,
                     importing_slot = 1;
                 }
             } else {
+                /* If it is not the first key/channel, make sure it is exactly
+                 * the same key/channel as the first we saw. */
+                if (slot != thisslot) {
+                    /* Error: multiple keys from different slots. */
+                    getKeysFreeResult(&result);
+                    if (error_code)
+                        *error_code = CLUSTER_REDIR_CROSS_SLOT;
+                    return NULL;
+                }
                 if (importing_slot && !multiple_keys && !equalStringObjects(firstkey,thiskey)) {
                     /* Flag this request as one with multiple different
                      * keys/channels when the slot is in importing state. */
@@ -1252,6 +1242,7 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv,
                 else existing_keys++;
             }
         }
+        getKeysFreeResult(&result);
     }
 
     /* No key at all in command? then we can serve the request
@@ -1283,7 +1274,7 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv,
     }
 
     /* Return the hashslot by reference. */
-    if (precalculated_slot) *precalculated_slot = slot;
+    if (hashslot) *hashslot = slot;
 
     /* MIGRATE always works in the context of the local node if the slot
      * is open (migrating or importing state). We need to be able to freely

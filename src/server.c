@@ -4066,13 +4066,6 @@ void preprocessCommand(client *c, pendingCommand *pcmd) {
     {
         return;
     }
-
-    pcmd->keys_result = (getKeysResult)GETKEYS_RESULT_INIT;
-    int num_keys = extractKeysAndSlot(pcmd->cmd, pcmd->argv, pcmd->argc,
-                                      &pcmd->keys_result, &pcmd->slot);
-    if (num_keys < 0)
-        /* We skip the checks below since We expect the command to be rejected in this case */
-        return;
 }
 
 /* If this function gets called we already read a whole
@@ -4216,9 +4209,8 @@ int processCommand(client *c) {
           c->cmd->proc != execCommand))
     {
         int error_code;
-        getKeysResult* keys_result = &c->pending_cmds.head->keys_result;
-        clusterNode *n = getNodeByQuery(c,c->cmd,c->argv,
-                                        cmd_flags,&error_code,&c->slot, keys_result);
+        clusterNode *n = getNodeByQuery(c,c->cmd,c->argv,c->argc,
+                                        &c->slot,cmd_flags,&error_code);
         if (n == NULL || !clusterNodeIsMyself(n)) {
             if (c->cmd->proc == execCommand) {
                 discardTransaction(c);

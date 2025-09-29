@@ -2354,7 +2354,7 @@ struct pendingCommand {
     size_t argv_len_sum;      /* Sum of lengths of objects in argv list. */
     unsigned long long input_bytes;
     struct redisCommand *cmd;
-    getKeysResult keys_result;
+    // getKeysResult keys_result;
     long long reploff;         /* c->reploff should be set to this value when the command is processed */
     int slot;         /* The slot the command is executing against. Set to CLUSTER_INVALID_SLOT if no slot is being used or if 
                          the command has a cross slot error */
