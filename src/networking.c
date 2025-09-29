@@ -39,7 +39,6 @@ __thread int thread_reusable_qb_used = 0; /* Avoid multiple clients using reusab
                                          * buffer due to nested command execution. */
 
 static int consumePendingCommand(client *c);
-static int parseMultibulk(client *c, pendingCommand *pcmd);
 
 /* COMMAND_QUEUE_MIN_CAPACITY no longer needed with linked list implementation */
 

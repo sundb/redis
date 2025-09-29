@@ -369,9 +369,7 @@ void prefetchCommands(void) {
  *
  * Returns C_OK if the command was added successfully, C_ERR otherwise. */
 int addCommandToBatch(client *c) {
-    if (unlikely(!batch)) {
-        return C_ERR;
-    }
+    if (unlikely(!batch)) return C_ERR;
 
     /* If the batch is full, process it.
      * We also check the client count to handle cases where
