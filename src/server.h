@@ -464,6 +464,8 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_READ_CONN_DISCONNECTED 11
 #define CLIENT_READ_CONN_CLOSED 12
 #define CLIENT_READ_REACHED_MAX_QUERYBUF 13
+#define CLIENT_READ_COMMAND_NOT_FOUND 14
+#define CLIENT_READ_BAD_ARITY 15
 
 /* Client block type (btype field in client structure)
  * if CLIENT_BLOCKED flag is set. */

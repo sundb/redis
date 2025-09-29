@@ -386,7 +386,7 @@ int addCommandToBatch(client *c) {
 
     pendingCommand *pcmd = c->pending_cmds.head;
     while (pcmd != NULL) {
-        if (pcmd->parsing_incomplete) break;
+        if (pcmd->parsing_incomplete || !pcmd->cmd || pcmd->flags) break;
 
         getKeysResult result = GETKEYS_RESULT_INIT;
         int numkeys = getKeysFromCommand(pcmd->cmd, pcmd->argv, pcmd->argc, &result);

@@ -2926,6 +2926,12 @@ void handleClientReadError(client *c) {
             sdsfree(bytes);
             break;
         }
+        case CLIENT_READ_COMMAND_NOT_FOUND: {
+            break;
+        }
+        case CLIENT_READ_BAD_ARITY: {
+            break;
+        }
         default:
             serverPanic("Unknown client read error: %d", c->read_error);
             break;
