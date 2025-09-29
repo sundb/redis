@@ -396,6 +396,7 @@ int addCommandToBatch(client *c) {
                 kvstoreGetDict(c->db->keys, pcmd->slot > 0 ? pcmd->slot : 0);
             batch->key_count++;
         }
+        getKeysFreeResult(&result);
         pcmd = pcmd->next;
     } 
 
