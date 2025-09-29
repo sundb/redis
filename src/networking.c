@@ -38,8 +38,6 @@ __thread sds thread_reusable_qb = NULL;
 __thread int thread_reusable_qb_used = 0; /* Avoid multiple clients using reusable query
                                          * buffer due to nested command execution. */
 
-static int consumePendingCommand(client *c);
-
 /* COMMAND_QUEUE_MIN_CAPACITY no longer needed with linked list implementation */
 
 /* Return the size consumed from the allocator, for the specified SDS string,
@@ -2858,7 +2856,7 @@ int processPendingCommandAndInputBuffer(client *c) {
      * it can always satisfy this condition, because its querybuf
      * contains data not applied. */
     if ((c->querybuf && sdslen(c->querybuf) > 0) || c->pending_cmds.length > 0) {
-        return processInputBuffer(c, 0);
+        return processInputBuffer(c);
     }
     return C_OK;
 }
@@ -2998,12 +2996,31 @@ void parseInputBuffer(client *c) {
     }
 }
 
+/* Pops a command from the command queue and sets it as the client's current
+ * command. Returns true on success and false if the queue was empty. */
+static int consumePendingCommand(client *c) {
+    pendingCommand *curcmd = c->pending_cmds.head;
+    if (!curcmd || curcmd->parsing_incomplete) return 0;
+
+    /* We populate the old client fields so we don't have to modify all existing logic to work with pendingCommands */
+    c->argc = curcmd->argc;
+    c->argv = curcmd->argv;
+    c->argv_len = curcmd->argv_len;
+    c->net_input_bytes_curr_cmd += curcmd->input_bytes;
+    c->reploff_next = curcmd->reploff;
+    c->slot = curcmd->slot;
+    c->parsed_cmd = curcmd->cmd;
+    c->read_error = curcmd->flags;
+    c->current_pending_cmd = curcmd;
+    return 1;
+}
+
 /* This function is called every time, in the client structure 'c', there is
  * more query buffer to process, because we read more data from the socket
  * or because a client was blocked and later reactivated, so there could be
  * pending query buffer, already representing a full command, to process.
  * return C_ERR in case the client was freed during the processing */
-int processInputBuffer(client *c, int prefetch) {
+int processInputBuffer(client *c) {
     /* Keep processing while there is something in the input buffer */
     while ((c->querybuf && c->qb_pos < sdslen(c->querybuf)) ||
            c->pending_cmds.length > 0) {
@@ -3032,7 +3049,7 @@ int processInputBuffer(client *c, int prefetch) {
             parseInputBuffer(c);
             if (consumePendingCommand(c) == 0) break;
 
-            if (c->running_tid == IOTHREAD_MAIN_THREAD_ID && prefetch) {
+            if (c->running_tid == IOTHREAD_MAIN_THREAD_ID && !(c->flags & CLIENT_IN_PREFETCH)) {
                 /* Prefetch the commands. */
                 resetCommandsBatch();
                 addCommandToBatch(c);
@@ -3229,8 +3246,10 @@ void readQueryFromClient(connection *conn) {
 
     /* There is more data in the client input buffer, continue parsing it
      * and check if there is a full command to execute. */
-    if (processInputBuffer(c, 1) == C_ERR)
+    c->flags |= CLIENT_IN_PREFETCH;
+    if (processInputBuffer(c) == C_ERR)
          c = NULL;
+    if (c) c->flags &= ~CLIENT_IN_PREFETCH;
 
 done:
     if (c && c->read_error) {
@@ -4893,25 +4912,6 @@ void freePendingCommand(client *c, pendingCommand *pcmd) {
     }
 
     zfree(pcmd);
-}
-
-/* Pops a command from the command queue and sets it as the client's current
- * command. Returns true on success and false if the queue was empty. */
-static int consumePendingCommand(client *c) {
-    pendingCommand *curcmd = c->pending_cmds.head;
-    if (!curcmd || curcmd->parsing_incomplete) return 0;
-
-    /* We populate the old client fields so we don't have to modify all existing logic to work with pendingCommands */
-    c->argc = curcmd->argc;
-    c->argv = curcmd->argv;
-    c->argv_len = curcmd->argv_len;
-    c->net_input_bytes_curr_cmd += curcmd->input_bytes;
-    c->reploff_next = curcmd->reploff;
-    c->slot = curcmd->slot;
-    c->parsed_cmd = curcmd->cmd;
-    c->read_error = curcmd->flags;
-    c->current_pending_cmd = curcmd;
-    return 1;
 }
 
 /* Add a command to the tail of the pending command list. */

@@ -434,6 +434,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_REEXECUTING_COMMAND (1ULL<<50) /* The client is re-executing the command. */
 #define CLIENT_REPL_RDB_CHANNEL (1ULL<<51)      /* Client which is used for rdb delivery as part of rdb channel replication */
 #define CLIENT_INTERNAL (1ULL<<52) /* Internal client connection */
+#define CLIENT_IN_PREFETCH (1ULL<<53) /* The client is in the prefetching batch. */
 
 /* Any flag that does not let optimize FLUSH SYNC to run it in bg as blocking client ASYNC */
 #define CLIENT_AVOID_BLOCKING_ASYNC_FLUSH (CLIENT_DENY_BLOCKING|CLIENT_MULTI|CLIENT_LUA_DEBUG|CLIENT_LUA_DEBUG_SYNC|CLIENT_MODULE)
@@ -2830,6 +2831,8 @@ int moduleIsModuleCommand(void *module_handle, struct redisCommand *cmd);
 /* pcmd */
 void initPendingCommand(pendingCommand *pcmd);
 void freePendingCommand(client *c, pendingCommand *pcmd);
+void addPengingCommand(pendingCommandList *queue, pendingCommand *cmd);
+pendingCommand *popPendingCommandFromHead(pendingCommandList *queue);
 
 /* Utils */
 long long ustime(void);
@@ -2870,7 +2873,7 @@ void setDeferredMapLen(client *c, void *node, long length);
 void setDeferredSetLen(client *c, void *node, long length);
 void setDeferredAttributeLen(client *c, void *node, long length);
 void setDeferredPushLen(client *c, void *node, long length);
-int processInputBuffer(client *c, int prefetch);
+int processInputBuffer(client *c);
 void acceptCommonHandler(connection *conn, int flags, char *ip);
 void readQueryFromClient(connection *conn);
 int prepareClientToWrite(client *c);
@@ -3375,9 +3378,6 @@ int processCommand(client *c);
 void commandProcessed(client *c);
 void prepareForNextCommand(client *c);
 
-/* Client command queue functions */
-void addPengingCommand(pendingCommandList *queue, pendingCommand *cmd);
-pendingCommand *popPendingCommandFromHead(pendingCommandList *queue);
 int processPendingCommandAndInputBuffer(client *c);
 int processCommandAndResetClient(client *c);
 int areCommandKeysInSameSlot(client *c, int *hashslot);
