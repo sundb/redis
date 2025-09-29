@@ -3041,7 +3041,8 @@ int processInputBuffer(client *c, int prefetch) {
             }
         }
 
-        if (c->read_error) {
+        if (c->read_error && c->read_error != CLIENT_READ_COMMAND_NOT_FOUND &&
+            c->read_error != CLIENT_READ_BAD_ARITY) {
             break;
         }
 
