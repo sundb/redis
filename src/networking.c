@@ -1554,7 +1554,7 @@ void freeClientPendingCommands(client *c, int num_pcmds_to_free) {
         num_pcmds_to_free = c->pending_cmds.length;
 
     while (num_pcmds_to_free--) {
-        pendingCommand *pcmd = removePendingCommandFromHead(&c->pending_cmds);
+        pendingCommand *pcmd = popPendingCommandFromHead(&c->pending_cmds);
         serverAssert(pcmd);
         freePendingCommand(c, pcmd);
     }
@@ -2970,7 +2970,7 @@ void parseInputBuffer(client *c) {
             int incomplete = c->pending_cmds.head && c->pending_cmds.head->parsing_incomplete;
             if (unlikely(incomplete)) {
                 serverAssert(c->pending_cmds.length == 1);
-                pcmd = removePendingCommandFromHead(&c->pending_cmds);
+                pcmd = popPendingCommandFromHead(&c->pending_cmds);
             } else {
                 pcmd = zmalloc(sizeof(pendingCommand));
                 initPendingCommand(pcmd);
@@ -4914,7 +4914,7 @@ static int consumePendingCommand(client *c) {
     return 1;
 }
 
-/* Add a command to the tail of the queue */
+/* Add a command to the tail of the pending command list. */
 void addPengingCommand(pendingCommandList *queue, pendingCommand *cmd) {
     cmd->next = NULL;
     cmd->prev = queue->tail;
@@ -4930,20 +4930,18 @@ void addPengingCommand(pendingCommandList *queue, pendingCommand *cmd) {
     queue->length++;
 }
 
-pendingCommand *removePendingCommandFromHead(pendingCommandList *queue) {
-    pendingCommand *cmd = queue->head;
-    queue->head = cmd->next;
+pendingCommand *popPendingCommandFromHead(pendingCommandList *list) {
+    pendingCommand *cmd = list->head;
+    list->head = cmd->next;
 
-    if (queue->head) {
-        queue->head->prev = NULL;
+    if (list->head) {
+        list->head->prev = NULL;
     } else {
-        /* Queue is now empty */
-        queue->tail = NULL;
+        /* Queue was empty */
+        list->tail = NULL;
     }
 
-    cmd->next = NULL;
-    cmd->prev = NULL;
-    queue->length--;
-
+    cmd->next = cmd->prev = NULL;
+    list->length--;
     return cmd;
 }

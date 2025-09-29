@@ -3377,7 +3377,7 @@ void prepareForNextCommand(client *c);
 
 /* Client command queue functions */
 void addPengingCommand(pendingCommandList *queue, pendingCommand *cmd);
-pendingCommand *removePendingCommandFromHead(pendingCommandList *queue);
+pendingCommand *popPendingCommandFromHead(pendingCommandList *queue);
 int processPendingCommandAndInputBuffer(client *c);
 int processCommandAndResetClient(client *c);
 int areCommandKeysInSameSlot(client *c, int *hashslot);
