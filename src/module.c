@@ -11038,6 +11038,16 @@ void moduleCallCommandFilters(client *c) {
     c->argv = filter.argv;
     c->argv_len = filter.argv_len;
     c->argc = filter.argc;
+    c->parsed_cmd = NULL; /* Reset cmd so it will be looked up again. */
+
+    /* Update pending command if it exists. */
+    pendingCommand *pcmd = c->current_pending_cmd;
+    if (pcmd) {
+        pcmd->argv = filter.argv;
+        pcmd->argc = filter.argc;
+        pcmd->argv_len = filter.argv_len;
+        pcmd->cmd = NULL;
+    }
 }
 
 /* Return the number of arguments a filtered command has.  The number of

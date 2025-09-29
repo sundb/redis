@@ -4117,6 +4117,15 @@ int processCommand(client *c) {
         /* check if we can reuse the last command instead of looking up if we already have that info */
         struct redisCommand *cmd = c->parsed_cmd;
 
+        /* The command may have been modified by modules (e.g., in CommandFilters callbacks),
+         * so we need to look it up again. */
+        if (!cmd) {
+            if (isCommandReusable(c->lastcmd, c->argv[0]))
+                cmd = c->lastcmd;
+            else
+                cmd = lookupCommand(c->argv, c->argc);
+        }
+
         if (!cmd) {
             /* Handle possible security attacks. */
             if (!strcasecmp(c->argv[0]->ptr,"host:") || !strcasecmp(c->argv[0]->ptr,"post")) {
