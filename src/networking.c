@@ -3049,14 +3049,13 @@ int processInputBuffer(client *c) {
             parseInputBuffer(c);
             if (consumePendingCommand(c) == 0) break;
 
-            // if (c->running_tid == IOTHREAD_MAIN_THREAD_ID && !(c->flags & CLIENT_IN_PREFETCH)) {
-            //     /* Prefetch the commands. */
-            //     resetCommandsBatch();
-            //     addCommandToBatch(c);
-            //     prefetchCommands();
-            // }
+            if (c->running_tid == IOTHREAD_MAIN_THREAD_ID && !(c->flags & CLIENT_IN_PREFETCH)) {
+                /* Prefetch the commands. */
+                resetCommandsBatch();
+                addCommandToBatch(c);
+                prefetchCommands();
+            }
         }
-        // printf("pending commands len: %d\n", c->pending_cmds.len);
 
         if (c->read_error && c->read_error != CLIENT_READ_COMMAND_NOT_FOUND &&
             c->read_error != CLIENT_READ_BAD_ARITY) {
@@ -3247,10 +3246,8 @@ void readQueryFromClient(connection *conn) {
 
     /* There is more data in the client input buffer, continue parsing it
      * and check if there is a full command to execute. */
-    c->flags |= CLIENT_IN_PREFETCH;
     if (processInputBuffer(c) == C_ERR)
          c = NULL;
-    if (c) c->flags &= ~CLIENT_IN_PREFETCH;
 
 done:
     if (c && c->read_error) {
