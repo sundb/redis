@@ -33,6 +33,7 @@ static inline int _clientHasPendingRepliesSlave(client *c);
 static inline int _clientHasPendingRepliesNonSlave(client *c);
 static inline int _writeToClientNonSlave(client *c, ssize_t *nwritten);
 static inline int _writeToClientSlave(client *c, ssize_t *nwritten);
+static int consumePendingCommand(client *c);
 int ProcessingEventsWhileBlocked = 0; /* See processEventsWhileBlocked(). */
 __thread sds thread_reusable_qb = NULL;
 __thread int thread_reusable_qb_used = 0; /* Avoid multiple clients using reusable query
@@ -2924,12 +2925,13 @@ void handleClientReadError(client *c) {
             sdsfree(bytes);
             break;
         }
-        case CLIENT_READ_COMMAND_NOT_FOUND: {
+        case CLIENT_READ_COMMAND_NOT_FOUND:
+        case CLIENT_READ_BAD_ARITY:
+            /* These are command validation errors, not protocol errors.
+             * They are handled in processCommand() via commandCheckExistence()
+             * and commandCheckArity(), which generate appropriate error responses.
+             * No action needed here. */
             break;
-        }
-        case CLIENT_READ_BAD_ARITY: {
-            break;
-        }
         default:
             serverPanic("Unknown client read error: %d", c->read_error);
             break;
@@ -2996,23 +2998,11 @@ void parseInputBuffer(client *c) {
     }
 }
 
-/* Pops a command from the command queue and sets it as the client's current
- * command. Returns true on success and false if the queue was empty. */
-static int consumePendingCommand(client *c) {
-    pendingCommand *curcmd = c->pending_cmds.head;
-    if (!curcmd || curcmd->parsing_incomplete) return 0;
-
-    /* We populate the old client fields so we don't have to modify all existing logic to work with pendingCommands */
-    c->argc = curcmd->argc;
-    c->argv = curcmd->argv;
-    c->argv_len = curcmd->argv_len;
-    c->net_input_bytes_curr_cmd += curcmd->input_bytes;
-    c->reploff_next = curcmd->reploff;
-    c->slot = curcmd->slot;
-    c->lookedcmd = curcmd->cmd;
-    c->read_error = curcmd->flags;
-    c->current_pending_cmd = curcmd;
-    return 1;
+/* Helper function to check if a read error is fatal (should stop processing) */
+static inline int isClientReadErrorFatal(int read_error) {
+    return read_error != 0 &&
+           read_error != CLIENT_READ_COMMAND_NOT_FOUND &&
+           read_error != CLIENT_READ_BAD_ARITY;
 }
 
 /* This function is called every time, in the client structure 'c', there is
@@ -4965,4 +4955,24 @@ pendingCommand *popPendingCommandFromTail(pendingCommandList *list) {
     list->len--;
     if (!cmd->parsing_incomplete) list->ready_len--;
     return cmd;
+}
+
+/* Consumes the first ready command from the pending command list and sets it as
+ * the client's current command. The command remains in the list but is marked as
+ * current. Returns 1 on success, 0 if no ready command is available (empty list
+ * or head command is still parsing). */
+static int consumePendingCommand(client *c) {
+    pendingCommand *curcmd = c->pending_cmds.head;
+    if (!curcmd || curcmd->parsing_incomplete) return 0;
+
+    c->argc = curcmd->argc;
+    c->argv = curcmd->argv;
+    c->argv_len = curcmd->argv_len;
+    c->net_input_bytes_curr_cmd += curcmd->input_bytes;
+    c->reploff_next = curcmd->reploff;
+    c->slot = curcmd->slot;
+    c->lookedcmd = curcmd->cmd;
+    c->read_error = curcmd->flags;
+    c->current_pending_cmd = curcmd;
+    return 1;
 }
