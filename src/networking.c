@@ -167,7 +167,7 @@ client *createClient(connection *conn) {
     c->argv_len = 0;
     c->all_argv_len_sum = 0;
     c->pending_cmds.head = c->pending_cmds.tail = NULL;
-    c->pending_cmds.length = 0;
+    c->pending_cmds.len = c->pending_cmds.ready_len = 0;
     c->current_pending_cmd = NULL;
     c->original_argc = 0;
     c->original_argv = NULL;
@@ -1550,7 +1550,7 @@ void freeClientArgv(client *c) {
 void freeClientPendingCommands(client *c, int num_pcmds_to_free) {
     /* (-1) means free all pending commands */
     if (num_pcmds_to_free == -1)
-        num_pcmds_to_free = c->pending_cmds.length;
+        num_pcmds_to_free = c->pending_cmds.len;
 
     while (num_pcmds_to_free--) {
         pendingCommand *pcmd = popPendingCommandFromHead(&c->pending_cmds);
@@ -1868,7 +1868,7 @@ void freeClient(client *c) {
     unlinkClient(c);
 
     freeClientMultiState(c);
-    serverAssert(c->pending_cmds.length == 0);
+    serverAssert(c->pending_cmds.len == 0);
 
     /* Master/slave cleanup Case 1:
      * we lost the connection with a slave. */
@@ -2325,7 +2325,7 @@ static inline void resetClientInternal(client *c, int num_pcmds_to_free) {
      * An example is in the case of modules (RM_Call) */
     if (c->current_pending_cmd) {
         freeClientPendingCommands(c, num_pcmds_to_free);
-        if (c->pending_cmds.length == 0)
+        if (c->pending_cmds.len == 0)
             serverAssert(c->all_argv_len_sum == 0);
         c->current_pending_cmd = NULL;
     } else if (c->argv) {
@@ -2856,7 +2856,7 @@ int processPendingCommandAndInputBuffer(client *c) {
      * Note: when a master client steps into this function,
      * it can always satisfy this condition, because its querybuf
      * contains data not applied. */
-    if ((c->querybuf && sdslen(c->querybuf) > 0) || c->pending_cmds.length > 0) {
+    if ((c->querybuf && sdslen(c->querybuf) > 0) || c->pending_cmds.ready_len > 0) {
         return processInputBuffer(c);
     }
     return C_OK;
@@ -2945,7 +2945,7 @@ void parseInputBuffer(client *c) {
     const int lookahead = authRequired(c) ? 1 : server.lookahead;
 
     /* Parse up to lookahead commands */
-    while (c->pending_cmds.length < lookahead && c->querybuf && c->qb_pos < sdslen(c->querybuf)) {
+    while (c->pending_cmds.ready_len < lookahead && c->querybuf && c->qb_pos < sdslen(c->querybuf)) {
         /* Determine request type when unknown. */
         if (!c->reqtype) {
             if (c->querybuf[c->qb_pos] == '*') {
@@ -2966,9 +2966,8 @@ void parseInputBuffer(client *c) {
                 return;
             }
         } else if (c->reqtype == PROTO_REQ_MULTIBULK) {
-            int incomplete = c->pending_cmds.head && c->pending_cmds.head->parsing_incomplete;
+            int incomplete = c->pending_cmds.tail && c->pending_cmds.tail->parsing_incomplete;
             if (unlikely(incomplete)) {
-                serverAssert(c->pending_cmds.length == 1);
                 pcmd = popPendingCommandFromHead(&c->pending_cmds);
             } else {
                 pcmd = zmalloc(sizeof(pendingCommand));
@@ -3024,7 +3023,7 @@ static int consumePendingCommand(client *c) {
 int processInputBuffer(client *c) {
     /* Keep processing while there is something in the input buffer */
     while ((c->querybuf && c->qb_pos < sdslen(c->querybuf)) ||
-           c->pending_cmds.length > 0) {
+           c->pending_cmds.ready_len > 0) {
         /* Immediately abort if the client is in the middle of something. */
         if (c->flags & CLIENT_BLOCKED) break;
 
@@ -3050,13 +3049,14 @@ int processInputBuffer(client *c) {
             parseInputBuffer(c);
             if (consumePendingCommand(c) == 0) break;
 
-            if (c->running_tid == IOTHREAD_MAIN_THREAD_ID && !(c->flags & CLIENT_IN_PREFETCH)) {
-                /* Prefetch the commands. */
-                resetCommandsBatch();
-                addCommandToBatch(c);
-                prefetchCommands();
-            }
+            // if (c->running_tid == IOTHREAD_MAIN_THREAD_ID && !(c->flags & CLIENT_IN_PREFETCH)) {
+            //     /* Prefetch the commands. */
+            //     resetCommandsBatch();
+            //     addCommandToBatch(c);
+            //     prefetchCommands();
+            // }
         }
+        // printf("pending commands len: %d\n", c->pending_cmds.len);
 
         if (c->read_error && c->read_error != CLIENT_READ_COMMAND_NOT_FOUND &&
             c->read_error != CLIENT_READ_BAD_ARITY) {
@@ -4316,8 +4316,10 @@ void replaceClientCommandVector(client *c, int argc, robj **argv) {
     int is_mstate = 0;
     if (c->mstate.executing_cmd < 0) {
         is_mstate = 0;
-        if (c->pending_cmds.length > 0)
+        if (c->pending_cmds.ready_len > 0) {
             pcmd = c->pending_cmds.head;
+            serverAssert(!pcmd->parsing_incomplete);
+        }
     } else {
         is_mstate = 1;
         serverAssert(c->mstate.executing_cmd < c->mstate.count);
@@ -4928,13 +4930,15 @@ void addPengingCommand(pendingCommandList *queue, pendingCommand *cmd) {
     }
 
     queue->tail = cmd;
-    queue->length++;
+    queue->len++;
+    if (!cmd->parsing_incomplete) queue->ready_len++;
 }
 
 pendingCommand *popPendingCommandFromHead(pendingCommandList *list) {
     pendingCommand *cmd = list->head;
-    list->head = cmd->next;
+    if (!cmd) return NULL;  /* List is empty */
 
+    list->head = cmd->next;
     if (list->head) {
         list->head->prev = NULL;
     } else {
@@ -4943,6 +4947,25 @@ pendingCommand *popPendingCommandFromHead(pendingCommandList *list) {
     }
 
     cmd->next = cmd->prev = NULL;
-    list->length--;
+    list->len--;
+    if (!cmd->parsing_incomplete) list->ready_len--;
+    return cmd;
+}
+
+pendingCommand *popPendingCommandFromTail(pendingCommandList *list) {
+    pendingCommand *cmd = list->tail;
+    if (!cmd) return NULL;  /* List is empty */
+
+    list->tail = cmd->prev;
+    if (list->tail) {
+        list->tail->next = NULL;
+    } else {
+        /* Queue became empty */
+        list->head = NULL;
+    }
+
+    cmd->next = cmd->prev = NULL;
+    list->len--;
+    if (!cmd->parsing_incomplete) list->ready_len--;
     return cmd;
 }

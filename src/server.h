@@ -1209,7 +1209,8 @@ typedef struct readyList {
 typedef struct pendingCommandList {
     pendingCommand *head;
     pendingCommand *tail;
-    int length; /* Number of commands in the queue */
+    int len; /* Number of commands in the list */
+    int ready_len; /* Number of commands that are ready to be processed */
 } pendingCommandList;
 
 /* This structure represents a Redis user. This is useful for ACLs, the
@@ -2833,6 +2834,7 @@ void initPendingCommand(pendingCommand *pcmd);
 void freePendingCommand(client *c, pendingCommand *pcmd);
 void addPengingCommand(pendingCommandList *queue, pendingCommand *cmd);
 pendingCommand *popPendingCommandFromHead(pendingCommandList *queue);
+pendingCommand *popPendingCommandFromTail(pendingCommandList *queue);
 
 /* Utils */
 long long ustime(void);
