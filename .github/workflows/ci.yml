@@ -14,4 +14,4 @@ jobs:
       - name: testprep
         run: sudo apt-get install tcl8.6 tclx -y
       - name: test
-        run: ./runtest --verbose --tags -slow --dump-logs --clients 1
+        run: ./runtest --verbose --tags -slow --dump-logs
