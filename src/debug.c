@@ -2281,6 +2281,7 @@ int memtest_test_linux_anonymous_maps(void) {
 }
 #endif /* HAVE_PROC_MAPS */
 
+REDIS_NO_SANITIZE("address")
 static void killMainThread(void) {
     int err;
     if (pthread_self() != server.main_thread_id && pthread_cancel(server.main_thread_id) == 0) {
