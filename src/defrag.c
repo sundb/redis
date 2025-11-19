@@ -73,20 +73,21 @@ struct DefragContext {
 };
 static struct DefragContext defrag = {0, 0, 0, 0, 1.0f};
 
+#define ITER_SLOT_DEFRAG_LUT (-2)
+#define ITER_SLOT_UNASSIGNED (-1)
+
 /* There are a number of stages which process a kvstore. To simplify this, a stage helper function
  * `defragStageKvstoreHelper()` is defined. This function aids in iterating over the kvstore. It
  * uses these definitions.
  */
 /* State of the kvstore helper. The context passed to the kvstore helper MUST BEGIN
  * with a kvstoreIterState (or be passed as NULL). */
-#define KVS_SLOT_DEFRAG_LUT -2
-#define KVS_SLOT_UNASSIGNED -1
 typedef struct {
     kvstore *kvs;
-    int slot;
+    int slot;   /* Consider defines ITER_SLOT_XXX for special values. */
     unsigned long cursor;
 } kvstoreIterState;
-#define INIT_KVSTORE_STATE(kvs) ((kvstoreIterState){(kvs), KVS_SLOT_DEFRAG_LUT, 0})
+#define INIT_KVSTORE_STATE(kvs) ((kvstoreIterState){(kvs), ITER_SLOT_DEFRAG_LUT, 0})
 
 /* The kvstore helper uses this function to perform tasks before continuing the iteration. For the
  * main dictionary, large items are set aside and processed by this function before continuing with
@@ -117,12 +118,13 @@ typedef struct {
 } defragKeysCtx;
 static_assert(offsetof(defragKeysCtx, kvstate) == 0, "defragStageKvstoreHelper requires this");
 
-/* Context for hexpires */
+/* Context for subexpires */
 typedef struct {
+    estore *subexpires;
+    int slot; /* Consider defines ITER_SLOT_XXX for special values. */
     int dbid;
-    ebuckets hexpires;
     unsigned long cursor;
-} defragHExpiresCtx;
+} defragSubexpiresCtx;
 
 /* Context for pubsub kvstores */
 typedef dict *(*getClientChannelsFn)(client *);
@@ -874,7 +876,8 @@ void* defragStreamConsumerPendingEntry(raxIterator *ri, void *privdata) {
     nack->cgroup_ref_node->value = ctx->cg; /* Update the value of cgroups_ref node to the consumer group. */
     newnack = activeDefragAlloc(nack);
     if (newnack) {
-        /* update consumer group pointer to the nack */
+        /* Update consumer group pointer to the nack.
+         * pel_by_time doesn't need updating since delivery time is unchanged. */
         void *prev;
         raxInsert(ctx->cg->pel, ri->key, ri->key_len, newnack, &prev);
         serverAssert(prev==nack);
@@ -882,9 +885,16 @@ void* defragStreamConsumerPendingEntry(raxIterator *ri, void *privdata) {
     return newnack;
 }
 
+typedef struct {
+    stream *s;
+    streamCG *cg;
+} StreamConsumerContext;
+
 void* defragStreamConsumer(raxIterator *ri, void *privdata) {
+    StreamConsumerContext *ctx = privdata;
+    stream *s = ctx->s;
+    streamCG *cg = ctx->cg;
     streamConsumer *c = ri->data;
-    streamCG *cg = privdata;
     void *newc = activeDefragAlloc(c);
     if (newc) {
         c = newc;
@@ -893,6 +903,8 @@ void* defragStreamConsumer(raxIterator *ri, void *privdata) {
     if (newsds)
         c->name = newsds;
     if (c->pel) {
+        /* Update pel back-pointer to new stream */
+        c->pel->alloc_size = &s->alloc_size;
         PendingEntryContext pel_ctx = {cg, c};
         defragRadixTree(&c->pel, 0, defragStreamConsumerPendingEntry, &pel_ctx);
     }
@@ -900,14 +912,26 @@ void* defragStreamConsumer(raxIterator *ri, void *privdata) {
 }
 
 void* defragStreamConsumerGroup(raxIterator *ri, void *privdata) {
+    stream *s = privdata;
     streamCG *newcg, *cg = ri->data;
-    UNUSED(privdata);
     if ((newcg = activeDefragAlloc(cg)))
         cg = newcg;
-    if (cg->consumers)
-        defragRadixTree(&cg->consumers, 0, defragStreamConsumer, cg);
-    if (cg->pel)
+    if (cg->pel) {
+        /* Update pel back-pointer to new stream */
+        cg->pel->alloc_size = &s->alloc_size;
         defragRadixTree(&cg->pel, 0, NULL, NULL);
+    }
+    if (cg->pel_by_time) {
+        /* Update pel_by_time back-pointer to new stream */
+        cg->pel_by_time->alloc_size = &s->alloc_size;
+        defragRadixTree(&cg->pel_by_time, 0, NULL, NULL);
+    }
+    if (cg->consumers) {
+        /* Update consumers back-pointer to new stream */
+        cg->consumers->alloc_size = &s->alloc_size;
+        StreamConsumerContext consumer_ctx = {s, cg};
+        defragRadixTree(&cg->consumers, 0, defragStreamConsumer, &consumer_ctx);
+    }
     return cg;
 }
 
@@ -919,6 +943,8 @@ void defragStream(defragKeysCtx *ctx, kvobj *ob) {
     if ((news = activeDefragAlloc(s)))
         ob->ptr = s = news;
 
+    /* Update rax back-pointer to new stream */
+    s->rax->alloc_size = &s->alloc_size;
     if (raxSize(s->rax) > server.active_defrag_max_scan_fields) {
         rax *newrax = activeDefragAlloc(s->rax);
         if (newrax)
@@ -927,8 +953,16 @@ void defragStream(defragKeysCtx *ctx, kvobj *ob) {
     } else
         defragRadixTree(&s->rax, 1, NULL, NULL);
 
-    if (s->cgroups)
-        defragRadixTree(&s->cgroups, 0, defragStreamConsumerGroup, NULL);
+    if (s->cgroups) {
+        /* Update cgroups back-pointer to new stream */
+        s->cgroups->alloc_size = &s->alloc_size;
+        defragRadixTree(&s->cgroups, 0, defragStreamConsumerGroup, s);
+    }
+
+    if (s->cgroups_ref) {
+        /* Update cgroups_ref back-pointer to new stream */
+        s->cgroups_ref->alloc_size = &s->alloc_size;
+    }
 }
 
 /* Defrag a module key. This is either done immediately or scheduled
@@ -948,10 +982,14 @@ void defragKey(defragKeysCtx *ctx, dictEntry *de, dictEntryLink link) {
     UNUSED(link);
     dictEntryLink exlink = NULL;
     kvobj *kvnew = NULL, *ob = dictGetKV(de);
+    size_t oldsize = 0;
     redisDb *db = &server.db[ctx->dbid];
     int slot = ctx->kvstate.slot;
     unsigned char *newzl;
-    
+
+    if (server.memory_tracking_per_slot)
+        oldsize = kvobjAllocSize(ob);
+
     long long expire = kvobjGetExpire(ob);
     /* We can't search in db->expires for that KV after we've released
      * the pointer it holds, since it won't be able to do the string
@@ -962,7 +1000,7 @@ void defragKey(defragKeysCtx *ctx, dictEntry *de, dictEntryLink link) {
      }
 
     /* Try to defrag robj and/or string value. For hash objects with HFEs,
-     * defer defragmentation until processing db's hexpires. */
+     * defer defragmentation until processing db's subexpires. */
     if (!(ob->type == OBJ_HASH && hashTypeGetMinExpire(ob, 0) != EB_EXPIRE_TIME_INVALID)) {
         /* If the dict doesn't have metadata, we directly defrag it. */
         kvnew = activeDefragStringOb(ob);
@@ -1028,6 +1066,8 @@ void defragKey(defragKeysCtx *ctx, dictEntry *de, dictEntryLink link) {
     } else {
         serverPanic("Unknown object type");
     }
+    if (server.memory_tracking_per_slot)
+        updateSlotAllocSize(db, slot, oldsize, kvobjAllocSize(ob));
 }
 
 /* Defrag scan callback for the main db dictionary. */
@@ -1155,6 +1195,9 @@ static int defragIsRunning(void) {
 /* A kvstoreHelperPreContinueFn */
 static doneStatus defragLaterStep(void *ctx, monotime endtime) {
     defragKeysCtx *defrag_keys_ctx = ctx;
+    redisDb *db = &server.db[defrag_keys_ctx->dbid];
+    int slot = defrag_keys_ctx->kvstate.slot;
+    size_t oldsize = 0;
 
     unsigned int iterations = 0;
     unsigned long long prev_defragged = server.stat_active_defrag_hits;
@@ -1167,7 +1210,11 @@ static doneStatus defragLaterStep(void *ctx, monotime endtime) {
         kvobj *kv = de ? dictGetKV(de) : NULL;
 
         long long key_defragged = server.stat_active_defrag_hits;
+        if (server.memory_tracking_per_slot && kv)
+            oldsize = kvobjAllocSize(kv);
         int timeout = (defragLaterItem(kv, &defrag_keys_ctx->defrag_later_cursor, endtime, defrag_keys_ctx->dbid) == 1);
+        if (server.memory_tracking_per_slot && kv)
+            updateSlotAllocSize(db, slot, oldsize, kvobjAllocSize(kv));
         if (key_defragged != server.stat_active_defrag_hits) {
             server.stat_active_defrag_key_hits++;
         } else {
@@ -1251,13 +1298,13 @@ static doneStatus defragStageKvstoreHelper(monotime endtime,
     unsigned long long prev_scanned = server.stat_active_defrag_scanned;
     kvstoreIterState *state = (kvstoreIterState*)ctx;
 
-    if (state->slot == KVS_SLOT_DEFRAG_LUT) {
+    if (state->slot == ITER_SLOT_DEFRAG_LUT) {
         /* Before we start scanning the kvstore, handle the main structures */
         do {
             state->cursor = kvstoreDictLUTDefrag(state->kvs, state->cursor, dictDefragTables);
             if (getMonotonicUs() >= endtime) return DEFRAG_NOT_DONE;
         } while (state->cursor != 0);
-        state->slot = KVS_SLOT_UNASSIGNED;
+        state->slot = ITER_SLOT_UNASSIGNED;
     }
 
     while (1) {
@@ -1274,13 +1321,13 @@ static doneStatus defragStageKvstoreHelper(monotime endtime,
 
         if (!state->cursor) {
             /* If there's no cursor, we're ready to begin a new kvstore slot. */
-            if (state->slot == KVS_SLOT_UNASSIGNED) {
+            if (state->slot == ITER_SLOT_UNASSIGNED) {
                 state->slot = kvstoreGetFirstNonEmptyDictIndex(state->kvs);
             } else {
                 state->slot = kvstoreGetNextNonEmptyDictIndex(state->kvs, state->slot);
             }
 
-            if (state->slot == KVS_SLOT_UNASSIGNED) return DEFRAG_DONE;
+            if (state->slot == ITER_SLOT_UNASSIGNED) return DEFRAG_DONE;
         }
 
         /* Whatever privdata's actual type, this function requires that it begins with kvstoreIterState. */
@@ -1328,57 +1375,81 @@ static doneStatus defragStageExpiresKvstore(void *ctx, monotime endtime) {
         scanCallbackCountScanned, NULL, &defragfns);
 }
 
-/* Defragment hash object with HFE and update its reference in the DB keys. */
-void *activeDefragHExpiresOB(void *ptr, void *privdata) {
+/* Defrag (hash) object with subexpiry and update its reference in the DB keys. */
+void *activeDefragSubexpiresOB(void *ptr, void *privdata) {
     redisDb *db = privdata;
     dictEntryLink link, exlink = NULL;
-    kvobj *newkv, *kvobj = ptr;
-    sds keystr = kvobjGetKey(kvobj);
+    kvobj *newkv, *kv = ptr;
+    sds keystr = kvobjGetKey(kv);
     unsigned int slot = calculateKeySlot(keystr);
-    serverAssert(kvobj->type == OBJ_HASH);
 
-    long long expire = kvobjGetExpire(kvobj);
+    serverAssert(kv->type == OBJ_HASH); /* Currently relevant only for hashes */
+
+    long long expire = kvobjGetExpire(kv);
     /* We can't search in db->expires for that KV after we've released
      * the pointer it holds, since it won't be able to do the string
      * compare. Search it before, if needed. */
     if (expire != -1) {
-        exlink = kvstoreDictFindLink(db->expires, slot, kvobjGetKey(kvobj), NULL);
+        exlink = kvstoreDictFindLink(db->expires, slot, keystr, NULL);
         serverAssert(exlink != NULL);
     }
 
-    if ((newkv = activeDefragAllocWithoutFree(kvobj))) {
+    if ((newkv = activeDefragAllocWithoutFree(kv))) {
         /* Update its reference in the DB keys. */
         link = kvstoreDictFindLink(db->keys, slot, keystr, NULL);
         serverAssert(link != NULL);
         kvstoreDictSetAtLink(db->keys, slot, newkv, &link, 0);
         if (expire != -1)
             kvstoreDictSetAtLink(db->expires, slot, newkv, &exlink, 0);
-        activeDefragFree(kvobj);
+        activeDefragFree(kv);
     }
     return newkv;
 }
 
-static doneStatus defragStageHExpires(void *ctx, monotime endtime) {
+static doneStatus defragStageSubexpires(void *ctx, monotime endtime) {
     unsigned int iterations = 0;
-    defragHExpiresCtx *defrag_hexpires_ctx = ctx;
-    redisDb *db = &server.db[defrag_hexpires_ctx->dbid];
-    if (db->hexpires != defrag_hexpires_ctx->hexpires) {
-        /* There has been a change of the kvs (flushdb, swapdb, etc.). Just complete the stage. */
+    unsigned long long prev_defragged = server.stat_active_defrag_hits;
+    unsigned long long prev_scanned = server.stat_active_defrag_scanned;
+    defragSubexpiresCtx *subctx = ctx;
+    redisDb *db = &server.db[subctx->dbid];
+    estore *subexpires = db->subexpires;
+
+    /* If estore changed (flushdb, swapdb, etc.), Just complete the stage. */
+    if (db->subexpires != subctx->subexpires) {
         return DEFRAG_DONE;
     }
 
     ebDefragFunctions eb_defragfns = {
         .defragAlloc = activeDefragAlloc,
-        .defragItem = activeDefragHExpiresOB
+        .defragItem = activeDefragSubexpiresOB
     };
-    while (1) {
-        if (!ebScanDefrag(&db->hexpires, &hashExpireBucketsType, &defrag_hexpires_ctx->cursor, &eb_defragfns, db))
-            return DEFRAG_DONE;
 
-        if (++iterations > 16) {
+    while (1) {
+        if (++iterations > 16 ||
+            server.stat_active_defrag_hits - prev_defragged > 512 ||
+            server.stat_active_defrag_scanned - prev_scanned > 64)
+        {
             if (getMonotonicUs() >= endtime) break;
             iterations = 0;
+            prev_defragged = server.stat_active_defrag_hits;
+            prev_scanned = server.stat_active_defrag_scanned;
         }
+
+        /* If there's no cursor, we're ready to begin a new estore slot. */
+        if (!subctx->cursor) {
+            if (subctx->slot == ITER_SLOT_UNASSIGNED) {
+                subctx->slot = estoreGetFirstNonEmptyBucket(subexpires);
+            } else {
+                subctx->slot = estoreGetNextNonEmptyBucket(subexpires, subctx->slot);
+            }
+
+            if (subctx->slot == ITER_SLOT_UNASSIGNED) return DEFRAG_DONE;
+        }
+
+        /* Get the ebuckets for the current slot and scan it */
+        ebuckets *bucket = estoreGetBuckets(subexpires, subctx->slot);
+        if (!ebScanDefrag(bucket, &subexpiresBucketsType, &subctx->cursor, &eb_defragfns, db))
+            subctx->cursor = 0; /* Reset cursor to move to next slot */
     }
 
     return DEFRAG_NOT_DONE;
@@ -1709,11 +1780,13 @@ static void beginDefragCycle(void) {
         defrag_expires_ctx->dbid = dbid;
         addDefragStage(defragStageExpiresKvstore, freeDefragKeysContext, defrag_expires_ctx);
 
-        /* Add stage for hexpires. */
-        defragHExpiresCtx *defrag_hexpires_ctx = zcalloc(sizeof(defragHExpiresCtx));
-        defrag_hexpires_ctx->hexpires = db->hexpires;
-        defrag_hexpires_ctx->dbid = dbid;
-        addDefragStage(defragStageHExpires, zfree, defrag_hexpires_ctx);
+        /* Add stage for subexpires. */
+        defragSubexpiresCtx *defrag_subexpires_ctx = zcalloc(sizeof(defragSubexpiresCtx));
+        defrag_subexpires_ctx->subexpires = db->subexpires;
+        defrag_subexpires_ctx->slot = ITER_SLOT_UNASSIGNED;
+        defrag_subexpires_ctx->cursor = 0;
+        defrag_subexpires_ctx->dbid = dbid;
+        addDefragStage(defragStageSubexpires, zfree, defrag_subexpires_ctx);
     }
 
     /* Add stage for pubsub channels. */
