@@ -1063,7 +1063,7 @@ struct redisObject {
     unsigned iskvobj : 1;   /* 1 if this struct serves as a kvobj base */
     unsigned expirable : 1; /* 1 if this key has expiration time attached.
                              * If set, then this object is of type kvobj */
-    unsigned refcount : OBJ_REFCOUNT_BITS;
+    redisAtomic unsigned refcount;
     void *ptr;
 };
 
@@ -1420,7 +1420,6 @@ typedef struct client {
     list *reply;            /* List of reply objects to send to the client. */
     unsigned long long reply_bytes; /* Tot bytes of objects in reply list. */
     list *deferred_reply_errors;    /* Used for module thread safe contexts. */
-    list *deferred_reply_blocks;    /* List of reply blocks to be freed in main thread. */
     size_t sentlen;         /* Amount of bytes already sent in the current
                                buffer or object being sent. */
     time_t ctime;           /* Client creation time. */
@@ -1471,7 +1470,6 @@ typedef struct client {
     listNode *client_list_node; /* list node in client list */
     listNode *io_thread_client_list_node; /* list node in io thread client list */
     listNode *postponed_list_node; /* list node within the postponed list */
-    listNode *pending_ref_reply_client_list_node; /* list node in clients_with_pending_ref_reply list */
     void *module_blocked_client; /* Pointer to the RedisModuleBlockedClient associated with this
                                   * client. This is set in case of module authentication before the
                                   * unblocked client is reprocessed to handle reply callbacks. */
@@ -1899,7 +1897,6 @@ struct redisServer {
     list *clients_to_close;     /* Clients to close asynchronously */
     list *clients_pending_write; /* There is to write or install handler. */
     list *clients_pending_read;  /* Client has pending read socket buffers. */
-    list *clients_with_pending_ref_reply; /* Clients that have pending referenced replies. */
     list *slaves, *monitors;    /* List of slaves and MONITORs */
     client *current_client;     /* The client that triggered the command execution (External or AOF). */
     client *executing_client;   /* The client executing the current command (possibly script or module). */
@@ -2958,7 +2955,6 @@ void freeClientArgv(client *c);
 void freeClientPendingCommands(client *c, int num_pcmds_to_free);
 void tryDeferFreeClientObject(client *c, int type, void *ptr);
 void freeClientDeferredObjects(client *c, int free_array);
-void processDeferredReplyBlocks(client *c);
 void sendReplyToClient(connection *conn);
 void *addReplyDeferredLen(client *c);
 void setDeferredArrayLen(client *c, void *node, long length);

@@ -225,8 +225,6 @@ client *createClient(connection *conn) {
     c->main_ch_client_id = 0;
     c->reply = listCreate();
     c->deferred_reply_errors = NULL;
-    c->deferred_reply_blocks = listCreate();
-    listSetFreeMethod(c->deferred_reply_blocks,freeClientReplyValue);
     c->reply_bytes = 0;
     c->obuf_soft_limit_reached_time = 0;
     listSetFreeMethod(c->reply,freeClientReplyValue);
@@ -242,7 +240,6 @@ client *createClient(connection *conn) {
     c->client_list_node = NULL;
     c->io_thread_client_list_node = NULL;
     c->postponed_list_node = NULL;
-    c->pending_ref_reply_client_list_node = NULL;
     c->client_tracking_redirection = 0;
     c->client_tracking_prefixes = NULL;
     c->last_cron_check_time = 0;
@@ -398,12 +395,6 @@ static void _addReplyObjectToList(client *c, robj *obj) {
 
     listAddNodeTail(c->reply, block);
     c->reply_bytes += len + block->prefix_cnt + 2; /* data + prefix + crlf */
-
-    /* Add client to the referenced reply client list if not already there */
-    if (c->pending_ref_reply_client_list_node == NULL) {
-        listAddNodeTail(server.clients_with_pending_ref_reply, c);
-        c->pending_ref_reply_client_list_node = listLast(server.clients_with_pending_ref_reply);
-    }
 
     closeClientOnOutputBufferLimitReached(c, 1);
 }
@@ -1632,22 +1623,6 @@ void freeClientDeferredObjects(client *c, int free_array) {
     }
 }
 
-/* Process deferred reply blocks by transferring them to the main thread's
- * deferred objects mechanism for proper cleanup. This is called when a client
- * is being processed in the main thread and has accumulated reply blocks
- * that need to be freed. */
-void processDeferredReplyBlocks(client *c) {
-    if (!c->deferred_reply_blocks || listLength(c->deferred_reply_blocks) == 0)
-        return;
-
-    /* Clear the deferred reply blocks list */
-    listEmpty(c->deferred_reply_blocks);
-
-    serverAssert(c->pending_ref_reply_client_list_node);
-    listDelNode(server.clients_with_pending_ref_reply, c->pending_ref_reply_client_list_node);
-    c->pending_ref_reply_client_list_node = NULL;
-}
-
 void freeClientOriginalArgv(client *c) {
     /* We didn't rewrite this client */
     if (!c->original_argv) return;
@@ -1786,12 +1761,6 @@ void unlinkClient(client *c) {
         serverAssert(ln != NULL);
         listDelNode(server.unblocked_clients,ln);
         c->flags &= ~CLIENT_UNBLOCKED;
-    }
-
-    /* Remove from the list of clients with referenced reply blocks if needed. */
-    if (c->pending_ref_reply_client_list_node) {
-        listDelNode(server.clients_with_pending_ref_reply, c->pending_ref_reply_client_list_node);
-        c->pending_ref_reply_client_list_node = NULL;
     }
 
     freeClientPendingCommands(c, -1);
@@ -1981,7 +1950,6 @@ void freeClient(client *c) {
 
     /* Free data structures. */
     listRelease(c->reply);
-    listRelease(c->deferred_reply_blocks);
     zfree(c->buf);
     freeReplicaReferencedReplBuffer(c);
     freeClientOriginalArgv(c);
@@ -2278,12 +2246,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             }
             remaining -= (ssize_t)(len - c->sentlen);
             c->reply_bytes -= len;
-            if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-                listUnlinkNode(c->reply, next);
-                listLinkNodeTail(c->deferred_reply_blocks, next);
-            } else {
-                listDelNode(c->reply, next);
-            }
+            listDelNode(c->reply, next);
             c->sentlen = 0;
             continue;
         }
@@ -2444,15 +2407,6 @@ int writeToClient(client *c, int handler_installed) {
         if (handler_installed) {
             /* IO Thread also can do that now. */
             connSetWriteHandler(c->conn, NULL);
-        }
-
-        /* Remove from the list of clients with pending ref reply. */
-        if (c->running_tid == IOTHREAD_MAIN_THREAD_ID &&
-            c->pending_ref_reply_client_list_node)
-        {
-            serverAssert(listLength(c->deferred_reply_blocks) == 0);
-            listDelNode(server.clients_with_pending_ref_reply, c->pending_ref_reply_client_list_node);
-            c->pending_ref_reply_client_list_node = NULL;
         }
 
         /* Close connection after entire reply has been sent. */
