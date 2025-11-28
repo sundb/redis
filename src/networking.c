@@ -384,12 +384,13 @@ static void _addReplyObjectToList(client *c, robj *obj) {
     clientReplyBlockRef *block = zmalloc(sizeof(clientReplyBlockRef));
     block->type = CLIENT_REPLY_BLOCK_REF;
     block->obj = obj;
+    block->str = obj->ptr;
+    block->slen = sdslen(obj->ptr);
     incrRefCount(obj);
 
     /* Fill prefix with bulk string length: "$<len>\r\n" and crlf: "\r\n" */
-    const size_t len = sdslen(obj->ptr);
     block->prefix[0] = '$';
-    size_t num_len = ll2string(block->prefix + 1, sizeof(block->prefix) - 3, len);
+    size_t num_len = ll2string(block->prefix + 1, sizeof(block->prefix) - 3, block->slen);
     block->prefix[num_len + 1] = '\r';
     block->prefix[num_len + 2] = '\n';
     block->prefix_cnt = num_len + 3;
@@ -397,7 +398,7 @@ static void _addReplyObjectToList(client *c, robj *obj) {
     block->crlf[1] = '\n';
 
     listAddNodeTail(c->reply, block);
-    c->reply_bytes += len + block->prefix_cnt + 2; /* data + prefix + crlf */
+    c->reply_bytes += block->slen + block->prefix_cnt + 2; /* data + prefix + crlf */
 
     /* Add client to the referenced reply client list if not already there */
     if (c->pending_ref_reply_client_list_node == NULL) {
@@ -1193,7 +1194,7 @@ static int isCopyAvoidPreferred(client *c, robj *obj) {
     if (type != CLIENT_TYPE_NORMAL && type != CLIENT_TYPE_PUBSUB) return 0;
 
     /* Copy avoidance is preferred for any string size starting certain number of I/O threads  */
-    if (server.min_io_threads_copy_avoid && server.io_threads_num < server.min_io_threads_copy_avoid) return 0;
+    if (server.min_io_threads_copy_avoid && server.io_threads_num >= server.min_io_threads_copy_avoid) return 1;
 
     /* Copy avoidance is preferred starting certain string size */
     return server.min_string_size_copy_avoid && sdslen(obj->ptr) >= (size_t)server.min_string_size_copy_avoid;
@@ -2200,7 +2201,6 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
 
         if (unlikely(o->type == CLIENT_REPLY_BLOCK_REF)) {
             clientReplyBlockRef *ref_block = (clientReplyBlockRef*)o;
-            size_t data_len = sdslen(ref_block->obj->ptr);
 
             /* Add prefix */
             if (offset < ref_block->prefix_cnt) {
@@ -2213,13 +2213,13 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             }
 
             /* Add data */
-            if (offset < data_len) {
+            if (offset < ref_block->slen) {
                 iov[iovcnt].iov_base = (char*)ref_block->obj->ptr + offset;
-                iov[iovcnt].iov_len = data_len - offset;
+                iov[iovcnt].iov_len = ref_block->slen - offset;
                 iov_bytes_len += iov[iovcnt++].iov_len;
                 offset = 0;
-            } else if (offset >= data_len) {
-                offset -= data_len;
+            } else if (offset >= ref_block->slen) {
+                offset -= ref_block->slen;
             }
 
             /* Add CRLF */
@@ -2271,7 +2271,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
 
         if (unlikely(o->type == CLIENT_REPLY_BLOCK_REF)) {
             clientReplyBlockRef *ref_block = (clientReplyBlockRef*)o;
-            size_t len = sdslen(ref_block->obj->ptr) + ref_block->prefix_cnt + 2;
+            size_t len = ref_block->slen + ref_block->prefix_cnt + 2;
             if (remaining < (ssize_t)(len - c->sentlen)) {
                 c->sentlen += remaining;
                 break;

@@ -154,7 +154,7 @@ void reqresSaveClientReplyOffset(client *c) {
         } else {
             /* For referenced robj block, we track the total size (prefix + data + crlf) */
             clientReplyBlockRef *ref_block = (clientReplyBlockRef *)block;
-            c->reqres.offset.last_node.used = ref_block->prefix_cnt + sdslen(ref_block->obj->ptr) + 2;
+            c->reqres.offset.last_node.used = ref_block->prefix_cnt + ref_block->slen + 2;
         }
     } else {
         c->reqres.offset.last_node.index = 0;
@@ -232,7 +232,7 @@ size_t reqresAppendResponse(client *c) {
         } else {
             /* For referenced robj block, we track the total size (prefix + data + crlf) */
             clientReplyBlockRef *ref_block = (clientReplyBlockRef *)block;
-            curr_used = ref_block->prefix_cnt + sdslen(ref_block->obj->ptr) + 2;
+            curr_used = ref_block->prefix_cnt + ref_block->slen + 2;
         }
     }
 
@@ -289,8 +289,7 @@ size_t reqresAppendResponse(client *c) {
                 written += reqresAppendBuffer(c, ref_block->prefix, ref_block->prefix_cnt);
 
                 /* Write data */
-                size_t data_len = sdslen(ref_block->obj->ptr);
-                written += reqresAppendBuffer(c, (char *)ref_block->obj->ptr, data_len);
+                written += reqresAppendBuffer(c, (char *)ref_block->obj->ptr, ref_block->slen);
 
                 /* Write CRLF */
                 written += reqresAppendBuffer(c, ref_block->crlf, 2);
