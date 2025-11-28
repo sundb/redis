@@ -1103,6 +1103,7 @@ typedef struct clientReplyBlockRef {
     int type;  /* Always CLIENT_REPLY_BLOCK_REF */
     robj *obj;
     sds str;
+    size_t str_len;
     unsigned int prefix_cnt;
     char prefix[LONG_STR_SIZE + 3]; /* $<len>\r\n */
     char crlf[2]; /* \r\n */

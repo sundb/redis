@@ -96,7 +96,7 @@ void *dupClientReplyValue(void *o) {
         new->type = type;
         new->obj = old->obj;
         new->str = old->str;
-        // TODO: Copy prefix and crlf
+        // TODO: Copy data
         incrRefCount(old->obj);
         return new;
     } else {
@@ -384,6 +384,7 @@ static void _addReplyObjectToList(client *c, robj *obj, size_t sz) {
     block->type = CLIENT_REPLY_BLOCK_REF;
     block->obj = obj;
     block->str = obj->ptr;
+    block->str_len = sz;
     incrRefCount(obj);
 
     /* Fill prefix with bulk string length: "$<len>\r\n" and crlf: "\r\n" */
@@ -2167,13 +2168,10 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
     clientReplyBlock *o;
     listRewind(c->reply, &iter);
     while ((next = listNext(&iter)) && iovcnt < iovmax && iov_bytes_len < NET_MAX_WRITES_PER_EVENT) {
-        // printf("11111111111\n");
         o = listNodeValue(next);
 
         if (o->type == CLIENT_REPLY_BLOCK_REF) {
             clientReplyBlockRef *ref_block = (clientReplyBlockRef*)o;
-            size_t data_len = sdslen(ref_block->obj->ptr);
-
 
             /* Add prefix */
             if (offset < ref_block->prefix_cnt) {
@@ -2186,13 +2184,13 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             }
 
             /* Add data */
-            if (offset < data_len) {
+            if (offset < ref_block->str_len) {
                 iov[iovcnt].iov_base = (char*)ref_block->obj->ptr + offset;
-                iov[iovcnt].iov_len = data_len - offset;
+                iov[iovcnt].iov_len = ref_block->str_len - offset;
                 iov_bytes_len += iov[iovcnt++].iov_len;
                 offset = 0;
-            } else if (offset >= data_len) {
-                offset -= data_len;
+            } else if (offset >= ref_block->str_len) {
+                offset -= ref_block->str_len;
             }
 
             /* Add CRLF */
@@ -2243,7 +2241,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
 
         if (o->type == CLIENT_REPLY_BLOCK_REF) {
             clientReplyBlockRef *ref_block = (clientReplyBlockRef*)o;
-            size_t len = sdslen(ref_block->obj->ptr) + ref_block->prefix_cnt + 2;
+            size_t len = ref_block->str_len + ref_block->prefix_cnt + 2;
             if (remaining < (ssize_t)(len - c->sentlen)) {
                 c->sentlen += remaining;
                 break;
