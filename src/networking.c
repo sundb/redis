@@ -95,6 +95,7 @@ void *dupClientReplyValue(void *o) {
         clientReplyBlockRef *new = zmalloc(sizeof(clientReplyBlockRef));
         new->type = type;
         new->obj = old->obj;
+        new->str = old->str;
         // TODO: Copy prefix and crlf
         incrRefCount(old->obj);
         return new;
@@ -382,6 +383,7 @@ static void _addReplyObjectToList(client *c, robj *obj, size_t sz) {
     clientReplyBlockRef *block = zmalloc(sizeof(clientReplyBlockRef));
     block->type = CLIENT_REPLY_BLOCK_REF;
     block->obj = obj;
+    block->str = obj->ptr;
     incrRefCount(obj);
 
     /* Fill prefix with bulk string length: "$<len>\r\n" and crlf: "\r\n" */
@@ -2165,6 +2167,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
     clientReplyBlock *o;
     listRewind(c->reply, &iter);
     while ((next = listNext(&iter)) && iovcnt < iovmax && iov_bytes_len < NET_MAX_WRITES_PER_EVENT) {
+        // printf("11111111111\n");
         o = listNodeValue(next);
 
         if (o->type == CLIENT_REPLY_BLOCK_REF) {
