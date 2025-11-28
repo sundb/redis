@@ -92,7 +92,7 @@ void *dupClientReplyValue(void *o) {
         return buf;
     } else if (type == CLIENT_REPLY_BLOCK_REF) {
         clientReplyBlockRef *old = o;
-        clientReplyBlockRef *new = zmalloc(sizeof(clientReplyBlockRef));
+        clientReplyBlockRef *new = zcalloc(sizeof(clientReplyBlockRef));
         new->type = type;
         new->obj = old->obj;
         incrRefCount(old->obj);
@@ -381,7 +381,7 @@ static void _addReplyObjectToList(client *c, robj *obj) {
     if (c->flags & CLIENT_CLOSE_AFTER_REPLY) return;
 
     /* Create a new block that references the robj */
-    clientReplyBlockRef *block = zmalloc(sizeof(clientReplyBlockRef));
+    clientReplyBlockRef *block = zcalloc(sizeof(clientReplyBlockRef));
     block->type = CLIENT_REPLY_BLOCK_REF;
     block->obj = obj;
     block->str = obj->ptr;
@@ -389,16 +389,16 @@ static void _addReplyObjectToList(client *c, robj *obj) {
     incrRefCount(obj);
 
     /* Fill prefix with bulk string length: "$<len>\r\n" and crlf: "\r\n" */
-    block->prefix[0] = '$';
-    size_t num_len = ll2string(block->prefix + 1, sizeof(block->prefix) - 3, block->slen);
-    block->prefix[num_len + 1] = '\r';
-    block->prefix[num_len + 2] = '\n';
-    block->prefix_cnt = num_len + 3;
-    block->crlf[0] = '\r';
-    block->crlf[1] = '\n';
+    // block->prefix[0] = '$';
+    // size_t num_len = ll2string(block->prefix + 1, sizeof(block->prefix) - 3, block->slen);
+    // block->prefix[num_len + 1] = '\r';
+    // block->prefix[num_len + 2] = '\n';
+    // block->prefix_cnt = num_len + 3;
+    // block->crlf[0] = '\r';
+    // block->crlf[1] = '\n';
 
     listAddNodeTail(c->reply, block);
-    c->reply_bytes += block->slen + block->prefix_cnt + 2; /* data + prefix + crlf */
+    c->reply_bytes += block->slen; /* data + prefix + crlf */
 
     /* Add client to the referenced reply client list if not already there */
     if (c->pending_ref_reply_client_list_node == NULL) {
@@ -2211,6 +2211,17 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
         if (unlikely(o->type == CLIENT_REPLY_BLOCK_REF)) {
             clientReplyBlockRef *ref_block = (clientReplyBlockRef*)o;
 
+            if (!ref_block->prefix_cnt) {
+                /* Fill prefix with bulk string length: "$<len>\r\n" and crlf: "\r\n" */
+                ref_block->prefix[0] = '$';
+                size_t num_len = ll2string(ref_block->prefix + 1, sizeof(ref_block->prefix) - 3, ref_block->slen);
+                ref_block->prefix[num_len + 1] = '\r';
+                ref_block->prefix[num_len + 2] = '\n';
+                ref_block->prefix_cnt = num_len + 3;
+                ref_block->crlf[0] = '\r';
+                ref_block->crlf[1] = '\n'; 
+            }
+
             /* Add prefix */
             if (offset < ref_block->prefix_cnt) {
                 iov[iovcnt].iov_base = ref_block->prefix + offset;
@@ -2286,7 +2297,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                 break;
             }
             remaining -= (ssize_t)(len - c->sentlen);
-            c->reply_bytes -= len;
+            c->reply_bytes -= ref_block->slen;
             if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
                 listUnlinkNode(c->reply, next);
                 listLinkNodeTail(c->deferred_reply_blocks, next);
