@@ -226,7 +226,7 @@ client *createClient(connection *conn) {
     c->reply = listCreate();
     c->deferred_reply_errors = NULL;
     c->deferred_reply_blocks = listCreate();
-    listSetFreeMethod(c->deferred_reply_blocks,freeClientReplyValue);
+    // listSetFreeMethod(c->deferred_reply_blocks,freeClientReplyValue);
     c->reply_bytes = 0;
     c->obuf_soft_limit_reached_time = 0;
     listSetFreeMethod(c->reply,freeClientReplyValue);
@@ -1642,7 +1642,16 @@ void processDeferredReplyBlocks(client *c) {
         return;
 
     /* Clear the deferred reply blocks list */
-    listEmpty(c->deferred_reply_blocks);
+    while (listLength(c->deferred_reply_blocks)) {
+        listNode *ln = listFirst(c->deferred_reply_blocks);
+        clientReplyBlockRef *block = listNodeValue(ln);
+        if (block->obj->refcount == 1)
+            tryDeferFreeClientObject(c, DEFERRED_OBJECT_TYPE_ROBJ, block->obj);
+        else
+            decrRefCount(block->obj);
+        zfree(block);
+        listDelNode(c->deferred_reply_blocks, ln);
+    }
 
     serverAssert(c->pending_ref_reply_client_list_node);
     listDelNode(server.clients_with_pending_ref_reply, c->pending_ref_reply_client_list_node);
