@@ -2167,19 +2167,10 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
     while ((next = listNext(&iter)) && iovcnt < iovmax && iov_bytes_len < NET_MAX_WRITES_PER_EVENT) {
         o = listNodeValue(next);
 
-        if (unlikely(o->type == CLIENT_REPLY_BLOCK_REF)) {
+        if (o->type == CLIENT_REPLY_BLOCK_REF) {
             clientReplyBlockRef *ref_block = (clientReplyBlockRef*)o;
             size_t data_len = sdslen(ref_block->obj->ptr);
 
-            // if (!ref_block->prefix_cnt) {
-            //     ref_block->prefix[0] = '$';
-            //     size_t num_len = ll2string(ref_block->prefix + 1, sizeof(ref_block->prefix) - 3, data_len);
-            //     ref_block->prefix[num_len + 1] = '\r';
-            //     ref_block->prefix[num_len + 2] = '\n';
-            //     ref_block->prefix_cnt = num_len + 3;
-            //     ref_block->crlf[0] = '\r';
-            //     ref_block->crlf[1] = '\n';
-            // }
 
             /* Add prefix */
             if (offset < ref_block->prefix_cnt) {
@@ -2209,21 +2200,20 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             }
 
             offset = 0;
-            continue;
-        }
+        } else {
+            clientReplyBlockPlain *plain_block = (clientReplyBlockPlain*)o;
+            if (plain_block->used == 0) { /* empty node, just release it and skip. */
+                c->reply_bytes -= plain_block->size;
+                listDelNode(c->reply, next);
+                offset = 0;
+                continue;
+            }
 
-        clientReplyBlockPlain *plain_block = (clientReplyBlockPlain*)o;
-        if (plain_block->used == 0) { /* empty node, just release it and skip. */
-            c->reply_bytes -= plain_block->size;
-            listDelNode(c->reply, next);
+            iov[iovcnt].iov_base = plain_block->buf + offset;
+            iov[iovcnt].iov_len = plain_block->used - offset;
+            iov_bytes_len += iov[iovcnt++].iov_len;
             offset = 0;
-            continue;
         }
-
-        iov[iovcnt].iov_base = plain_block->buf + offset;
-        iov[iovcnt].iov_len = plain_block->used - offset;
-        iov_bytes_len += iov[iovcnt++].iov_len;
-        offset = 0;
     }
     if (iovcnt == 0) return C_OK;
     *nwritten = connWritev(c->conn, iov, iovcnt);
@@ -2248,7 +2238,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
         next = listNext(&iter);
         o = listNodeValue(next);
 
-        if (unlikely(o->type == CLIENT_REPLY_BLOCK_REF)) {
+        if (o->type == CLIENT_REPLY_BLOCK_REF) {
             clientReplyBlockRef *ref_block = (clientReplyBlockRef*)o;
             size_t len = sdslen(ref_block->obj->ptr) + ref_block->prefix_cnt + 2;
             if (remaining < (ssize_t)(len - c->sentlen)) {
@@ -2259,18 +2249,17 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             c->reply_bytes -= len;
             listDelNode(c->reply, next);
             c->sentlen = 0;
-            continue;
+        } else {
+            clientReplyBlockPlain *plain_block = (clientReplyBlockPlain*)o;
+            if (remaining < (ssize_t)(plain_block->used - c->sentlen)) {
+                c->sentlen += remaining;
+                break;
+            }
+            remaining -= (ssize_t)(plain_block->used - c->sentlen);
+            c->reply_bytes -= plain_block->size;
+            listDelNode(c->reply, next);
+            c->sentlen = 0;
         }
-
-        clientReplyBlockPlain *plain_block = (clientReplyBlockPlain*)o;
-        if (remaining < (ssize_t)(plain_block->used - c->sentlen)) {
-            c->sentlen += remaining;
-            break;
-        }
-        remaining -= (ssize_t)(plain_block->used - c->sentlen);
-        c->reply_bytes -= plain_block->size;
-        listDelNode(c->reply, next);
-        c->sentlen = 0;
     }
 
     return C_OK;
