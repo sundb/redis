@@ -606,8 +606,8 @@ void decrRefCount(robj *o) {
             o->type, o->encoding, refcount);
     }
 
-    refcount = atomicDecr(o->refcount, 1);
-    if (--refcount == 0) {
+    atomicDecr(o->refcount, 1);
+    if (refcount == 1) {
         if (o->ptr != NULL) {
             switch(o->type) {
             case OBJ_STRING: freeStringObject(o); break;

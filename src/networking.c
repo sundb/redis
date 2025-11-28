@@ -95,6 +95,7 @@ void *dupClientReplyValue(void *o) {
         clientReplyBlockRef *new = zmalloc(sizeof(clientReplyBlockRef));
         new->type = type;
         new->obj = old->obj;
+        // TODO: Copy prefix and crlf
         incrRefCount(old->obj);
         return new;
     } else {
@@ -1203,7 +1204,7 @@ void addReplyBulk(client *c, robj *obj) {
 
     if (sdsEncodedObject(obj)) {
         const size_t len = sdslen(obj->ptr);
-        if (unlikely(tryAvoidBulkStrCopyToReply(c, obj, len) == C_OK))
+        if (tryAvoidBulkStrCopyToReply(c, obj, len) == C_OK)
             return; 
         _addReplyLongLongBulk(c, len);
         _addReplyToBufferOrList(c,obj->ptr,len);
@@ -2169,6 +2170,16 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
         if (unlikely(o->type == CLIENT_REPLY_BLOCK_REF)) {
             clientReplyBlockRef *ref_block = (clientReplyBlockRef*)o;
             size_t data_len = sdslen(ref_block->obj->ptr);
+
+            // if (!ref_block->prefix_cnt) {
+            //     ref_block->prefix[0] = '$';
+            //     size_t num_len = ll2string(ref_block->prefix + 1, sizeof(ref_block->prefix) - 3, data_len);
+            //     ref_block->prefix[num_len + 1] = '\r';
+            //     ref_block->prefix[num_len + 2] = '\n';
+            //     ref_block->prefix_cnt = num_len + 3;
+            //     ref_block->crlf[0] = '\r';
+            //     ref_block->crlf[1] = '\n';
+            // }
 
             /* Add prefix */
             if (offset < ref_block->prefix_cnt) {
