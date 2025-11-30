@@ -115,10 +115,9 @@ void freeClientReplyValue(void *o) {
     if (block->type == CLIENT_REPLY_BLOCK_MULTI_REF) {
         clientReplyBlockMultiRef *multi_block = (clientReplyBlockMultiRef*)block;
         /* Decrement refcount for all robj references */
-        // TODO
-        // for (int i = 0; i < multi_block->count; i++) {
-        //     decrRefCount(multi_block->refs[i].obj);
-        // }
+        for (int i = 0; i < multi_block->count; i++) {
+            decrRefCount(multi_block->refs[i].obj);
+        }
     }
     zfree(block);
 }
@@ -255,7 +254,7 @@ client *createClient(connection *conn) {
     c->client_list_node = NULL;
     c->io_thread_client_list_node = NULL;
     c->postponed_list_node = NULL;
-    c->pending_ref_reply_client_list_node = NULL;
+    // c->pending_ref_reply_client_list_node = NULL;
     c->client_tracking_redirection = 0;
     c->client_tracking_prefixes = NULL;
     c->last_cron_check_time = 0;
@@ -1688,9 +1687,9 @@ void processDeferredReplyBlocks(client *c) {
     /* Clear the deferred reply blocks list */
     listEmpty(c->deferred_reply_blocks);
 
-    serverAssert(c->pending_ref_reply_client_list_node);
-    listDelNode(server.clients_with_pending_ref_reply, c->pending_ref_reply_client_list_node);
-    c->pending_ref_reply_client_list_node = NULL;
+    // serverAssert(c->pending_ref_reply_client_list_node);
+    // listDelNode(server.clients_with_pending_ref_reply, c->pending_ref_reply_client_list_node);
+    // c->pending_ref_reply_client_list_node = NULL;
 }
 
 void freeClientOriginalArgv(client *c) {
@@ -1834,10 +1833,10 @@ void unlinkClient(client *c) {
     }
 
     /* Remove from the list of clients with referenced reply blocks if needed. */
-    if (c->pending_ref_reply_client_list_node) {
-        listDelNode(server.clients_with_pending_ref_reply, c->pending_ref_reply_client_list_node);
-        c->pending_ref_reply_client_list_node = NULL;
-    }
+    // if (c->pending_ref_reply_client_list_node) {
+    //     listDelNode(server.clients_with_pending_ref_reply, c->pending_ref_reply_client_list_node);
+    //     c->pending_ref_reply_client_list_node = NULL;
+    // }
 
     freeClientPendingCommands(c, -1);
     c->argv_len = 0;
@@ -2365,7 +2364,12 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
 
             /* If all references are completed, remove the entire block */
             if (multi_block->written_index >= multi_block->count) {
-                listDelNode(c->reply, next);
+                if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
+                    listUnlinkNode(c->reply, next);
+                    listLinkNodeTail(c->deferred_reply_blocks, next);
+                } else {
+                    listDelNode(c->reply, next);
+                }
             }
             continue;
         }
@@ -2528,14 +2532,14 @@ int writeToClient(client *c, int handler_installed) {
             connSetWriteHandler(c->conn, NULL);
         }
 
-        /* Remove from the list of clients with pending ref reply. */
-        if (c->running_tid == IOTHREAD_MAIN_THREAD_ID &&
-            c->pending_ref_reply_client_list_node)
-        {
-            serverAssert(listLength(c->deferred_reply_blocks) == 0);
-            listDelNode(server.clients_with_pending_ref_reply, c->pending_ref_reply_client_list_node);
-            c->pending_ref_reply_client_list_node = NULL;
-        }
+        // /* Remove from the list of clients with pending ref reply. */
+        // if (c->running_tid == IOTHREAD_MAIN_THREAD_ID &&
+        //     c->pending_ref_reply_client_list_node)
+        // {
+        //     serverAssert(listLength(c->deferred_reply_blocks) == 0);
+        //     listDelNode(server.clients_with_pending_ref_reply, c->pending_ref_reply_client_list_node);
+        //     c->pending_ref_reply_client_list_node = NULL;
+        // }
 
         /* Close connection after entire reply has been sent. */
         if (c->flags & CLIENT_CLOSE_AFTER_REPLY) {
