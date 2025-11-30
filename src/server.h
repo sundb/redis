@@ -1090,6 +1090,10 @@ struct evictionPoolEntry; /* Defined in evict.c */
 /* Type of clientReplyBlock */
 #define CLIENT_REPLY_BLOCK_PLAIN  1  /* Plain, data stored in buf[] */
 #define CLIENT_REPLY_BLOCK_REF    2  /* Reference to robj, data referenced via robj pointer */
+#define CLIENT_REPLY_BLOCK_MULTI_REF 3  /* Multiple robj references in array */
+
+#define CLIENT_REPLY_MULTI_REF_MAX 16  /* Maximum number of refs in multi-ref block */
+#define LONG_STR_SIZE 21  /* Maximum length of a 64-bit integer as string */
 
 /* Plain buffer block */
 typedef struct clientReplyBlockPlain {
@@ -1107,10 +1111,27 @@ typedef struct clientReplyBlockRef {
     char crlf[2]; /* \r\n */
 } clientReplyBlockRef;
 
+/* Single reference entry in multi-ref block */
+typedef struct clientReplyRefEntry {
+    robj *obj;
+    unsigned int prefix_cnt;
+    char prefix[LONG_STR_SIZE + 3]; /* $<len>\r\n */
+    char crlf[2]; /* \r\n */
+} clientReplyRefEntry;
+
+/* Multiple robj references block */
+typedef struct clientReplyBlockMultiRef {
+    int type;  /* Always CLIENT_REPLY_BLOCK_MULTI_REF */
+    int count;  /* Number of references currently stored */
+    int written_index;  /* Index of the first reference that hasn't been fully written yet */
+    size_t total_size;  /* Total size of all referenced data for quick calculation */
+    clientReplyRefEntry refs[CLIENT_REPLY_MULTI_REF_MAX];
+} clientReplyBlockMultiRef;
+
 /* This structure is used in order to represent the output buffer of a client,
  * which is actually a linked list of blocks like that, that is: client->reply. */
 typedef struct clientReplyBlock {
-    int type;  /* CLIENT_REPLY_BLOCK_PLAIN or CLIENT_REPLY_BLOCK_REF */
+    int type;  /* CLIENT_REPLY_BLOCK_PLAIN, CLIENT_REPLY_BLOCK_REF, or CLIENT_REPLY_BLOCK_MULTI_REF */
 } clientReplyBlock;
 
 /* Replication buffer blocks is the list of replBufBlock.
@@ -3013,6 +3034,7 @@ void addReplySubcommandSyntaxError(client *c);
 void addReplyLoadedModules(client *c);
 void copyReplicaOutputBuffer(client *dst, client *src);
 void addListRangeReply(client *c, robj *o, long start, long end, int reverse);
+void addReplyBulkOptimized(client *c, robj *obj);
 void deferredAfterErrorReply(client *c, list *errors);
 size_t sdsZmallocSize(sds s);
 size_t hfieldZmallocSize(hfield s);

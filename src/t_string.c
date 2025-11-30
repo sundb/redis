@@ -437,7 +437,7 @@ int getGenericCommand(client *c) {
         return C_ERR;
     }
 
-    addReplyBulk(c,o);
+    addReplyBulkOptimized(c,o);
     return C_OK;
 }
 

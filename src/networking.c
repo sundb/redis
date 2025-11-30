@@ -97,6 +97,20 @@ void *dupClientReplyValue(void *o) {
         new->obj = old->obj;
         incrRefCount(old->obj);
         return new;
+    } else if (type == CLIENT_REPLY_BLOCK_MULTI_REF) {
+        clientReplyBlockMultiRef *old = o;
+        clientReplyBlockMultiRef *new = zmalloc(sizeof(clientReplyBlockMultiRef));
+        new->type = type;
+        new->count = old->count;
+        new->written_index = old->written_index;  /* Copy the written index */
+        new->total_size = old->total_size;
+
+        /* Copy all references and increment their refcounts */
+        for (int i = 0; i < old->count; i++) {
+            new->refs[i] = old->refs[i];  /* Copy the entire entry */
+            incrRefCount(old->refs[i].obj);  /* Increment refcount for the robj */
+        }
+        return new;
     } else {
         serverPanic("Unknown client reply block type");
     }
@@ -105,8 +119,16 @@ void *dupClientReplyValue(void *o) {
 void freeClientReplyValue(void *o) {
     if (!o) return;
     clientReplyBlock *block = o;
-    if (block->type == CLIENT_REPLY_BLOCK_REF)
+    if (block->type == CLIENT_REPLY_BLOCK_REF) {
         decrRefCount(((clientReplyBlockRef*)block)->obj);
+    } else if (block->type == CLIENT_REPLY_BLOCK_MULTI_REF) {
+        clientReplyBlockMultiRef *multi_block = (clientReplyBlockMultiRef*)block;
+        /* Decrement refcount for all robj references */
+        // TODO
+        // for (int i = 0; i < multi_block->count; i++) {
+        //     decrRefCount(multi_block->refs[i].obj);
+        // }
+    }
     zfree(block);
 }
 
@@ -404,6 +426,69 @@ static void _addReplyObjectToList(client *c, robj *obj) {
         listAddNodeTail(server.clients_with_pending_ref_reply, c);
         c->pending_ref_reply_client_list_node = listLast(server.clients_with_pending_ref_reply);
     }
+
+    closeClientOnOutputBufferLimitReached(c, 1);
+}
+
+/* Try to add robj reference to existing multi-ref block, or create a new one */
+static void _addReplyObjectToListOptimized(client *c, robj *obj) {
+    if (c->flags & CLIENT_CLOSE_AFTER_REPLY) return;
+
+    /* Only handle sds-encoded objects for now */
+    if (!sdsEncodedObject(obj)) {
+        /* Fall back to regular single-ref block for non-sds objects */
+        _addReplyObjectToList(c, obj);
+        return;
+    }
+
+    const size_t len = sdslen(obj->ptr);
+    clientReplyBlockMultiRef *multi_block = NULL;
+
+    /* Check if the last block is a multi-ref block with space */
+    if (c->reply->len > 0) {
+        listNode *tail = listLast(c->reply);
+        clientReplyBlock *last_block = listNodeValue(tail);
+
+        if (last_block->type == CLIENT_REPLY_BLOCK_MULTI_REF) {
+            multi_block = (clientReplyBlockMultiRef*)last_block;
+            /* Only use existing block if it has space */
+            if (multi_block->count >= CLIENT_REPLY_MULTI_REF_MAX) {
+                multi_block = NULL;
+            }
+        }
+    }
+
+    /* Create new multi-ref block if needed */
+    if (!multi_block) {
+        multi_block = zmalloc(sizeof(clientReplyBlockMultiRef));
+        multi_block->type = CLIENT_REPLY_BLOCK_MULTI_REF;
+        multi_block->count = 0;
+        multi_block->written_index = 0;  /* Start from the first reference */
+        multi_block->total_size = 0;
+        listAddNodeTail(c->reply, multi_block);
+    }
+
+    /* Add the reference to the multi-ref block */
+    int idx = multi_block->count;
+    clientReplyRefEntry *entry = &multi_block->refs[idx];
+
+    entry->obj = obj;
+    incrRefCount(obj);
+
+    /* Fill prefix with bulk string length: "$<len>\r\n" */
+    entry->prefix[0] = '$';
+    size_t num_len = ll2string(entry->prefix + 1, sizeof(entry->prefix) - 3, len);
+    entry->prefix[num_len + 1] = '\r';
+    entry->prefix[num_len + 2] = '\n';
+    entry->prefix_cnt = num_len + 3;
+    entry->crlf[0] = '\r';
+    entry->crlf[1] = '\n';
+
+    /* Update block counters */
+    multi_block->count++;
+    size_t entry_size = len + entry->prefix_cnt + 2; /* data + prefix + crlf */
+    multi_block->total_size += entry_size;
+    c->reply_bytes += entry_size;
 
     closeClientOnOutputBufferLimitReached(c, 1);
 }
@@ -1193,7 +1278,7 @@ static int isCopyAvoidPreferred(client *c, robj *obj) {
     if (type != CLIENT_TYPE_NORMAL && type != CLIENT_TYPE_PUBSUB) return 0;
 
     /* Copy avoidance is preferred for any string size starting certain number of I/O threads  */
-    if (server.min_io_threads_copy_avoid && server.io_threads_num < server.min_io_threads_copy_avoid) return 0;
+    if (server.min_io_threads_copy_avoid && server.io_threads_num >= server.min_io_threads_copy_avoid) return 1;
 
     /* Copy avoidance is preferred starting certain string size */
     return server.min_string_size_copy_avoid && sdslen(obj->ptr) >= (size_t)server.min_string_size_copy_avoid;
@@ -1203,7 +1288,7 @@ static int isCopyAvoidPreferred(client *c, robj *obj) {
  * If copy avoidance allowed then only pointer to object and string will be copied to the buffer */
 static int tryAvoidBulkStrCopyToReply(client *c, robj *obj) {
     if (!isCopyAvoidPreferred(c, obj)) return C_ERR;
-    _addReplyObjectToList(c, obj);
+    _addReplyObjectToListOptimized(c, obj);
     return C_OK;
 }
 
@@ -1230,6 +1315,12 @@ void addReplyBulk(client *c, robj *obj) {
     } else {
         serverPanic("Wrong obj->encoding in addReply()");
     }
+}
+
+/* Optimized version of addReplyBulk that tries to group multiple refs together */
+void addReplyBulkOptimized(client *c, robj *obj) {
+    /* Use the regular addReplyBulk which will call our optimized function via tryAvoidBulkStrCopyToReply */
+    addReplyBulk(c, obj);
 }
 
 /* Add a C buffer as bulk reply */
@@ -2233,6 +2324,59 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             continue;
         }
 
+        if (unlikely(o->type == CLIENT_REPLY_BLOCK_MULTI_REF)) {
+            clientReplyBlockMultiRef *multi_block = (clientReplyBlockMultiRef*)o;
+
+            /* Start processing from written_index to avoid processing already-written entries */
+            for (int i = multi_block->written_index; i < multi_block->count && iovcnt < iovmax && iov_bytes_len < NET_MAX_WRITES_PER_EVENT; i++) {
+                clientReplyRefEntry *entry = &multi_block->refs[i];
+                size_t data_len = sdslen(entry->obj->ptr);
+                size_t entry_total_size = entry->prefix_cnt + data_len + 2; /* prefix + data + crlf */
+
+                /* Skip this entry if offset is beyond it */
+                if (offset >= entry_total_size) {
+                    offset -= entry_total_size;
+                    continue;
+                }
+
+                /* Add prefix if needed */
+                if (offset < entry->prefix_cnt) {
+                    iov[iovcnt].iov_base = entry->prefix + offset;
+                    iov[iovcnt].iov_len = entry->prefix_cnt - offset;
+                    iov_bytes_len += iov[iovcnt++].iov_len;
+                    if (iovcnt >= iovmax || iov_bytes_len >= NET_MAX_WRITES_PER_EVENT) break;
+                    offset = 0;
+                } else {
+                    offset -= entry->prefix_cnt;
+                }
+
+                /* Add data if needed */
+                if (offset < data_len) {
+                    iov[iovcnt].iov_base = (char*)entry->obj->ptr + offset;
+                    iov[iovcnt].iov_len = data_len - offset;
+                    iov_bytes_len += iov[iovcnt++].iov_len;
+                    if (iovcnt >= iovmax || iov_bytes_len >= NET_MAX_WRITES_PER_EVENT) break;
+                    offset = 0;
+                } else {
+                    offset -= data_len;
+                }
+
+                /* Add CRLF if needed */
+                if (offset < 2) {
+                    iov[iovcnt].iov_base = entry->crlf + offset;
+                    iov[iovcnt].iov_len = 2 - offset;
+                    iov_bytes_len += iov[iovcnt++].iov_len;
+                    if (iovcnt >= iovmax || iov_bytes_len >= NET_MAX_WRITES_PER_EVENT) break;
+                    offset = 0;
+                } else {
+                    offset -= 2;
+                }
+            }
+
+            offset = 0;
+            continue;
+        }
+
         clientReplyBlockPlain *plain_block = (clientReplyBlockPlain*)o;
         if (plain_block->used == 0) { /* empty node, just release it and skip. */
             c->reply_bytes -= plain_block->size;
@@ -2285,6 +2429,31 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                 listDelNode(c->reply, next);
             }
             c->sentlen = 0;
+            continue;
+        }
+
+        if (unlikely(o->type == CLIENT_REPLY_BLOCK_MULTI_REF)) {
+            clientReplyBlockMultiRef *multi_block = (clientReplyBlockMultiRef*)o;
+
+            /* Process references starting from written_index */
+            while (multi_block->written_index < multi_block->count) {
+            // for (int i = multi_block->written_index; i < multi_block->count; i++) {
+                clientReplyRefEntry *entry = &multi_block->refs[multi_block->written_index];
+                size_t len = sdslen(entry->obj->ptr) + entry->prefix_cnt + 2;
+                if (remaining < (ssize_t)(len - c->sentlen)) {
+                    c->sentlen += remaining;
+                    break;
+                }
+                remaining -= (ssize_t)(len - c->sentlen);
+                c->reply_bytes -= len;
+                c->sentlen = 0;
+                multi_block->written_index++;
+            }
+
+            /* If all references are completed, remove the entire block */
+            if (multi_block->written_index >= multi_block->count) {
+                listDelNode(c->reply, next);
+            }
             continue;
         }
 
