@@ -392,10 +392,9 @@ int prepareClientToWrite(client *c) {
  /* Add a robj reference to the reply linked list. */
 
 /* Try to add robj reference to existing multi-ref block, or create a new one */
-static void _addReplyObjectToListOptimized(client *c, robj *obj) {
+static void _addReplyObjectToListOptimized(client *c, robj *obj, size_t sz) {
     if (c->flags & CLIENT_CLOSE_AFTER_REPLY) return;
 
-    const size_t len = sdslen(obj->ptr);
     clientReplyBlockMultiRef *multi_block = NULL;
 
     /* Check if the last block is a multi-ref block with space */
@@ -441,7 +440,7 @@ static void _addReplyObjectToListOptimized(client *c, robj *obj) {
     /* Update block counters */
     multi_block->count++;
     // size_t entry_size = len + entry->prefix_cnt + 2; /* data + prefix + crlf */
-    size_t entry_size = len;
+    size_t entry_size = sz;
     multi_block->total_size += entry_size;
     c->reply_bytes += entry_size;
 
@@ -1225,7 +1224,7 @@ void addReplyBulkLen(client *c, robj *obj) {
  * Maybe called with NULL obj for evaluation with no regard to object size
  * Copy avoidance can be allowed only for regular Valkey clients
  * that use _writeToClient handler to write replies to client connection */
-static int isCopyAvoidPreferred(client *c, robj *obj) {
+static int isCopyAvoidPreferred(client *c, robj *obj, size_t len) {
     if (!c->conn || !obj) return 0;
     if (obj->encoding != OBJ_ENCODING_RAW || obj->refcount == OBJ_STATIC_REFCOUNT) return 0;
 
@@ -1236,24 +1235,24 @@ static int isCopyAvoidPreferred(client *c, robj *obj) {
     if (server.min_io_threads_copy_avoid && server.io_threads_num >= server.min_io_threads_copy_avoid) return 1;
 
     /* Copy avoidance is preferred starting certain string size */
-    return server.min_string_size_copy_avoid && sdslen(obj->ptr) >= (size_t)server.min_string_size_copy_avoid;
+    return server.min_string_size_copy_avoid && len >= (size_t)server.min_string_size_copy_avoid;
 }
 
 /* Try to avoid whole bulk string copy to a reply buffer
  * If copy avoidance allowed then only pointer to object and string will be copied to the buffer */
-static int tryAvoidBulkStrCopyToReply(client *c, robj *obj) {
-    if (!isCopyAvoidPreferred(c, obj)) return C_ERR;
-    _addReplyObjectToListOptimized(c, obj);
+static int tryAvoidBulkStrCopyToReply(client *c, robj *obj, size_t sz) {
+    if (!isCopyAvoidPreferred(c, obj, sz)) return C_ERR;
+    _addReplyObjectToListOptimized(c, obj, sz);
     return C_OK;
 }
 
 /* Add a Redis Object as a bulk reply */
 void addReplyBulk(client *c, robj *obj) {
     if (_prepareClientToWrite(c) != C_OK) return;
-    if (unlikely(tryAvoidBulkStrCopyToReply(c, obj) == C_OK)) return; 
 
     if (sdsEncodedObject(obj)) {
         const size_t len = sdslen(obj->ptr);
+        if (unlikely(tryAvoidBulkStrCopyToReply(c, obj, len) == C_OK)) return; 
         _addReplyLongLongBulk(c, len);
         _addReplyToBufferOrList(c,obj->ptr,len);
         _addReplyToBufferOrList(c,"\r\n",2);
