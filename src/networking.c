@@ -92,7 +92,7 @@ void *dupClientReplyValue(void *o) {
         return buf;
     } else if (type == CLIENT_REPLY_BLOCK_MULTI_REF) {
         clientReplyBlockMultiRef *old = o;
-        clientReplyBlockMultiRef *new = zmalloc(sizeof(clientReplyBlockMultiRef));
+        clientReplyBlockMultiRef *new = zcalloc(sizeof(clientReplyBlockMultiRef));
         new->type = type;
         new->count = old->count;
         new->written_index = old->written_index;  /* Copy the written index */
@@ -414,7 +414,7 @@ static void _addReplyObjectToListOptimized(client *c, robj *obj) {
 
     /* Create new multi-ref block if needed */
     if (!multi_block) {
-        multi_block = zmalloc(sizeof(clientReplyBlockMultiRef));
+        multi_block = zcalloc(sizeof(clientReplyBlockMultiRef));
         multi_block->type = CLIENT_REPLY_BLOCK_MULTI_REF;
         multi_block->count = 0;
         multi_block->written_index = 0;  /* Start from the first reference */
@@ -430,17 +430,18 @@ static void _addReplyObjectToListOptimized(client *c, robj *obj) {
     incrRefCount(obj);
 
     /* Fill prefix with bulk string length: "$<len>\r\n" */
-    entry->prefix[0] = '$';
-    size_t num_len = ll2string(entry->prefix + 1, sizeof(entry->prefix) - 3, len);
-    entry->prefix[num_len + 1] = '\r';
-    entry->prefix[num_len + 2] = '\n';
-    entry->prefix_cnt = num_len + 3;
-    entry->crlf[0] = '\r';
-    entry->crlf[1] = '\n';
+    // entry->prefix[0] = '$';
+    // size_t num_len = ll2string(entry->prefix + 1, sizeof(entry->prefix) - 3, len);
+    // entry->prefix[num_len + 1] = '\r';
+    // entry->prefix[num_len + 2] = '\n';
+    // entry->prefix_cnt = num_len + 3;
+    // entry->crlf[0] = '\r';
+    // entry->crlf[1] = '\n';
 
     /* Update block counters */
     multi_block->count++;
-    size_t entry_size = len + entry->prefix_cnt + 2; /* data + prefix + crlf */
+    // size_t entry_size = len + entry->prefix_cnt + 2; /* data + prefix + crlf */
+    size_t entry_size = len;
     multi_block->total_size += entry_size;
     c->reply_bytes += entry_size;
 
@@ -2250,6 +2251,18 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             for (int i = multi_block->written_index; i < multi_block->count && iovcnt < iovmax && iov_bytes_len < NET_MAX_WRITES_PER_EVENT; i++) {
                 clientReplyRefEntry *entry = &multi_block->refs[i];
                 size_t data_len = sdslen(entry->obj->ptr);
+
+                if (!entry->prefix_cnt) {
+                    /* Fill prefix with bulk string length: "$<len>\r\n" */
+                    entry->prefix[0] = '$';
+                    size_t num_len = ll2string(entry->prefix + 1, sizeof(entry->prefix) - 3, data_len);
+                    entry->prefix[num_len + 1] = '\r';
+                    entry->prefix[num_len + 2] = '\n';
+                    entry->prefix_cnt = num_len + 3;
+                    entry->crlf[0] = '\r';
+                    entry->crlf[1] = '\n'; 
+                }
+
                 size_t entry_total_size = entry->prefix_cnt + data_len + 2; /* prefix + data + crlf */
 
                 /* Skip this entry if offset is beyond it */
@@ -2339,13 +2352,14 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             while (multi_block->written_index < multi_block->count) {
             // for (int i = multi_block->written_index; i < multi_block->count; i++) {
                 clientReplyRefEntry *entry = &multi_block->refs[multi_block->written_index];
-                size_t len = sdslen(entry->obj->ptr) + entry->prefix_cnt + 2;
+                size_t slen = sdslen(entry->obj->ptr);
+                size_t len = slen + entry->prefix_cnt + 2;
                 if (remaining < (ssize_t)(len - c->sentlen)) {
                     c->sentlen += remaining;
                     break;
                 }
                 remaining -= (ssize_t)(len - c->sentlen);
-                c->reply_bytes -= len;
+                c->reply_bytes -= slen;
                 c->sentlen = 0;
                 multi_block->written_index++;
             }
