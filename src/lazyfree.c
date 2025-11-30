@@ -201,46 +201,46 @@ void freeObjAsync(robj *key, robj *obj, int dbid) {
  * Since incrRefCount/decrRefCount are not thread-safe, and bio thread may
  * free database objects while main thread sends client replies, we need to
  * create independent copies of the string objects to avoid concurrent access. */
-static void protectClientReplyObjects(void) {
-    int allpaused = 0;
-    if (server.io_threads_num > 1) {
-        serverAssert(pthread_equal(server.main_thread_id, pthread_self()));
-        allpaused = 1;
-        pauseAllIOThreads();
-    }
+// static void protectClientReplyObjects(void) {
+//     int allpaused = 0;
+//     if (server.io_threads_num > 1) {
+//         serverAssert(pthread_equal(server.main_thread_id, pthread_self()));
+//         allpaused = 1;
+//         pauseAllIOThreads();
+//     }
 
-    listNode *ln;
-    listIter li;
-    listRewind(server.clients_with_pending_ref_reply, &li);
-    while ((ln = listNext(&li)) != NULL) {
-        client *c = listNodeValue(ln);
+//     listNode *ln;
+//     listIter li;
+//     listRewind(server.clients_with_pending_ref_reply, &li);
+//     while ((ln = listNext(&li)) != NULL) {
+//         client *c = listNodeValue(ln);
 
-        if (c->reply && listLength(c->reply)) {
-            /* Iterate through client's reply list */
-            listIter reply_li;
-            listNode *reply_ln;
-            listRewind(c->reply, &reply_li);
-            while ((reply_ln = listNext(&reply_li))) {
-                clientReplyBlock *block = listNodeValue(reply_ln);
+//         if (c->reply && listLength(c->reply)) {
+//             /* Iterate through client's reply list */
+//             listIter reply_li;
+//             listNode *reply_ln;
+//             listRewind(c->reply, &reply_li);
+//             while ((reply_ln = listNext(&reply_li))) {
+//                 clientReplyBlock *block = listNodeValue(reply_ln);
 
-                /* If this is an referenced robj block, duplicate the string object to avoid race condition */
-                if (block && block->type == CLIENT_REPLY_BLOCK_REF) {
-                    clientReplyBlockRef *ref_block = (clientReplyBlockRef*)block;
+//                 /* If this is an referenced robj block, duplicate the string object to avoid race condition */
+//                 if (block && block->type == CLIENT_REPLY_BLOCK_REF) {
+//                     clientReplyBlockRef *ref_block = (clientReplyBlockRef*)block;
 
-                    /* Duplicate the string object */
-                    robj *new_obj = dupStringObject(ref_block->obj);
-                    decrRefCount(ref_block->obj);
-                    ref_block->obj = new_obj;
-                }
-            }
-        }
+//                     /* Duplicate the string object */
+//                     robj *new_obj = dupStringObject(ref_block->obj);
+//                     decrRefCount(ref_block->obj);
+//                     ref_block->obj = new_obj;
+//                 }
+//             }
+//         }
 
-        /* Process deferred reply blocks */
-        processDeferredReplyBlocks(c);
-    }
+//         /* Process deferred reply blocks */
+//         processDeferredReplyBlocks(c);
+//     }
 
-    if (allpaused) resumeAllIOThreads();
-}
+//     if (allpaused) resumeAllIOThreads();
+// }
 
 /* Empty a Redis DB asynchronously. What the function does actually is to
  * create a new empty set of hash tables and scheduling the old ones for
@@ -257,7 +257,7 @@ void emptyDbAsync(redisDb *db) {
     db->keys = kvstoreCreate(&dbDictType, slot_count_bits, flags | KVSTORE_ALLOC_META_KEYS_HIST);
     db->expires = kvstoreCreate(&dbExpiresDictType, slot_count_bits, flags);
     db->subexpires = estoreCreate(&subexpiresBucketsType, slot_count_bits);
-    protectClientReplyObjects(); /* Protect client reply objects before async free. */
+    // protectClientReplyObjects(); /* Protect client reply objects before async free. */
     emptyDbDataAsync(oldkeys, oldexpires, oldsubexpires);
 }
 

@@ -1102,15 +1102,6 @@ typedef struct clientReplyBlockPlain {
     char buf[];
 } clientReplyBlockPlain;
 
-/* Robj reference block */
-typedef struct clientReplyBlockRef {
-    int type;  /* Always CLIENT_REPLY_BLOCK_REF */
-    robj *obj;
-    unsigned int prefix_cnt;
-    char prefix[LONG_STR_SIZE + 3]; /* $<len>\r\n */
-    char crlf[2]; /* \r\n */
-} clientReplyBlockRef;
-
 /* Single reference entry in multi-ref block */
 typedef struct clientReplyRefEntry {
     robj *obj;
