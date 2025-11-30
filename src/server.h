@@ -1063,7 +1063,7 @@ struct redisObject {
     unsigned iskvobj : 1;   /* 1 if this struct serves as a kvobj base */
     unsigned expirable : 1; /* 1 if this key has expiration time attached.
                              * If set, then this object is of type kvobj */
-    unsigned refcount : OBJ_REFCOUNT_BITS;
+    redisAtomic unsigned refcount;
     void *ptr;
 };
 

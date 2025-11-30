@@ -2364,12 +2364,12 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
 
             /* If all references are completed, remove the entire block */
             if (multi_block->written_index >= multi_block->count) {
-                if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-                    listUnlinkNode(c->reply, next);
-                    listLinkNodeTail(c->deferred_reply_blocks, next);
-                } else {
+                // if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
+                //     listUnlinkNode(c->reply, next);
+                //     listLinkNodeTail(c->deferred_reply_blocks, next);
+                // } else {
                     listDelNode(c->reply, next);
-                }
+                // }
             }
             continue;
         }
