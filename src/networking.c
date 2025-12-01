@@ -404,7 +404,7 @@ static void _addReplyObjectToListOptimized(client *c, robj *obj, size_t sz) {
         if (last_block->type == CLIENT_REPLY_BLOCK_REF) {
             multi_block = (clientReplyBlockRef*)last_block;
             /* Only use existing block if it has space */
-            if (multi_block->count >= CLIENT_REPLY_MULTI_REF_MAX) {
+            if (multi_block->count >= CLIENT_REPLY_REF_MAX) {
                 multi_block = NULL;
             }
         }

@@ -1091,8 +1091,7 @@ struct evictionPoolEntry; /* Defined in evict.c */
 #define CLIENT_REPLY_BLOCK_PLAIN  1  /* Plain, data stored in buf[] */
 #define CLIENT_REPLY_BLOCK_REF    2  /* Reference to robj, data referenced via robj pointer */
 
-#define CLIENT_REPLY_MULTI_REF_MAX 16  /* Maximum number of refs in multi-ref block */
-#define LONG_STR_SIZE 21  /* Maximum length of a 64-bit integer as string */
+#define CLIENT_REPLY_REF_MAX 16  /* Maximum number of refs in multi-ref block */
 
 /* Plain buffer block */
 typedef struct clientReplyBlockPlain {
@@ -1115,7 +1114,7 @@ typedef struct clientReplyBlockRef {
     int count;  /* Number of references currently stored */
     int written_index;  /* Index of the first reference that hasn't been fully written yet */
     size_t total_size;  /* Total size of all referenced data for quick calculation */
-    clientReplyRefEntry refs[CLIENT_REPLY_MULTI_REF_MAX];
+    clientReplyRefEntry refs[CLIENT_REPLY_REF_MAX];
 } clientReplyBlockRef;
 
 /* This structure is used in order to represent the output buffer of a client,
