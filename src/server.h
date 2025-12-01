@@ -1950,6 +1950,7 @@ struct redisServer {
 
     /* Reply construction copy avoidance */
     int min_io_threads_copy_avoid;  /* Minimum number of IO threads for copy avoidance in reply construction */
+    int min_string_size_copy_avoid_threaded; /* Minimum bulk string size for copy avoidance in reply construction when IO threads enabled */
     int min_string_size_copy_avoid; /* Minimum bulk string size for copy avoidance in reply construction when IO threads disabled */
 
     /* RDB / AOF loading information */
