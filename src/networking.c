@@ -236,8 +236,6 @@ client *createClient(connection *conn) {
     c->main_ch_client_id = 0;
     c->reply = listCreate();
     c->deferred_reply_errors = NULL;
-    c->deferred_reply_blocks = listCreate();
-    listSetFreeMethod(c->deferred_reply_blocks,freeClientReplyValue);
     c->reply_bytes = 0;
     c->obuf_soft_limit_reached_time = 0;
     listSetFreeMethod(c->reply,freeClientReplyValue);
@@ -253,7 +251,6 @@ client *createClient(connection *conn) {
     c->client_list_node = NULL;
     c->io_thread_client_list_node = NULL;
     c->postponed_list_node = NULL;
-    // c->pending_ref_reply_client_list_node = NULL;
     c->client_tracking_redirection = 0;
     c->client_tracking_prefixes = NULL;
     c->last_cron_check_time = 0;
@@ -390,7 +387,7 @@ int prepareClientToWrite(client *c) {
  /* Add a robj reference to the reply linked list. */
 
 /* Try to add robj reference to existing multi-ref block, or create a new one */
-static void _addReplyObjectToListOptimized(client *c, robj *obj, size_t sz) {
+static void _addReplyObjectToList(client *c, robj *obj, size_t sz) {
     if (c->flags & CLIENT_CLOSE_AFTER_REPLY) return;
 
     clientReplyBlockRef *multi_block = NULL;
@@ -1234,7 +1231,7 @@ static int isCopyAvoidPreferred(client *c, robj *obj, size_t len) {
  * If copy avoidance allowed then only pointer to object and string will be copied to the buffer */
 static int tryAvoidBulkStrCopyToReply(client *c, robj *obj, size_t sz) {
     if (!isCopyAvoidPreferred(c, obj, sz)) return C_ERR;
-    _addReplyObjectToListOptimized(c, obj, sz);
+    _addReplyObjectToList(c, obj, sz);
     return C_OK;
 }
 
@@ -1261,12 +1258,6 @@ void addReplyBulk(client *c, robj *obj) {
     } else {
         serverPanic("Wrong obj->encoding in addReply()");
     }
-}
-
-/* Optimized version of addReplyBulk that tries to group multiple refs together */
-void addReplyBulkOptimized(client *c, robj *obj) {
-    /* Use the regular addReplyBulk which will call our optimized function via tryAvoidBulkStrCopyToReply */
-    addReplyBulk(c, obj);
 }
 
 /* Add a C buffer as bulk reply */
@@ -1996,7 +1987,6 @@ void freeClient(client *c) {
 
     /* Free data structures. */
     listRelease(c->reply);
-    listRelease(c->deferred_reply_blocks);
     zfree(c->buf);
     freeReplicaReferencedReplBuffer(c);
     freeClientOriginalArgv(c);
@@ -2213,11 +2203,16 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
     while ((next = listNext(&iter)) && iovcnt < iovmax && iov_bytes_len < NET_MAX_WRITES_PER_EVENT) {
         o = listNodeValue(next);
 
+        if (!o) {
+            listDelNode(c->reply, next);
+            continue;
+        }
+
         if (unlikely(o->type == CLIENT_REPLY_BLOCK_REF)) {
             clientReplyBlockRef *multi_block = (clientReplyBlockRef*)o;
 
             /* Start processing from written_index to avoid processing already-written entries */
-            for (int i = multi_block->written_index; i < multi_block->count && iovcnt < iovmax && iov_bytes_len < NET_MAX_WRITES_PER_EVENT; i++) {
+            for (int i = multi_block->written_index; i < multi_block->count; i++) {
                 clientReplyRefEntry *entry = &multi_block->refs[i];
                 size_t data_len = sdslen(entry->obj->ptr);
 
@@ -2245,7 +2240,6 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                     iov[iovcnt].iov_base = entry->prefix + offset;
                     iov[iovcnt].iov_len = entry->prefix_cnt - offset;
                     iov_bytes_len += iov[iovcnt++].iov_len;
-                    if (iovcnt >= iovmax || iov_bytes_len >= NET_MAX_WRITES_PER_EVENT) break;
                     offset = 0;
                 } else {
                     offset -= entry->prefix_cnt;
@@ -2256,7 +2250,6 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                     iov[iovcnt].iov_base = (char*)entry->obj->ptr + offset;
                     iov[iovcnt].iov_len = data_len - offset;
                     iov_bytes_len += iov[iovcnt++].iov_len;
-                    if (iovcnt >= iovmax || iov_bytes_len >= NET_MAX_WRITES_PER_EVENT) break;
                     offset = 0;
                 } else {
                     offset -= data_len;
@@ -2267,7 +2260,6 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                     iov[iovcnt].iov_base = entry->crlf + offset;
                     iov[iovcnt].iov_len = 2 - offset;
                     iov_bytes_len += iov[iovcnt++].iov_len;
-                    if (iovcnt >= iovmax || iov_bytes_len >= NET_MAX_WRITES_PER_EVENT) break;
                     offset = 0;
                 } else {
                     offset -= 2;
@@ -2312,7 +2304,15 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
     listRewind(c->reply, &iter);
     while (remaining > 0) {
         next = listNext(&iter);
+        if (!next) break; /* No more nodes, but remaining > 0 - this shouldn't happen */
         o = listNodeValue(next);
+
+        /* Skip NULL nodes (deferred reply placeholders that weren't filled) */
+        if (unlikely(!o)) {
+            serverLog(LL_WARNING, "Found unfilled deferred reply placeholder in client %llu",
+                     (unsigned long long)c->id);
+            continue;
+        }
 
         if (unlikely(o->type == CLIENT_REPLY_BLOCK_REF)) {
             clientReplyBlockRef *multi_block = (clientReplyBlockRef*)o;
