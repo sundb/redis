@@ -92,16 +92,12 @@ void *dupClientReplyValue(void *o) {
         return buf;
     } else if (type == CLIENT_REPLY_BLOCK_REF) {
         clientReplyBlockRef *old = o;
-        clientReplyBlockRef *new = zcalloc(sizeof(clientReplyBlockRef));
-        new->type = type;
-        new->count = old->count;
-        new->written_index = old->written_index;  /* Copy the written index */
+        clientReplyBlockRef *new = zmalloc(sizeof(clientReplyBlockRef));
+        *new = *old;
 
         /* Copy all references and increment their refcounts */
-        for (int i = 0; i < old->count; i++) {
-            new->refs[i] = old->refs[i];  /* Copy the entire entry */
-            incrRefCount(old->refs[i].obj);  /* Increment refcount for the robj */
-        }
+        for (int i = 0; i < new->count; i++)
+            incrRefCount(new->refs[i].obj);  /* Increment refcount for the robj */
         return new;
     } else {
         serverPanic("Unknown client reply block type");
@@ -390,42 +386,33 @@ int prepareClientToWrite(client *c) {
 static void _addReplyObjectToList(client *c, robj *obj, size_t sz) {
     if (c->flags & CLIENT_CLOSE_AFTER_REPLY) return;
 
-    clientReplyBlockRef *multi_block = NULL;
+    clientReplyBlockRef *ref_block = NULL;
 
     /* Check if the last block is a multi-ref block with space */
-    if (c->reply->len > 0) {
-        listNode *tail = listLast(c->reply);
+    listNode *tail = listLast(c->reply);
+    if (tail) {
         clientReplyBlock *last_block = listNodeValue(tail);
-
         if (last_block->type == CLIENT_REPLY_BLOCK_REF) {
-            multi_block = (clientReplyBlockRef*)last_block;
+            ref_block = (clientReplyBlockRef*)last_block;
             /* Only use existing block if it has space */
-            if (multi_block->count >= CLIENT_REPLY_REF_MAX) {
-                multi_block = NULL;
+            if (ref_block->count >= CLIENT_REPLY_REF_MAX) {
+                ref_block = NULL;
             }
         }
     }
 
     /* Create new multi-ref block if needed */
-    if (!multi_block) {
-        multi_block = zcalloc(sizeof(clientReplyBlockRef));
-        multi_block->type = CLIENT_REPLY_BLOCK_REF;
-        multi_block->count = 0;
-        multi_block->written_index = 0;  /* Start from the first reference */
-        listAddNodeTail(c->reply, multi_block);
+    if (!ref_block) {
+        ref_block = zcalloc(sizeof(clientReplyBlockRef));
+        ref_block->type = CLIENT_REPLY_BLOCK_REF;
+        listAddNodeTail(c->reply, ref_block);
     }
 
-    /* Add the reference to the multi-ref block */
-    int idx = multi_block->count;
-    clientReplyRefEntry *entry = &multi_block->refs[idx];
-
+    /* Add the reference to this block. */
+    clientReplyRefEntry *entry = &ref_block->refs[ref_block->count++];
     entry->obj = obj;
     incrRefCount(obj);
-
-    /* Update block counters */
-    multi_block->count++;
-    size_t entry_size = sz;
-    c->reply_bytes += entry_size;
+    c->reply_bytes += sz;
 
     closeClientOnOutputBufferLimitReached(c, 1);
 }
@@ -2228,18 +2215,20 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                 }
 
                 size_t entry_total_size = entry->prefix_cnt + data_len + 2; /* prefix + data + crlf */
+                serverAssert(offset < entry_total_size);
 
                 /* Skip this entry if offset is beyond it */
-                if (offset >= entry_total_size) {
-                    offset -= entry_total_size;
-                    continue;
-                }
+                // if (offset >= entry_total_size) {
+                //     offset -= entry_total_size;
+                //     continue;
+                // }
 
                 /* Add prefix if needed */
                 if (offset < entry->prefix_cnt) {
                     iov[iovcnt].iov_base = entry->prefix + offset;
                     iov[iovcnt].iov_len = entry->prefix_cnt - offset;
                     iov_bytes_len += iov[iovcnt++].iov_len;
+                    // if (iovcnt >= iovmax || iov_bytes_len >= NET_MAX_WRITES_PER_EVENT) break;
                     offset = 0;
                 } else {
                     offset -= entry->prefix_cnt;
@@ -2250,6 +2239,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                     iov[iovcnt].iov_base = (char*)entry->obj->ptr + offset;
                     iov[iovcnt].iov_len = data_len - offset;
                     iov_bytes_len += iov[iovcnt++].iov_len;
+                    // if (iovcnt >= iovmax || iov_bytes_len >= NET_MAX_WRITES_PER_EVENT) break;
                     offset = 0;
                 } else {
                     offset -= data_len;
@@ -2260,6 +2250,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                     iov[iovcnt].iov_base = entry->crlf + offset;
                     iov[iovcnt].iov_len = 2 - offset;
                     iov_bytes_len += iov[iovcnt++].iov_len;
+                    // if (iovcnt >= iovmax || iov_bytes_len >= NET_MAX_WRITES_PER_EVENT) break;
                     offset = 0;
                 } else {
                     offset -= 2;
@@ -2306,14 +2297,6 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
         next = listNext(&iter);
         if (!next) break; /* No more nodes, but remaining > 0 - this shouldn't happen */
         o = listNodeValue(next);
-
-        /* Skip NULL nodes (deferred reply placeholders that weren't filled) */
-        if (unlikely(!o)) {
-            serverLog(LL_WARNING, "Found unfilled deferred reply placeholder in client %llu",
-                     (unsigned long long)c->id);
-            continue;
-        }
-
         if (unlikely(o->type == CLIENT_REPLY_BLOCK_REF)) {
             clientReplyBlockRef *multi_block = (clientReplyBlockRef*)o;
 
@@ -2335,8 +2318,9 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             /* If all references are completed, remove the entire block */
             if (multi_block->written_index >= multi_block->count) {
                 listDelNode(c->reply, next);
+                continue;
             }
-            continue;
+            break;
         }
 
         clientReplyBlockPlain *plain_block = (clientReplyBlockPlain*)o;
