@@ -90,9 +90,9 @@ void *dupClientReplyValue(void *o) {
         buf->type = type;
         memcpy(buf, o, sizeof(clientReplyBlockPlain) + old->size);
         return buf;
-    } else if (type == CLIENT_REPLY_BLOCK_MULTI_REF) {
-        clientReplyBlockMultiRef *old = o;
-        clientReplyBlockMultiRef *new = zcalloc(sizeof(clientReplyBlockMultiRef));
+    } else if (type == CLIENT_REPLY_BLOCK_REF) {
+        clientReplyBlockRef *old = o;
+        clientReplyBlockRef *new = zcalloc(sizeof(clientReplyBlockRef));
         new->type = type;
         new->count = old->count;
         new->written_index = old->written_index;  /* Copy the written index */
@@ -112,8 +112,8 @@ void *dupClientReplyValue(void *o) {
 void freeClientReplyValue(void *o) {
     if (!o) return;
     clientReplyBlock *block = o;
-    if (block->type == CLIENT_REPLY_BLOCK_MULTI_REF) {
-        clientReplyBlockMultiRef *multi_block = (clientReplyBlockMultiRef*)block;
+    if (block->type == CLIENT_REPLY_BLOCK_REF) {
+        clientReplyBlockRef *multi_block = (clientReplyBlockRef*)block;
         /* Decrement refcount for all robj references */
         for (int i = 0; i < multi_block->count; i++) {
             decrRefCount(multi_block->refs[i].obj);
@@ -394,15 +394,15 @@ int prepareClientToWrite(client *c) {
 static void _addReplyObjectToListOptimized(client *c, robj *obj, size_t sz) {
     if (c->flags & CLIENT_CLOSE_AFTER_REPLY) return;
 
-    clientReplyBlockMultiRef *multi_block = NULL;
+    clientReplyBlockRef *multi_block = NULL;
 
     /* Check if the last block is a multi-ref block with space */
     if (c->reply->len > 0) {
         listNode *tail = listLast(c->reply);
         clientReplyBlock *last_block = listNodeValue(tail);
 
-        if (last_block->type == CLIENT_REPLY_BLOCK_MULTI_REF) {
-            multi_block = (clientReplyBlockMultiRef*)last_block;
+        if (last_block->type == CLIENT_REPLY_BLOCK_REF) {
+            multi_block = (clientReplyBlockRef*)last_block;
             /* Only use existing block if it has space */
             if (multi_block->count >= CLIENT_REPLY_MULTI_REF_MAX) {
                 multi_block = NULL;
@@ -412,8 +412,8 @@ static void _addReplyObjectToListOptimized(client *c, robj *obj, size_t sz) {
 
     /* Create new multi-ref block if needed */
     if (!multi_block) {
-        multi_block = zcalloc(sizeof(clientReplyBlockMultiRef));
-        multi_block->type = CLIENT_REPLY_BLOCK_MULTI_REF;
+        multi_block = zcalloc(sizeof(clientReplyBlockRef));
+        multi_block->type = CLIENT_REPLY_BLOCK_REF;
         multi_block->count = 0;
         multi_block->written_index = 0;  /* Start from the first reference */
         multi_block->total_size = 0;
@@ -426,15 +426,6 @@ static void _addReplyObjectToListOptimized(client *c, robj *obj, size_t sz) {
 
     entry->obj = obj;
     incrRefCount(obj);
-
-    /* Fill prefix with bulk string length: "$<len>\r\n" */
-    // entry->prefix[0] = '$';
-    // size_t num_len = ll2string(entry->prefix + 1, sizeof(entry->prefix) - 3, len);
-    // entry->prefix[num_len + 1] = '\r';
-    // entry->prefix[num_len + 2] = '\n';
-    // entry->prefix_cnt = num_len + 3;
-    // entry->crlf[0] = '\r';
-    // entry->crlf[1] = '\n';
 
     /* Update block counters */
     multi_block->count++;
@@ -1682,22 +1673,6 @@ void freeClientDeferredObjects(client *c, int free_array) {
     }
 }
 
-/* Process deferred reply blocks by transferring them to the main thread's
- * deferred objects mechanism for proper cleanup. This is called when a client
- * is being processed in the main thread and has accumulated reply blocks
- * that need to be freed. */
-void processDeferredReplyBlocks(client *c) {
-    if (!c->deferred_reply_blocks || listLength(c->deferred_reply_blocks) == 0)
-        return;
-
-    /* Clear the deferred reply blocks list */
-    listEmpty(c->deferred_reply_blocks);
-
-    // serverAssert(c->pending_ref_reply_client_list_node);
-    // listDelNode(server.clients_with_pending_ref_reply, c->pending_ref_reply_client_list_node);
-    // c->pending_ref_reply_client_list_node = NULL;
-}
-
 void freeClientOriginalArgv(client *c) {
     /* We didn't rewrite this client */
     if (!c->original_argv) return;
@@ -1837,12 +1812,6 @@ void unlinkClient(client *c) {
         listDelNode(server.unblocked_clients,ln);
         c->flags &= ~CLIENT_UNBLOCKED;
     }
-
-    /* Remove from the list of clients with referenced reply blocks if needed. */
-    // if (c->pending_ref_reply_client_list_node) {
-    //     listDelNode(server.clients_with_pending_ref_reply, c->pending_ref_reply_client_list_node);
-    //     c->pending_ref_reply_client_list_node = NULL;
-    // }
 
     freeClientPendingCommands(c, -1);
     c->argv_len = 0;
@@ -2248,8 +2217,8 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
     while ((next = listNext(&iter)) && iovcnt < iovmax && iov_bytes_len < NET_MAX_WRITES_PER_EVENT) {
         o = listNodeValue(next);
 
-        if (unlikely(o->type == CLIENT_REPLY_BLOCK_MULTI_REF)) {
-            clientReplyBlockMultiRef *multi_block = (clientReplyBlockMultiRef*)o;
+        if (unlikely(o->type == CLIENT_REPLY_BLOCK_REF)) {
+            clientReplyBlockRef *multi_block = (clientReplyBlockRef*)o;
 
             /* Start processing from written_index to avoid processing already-written entries */
             for (int i = multi_block->written_index; i < multi_block->count && iovcnt < iovmax && iov_bytes_len < NET_MAX_WRITES_PER_EVENT; i++) {
@@ -2349,8 +2318,8 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
         next = listNext(&iter);
         o = listNodeValue(next);
 
-        if (unlikely(o->type == CLIENT_REPLY_BLOCK_MULTI_REF)) {
-            clientReplyBlockMultiRef *multi_block = (clientReplyBlockMultiRef*)o;
+        if (unlikely(o->type == CLIENT_REPLY_BLOCK_REF)) {
+            clientReplyBlockRef *multi_block = (clientReplyBlockRef*)o;
 
             /* Process references starting from written_index */
             while (multi_block->written_index < multi_block->count) {
@@ -2370,12 +2339,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
 
             /* If all references are completed, remove the entire block */
             if (multi_block->written_index >= multi_block->count) {
-                // if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-                //     listUnlinkNode(c->reply, next);
-                //     listLinkNodeTail(c->deferred_reply_blocks, next);
-                // } else {
-                    listDelNode(c->reply, next);
-                // }
+                listDelNode(c->reply, next);
             }
             continue;
         }
@@ -2537,15 +2501,6 @@ int writeToClient(client *c, int handler_installed) {
             /* IO Thread also can do that now. */
             connSetWriteHandler(c->conn, NULL);
         }
-
-        // /* Remove from the list of clients with pending ref reply. */
-        // if (c->running_tid == IOTHREAD_MAIN_THREAD_ID &&
-        //     c->pending_ref_reply_client_list_node)
-        // {
-        //     serverAssert(listLength(c->deferred_reply_blocks) == 0);
-        //     listDelNode(server.clients_with_pending_ref_reply, c->pending_ref_reply_client_list_node);
-        //     c->pending_ref_reply_client_list_node = NULL;
-        // }
 
         /* Close connection after entire reply has been sent. */
         if (c->flags & CLIENT_CLOSE_AFTER_REPLY) {

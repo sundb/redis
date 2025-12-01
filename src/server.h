@@ -1090,7 +1090,6 @@ struct evictionPoolEntry; /* Defined in evict.c */
 /* Type of clientReplyBlock */
 #define CLIENT_REPLY_BLOCK_PLAIN  1  /* Plain, data stored in buf[] */
 #define CLIENT_REPLY_BLOCK_REF    2  /* Reference to robj, data referenced via robj pointer */
-#define CLIENT_REPLY_BLOCK_MULTI_REF 3  /* Multiple robj references in array */
 
 #define CLIENT_REPLY_MULTI_REF_MAX 16  /* Maximum number of refs in multi-ref block */
 #define LONG_STR_SIZE 21  /* Maximum length of a 64-bit integer as string */
@@ -1111,18 +1110,18 @@ typedef struct clientReplyRefEntry {
 } clientReplyRefEntry;
 
 /* Multiple robj references block */
-typedef struct clientReplyBlockMultiRef {
-    int type;  /* Always CLIENT_REPLY_BLOCK_MULTI_REF */
+typedef struct clientReplyBlockRef {
+    int type;  /* Always CLIENT_REPLY_BLOCK_REF */
     int count;  /* Number of references currently stored */
     int written_index;  /* Index of the first reference that hasn't been fully written yet */
     size_t total_size;  /* Total size of all referenced data for quick calculation */
     clientReplyRefEntry refs[CLIENT_REPLY_MULTI_REF_MAX];
-} clientReplyBlockMultiRef;
+} clientReplyBlockRef;
 
 /* This structure is used in order to represent the output buffer of a client,
  * which is actually a linked list of blocks like that, that is: client->reply. */
 typedef struct clientReplyBlock {
-    int type;  /* CLIENT_REPLY_BLOCK_PLAIN, CLIENT_REPLY_BLOCK_REF, or CLIENT_REPLY_BLOCK_MULTI_REF */
+    int type;  /* CLIENT_REPLY_BLOCK_PLAIN, CLIENT_REPLY_BLOCK_REF */
 } clientReplyBlock;
 
 /* Replication buffer blocks is the list of replBufBlock.
@@ -1483,7 +1482,6 @@ typedef struct client {
     listNode *client_list_node; /* list node in client list */
     listNode *io_thread_client_list_node; /* list node in io thread client list */
     listNode *postponed_list_node; /* list node within the postponed list */
-    // listNode *pending_ref_reply_client_list_node; /* list node in clients_with_pending_ref_reply list */
     void *module_blocked_client; /* Pointer to the RedisModuleBlockedClient associated with this
                                   * client. This is set in case of module authentication before the
                                   * unblocked client is reprocessed to handle reply callbacks. */
@@ -1911,7 +1909,6 @@ struct redisServer {
     list *clients_to_close;     /* Clients to close asynchronously */
     list *clients_pending_write; /* There is to write or install handler. */
     list *clients_pending_read;  /* Client has pending read socket buffers. */
-    // list *clients_with_pending_ref_reply; /* Clients that have pending referenced replies. */
     list *slaves, *monitors;    /* List of slaves and MONITORs */
     client *current_client;     /* The client that triggered the command execution (External or AOF). */
     client *executing_client;   /* The client executing the current command (possibly script or module). */
@@ -2971,7 +2968,6 @@ void freeClientArgv(client *c);
 void freeClientPendingCommands(client *c, int num_pcmds_to_free);
 void tryDeferFreeClientObject(client *c, int type, void *ptr);
 void freeClientDeferredObjects(client *c, int free_array);
-void processDeferredReplyBlocks(client *c);
 void sendReplyToClient(connection *conn);
 void *addReplyDeferredLen(client *c);
 void setDeferredArrayLen(client *c, void *node, long length);
