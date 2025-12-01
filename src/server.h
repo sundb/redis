@@ -1113,7 +1113,6 @@ typedef struct clientReplyBlockRef {
     int type;  /* Always CLIENT_REPLY_BLOCK_REF */
     int count;  /* Number of references currently stored */
     int written_index;  /* Index of the first reference that hasn't been fully written yet */
-    size_t total_size;  /* Total size of all referenced data for quick calculation */
     clientReplyRefEntry refs[CLIENT_REPLY_REF_MAX];
 } clientReplyBlockRef;
 

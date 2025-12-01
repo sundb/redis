@@ -96,7 +96,6 @@ void *dupClientReplyValue(void *o) {
         new->type = type;
         new->count = old->count;
         new->written_index = old->written_index;  /* Copy the written index */
-        new->total_size = old->total_size;
 
         /* Copy all references and increment their refcounts */
         for (int i = 0; i < old->count; i++) {
@@ -416,7 +415,6 @@ static void _addReplyObjectToListOptimized(client *c, robj *obj, size_t sz) {
         multi_block->type = CLIENT_REPLY_BLOCK_REF;
         multi_block->count = 0;
         multi_block->written_index = 0;  /* Start from the first reference */
-        multi_block->total_size = 0;
         listAddNodeTail(c->reply, multi_block);
     }
 
@@ -430,7 +428,6 @@ static void _addReplyObjectToListOptimized(client *c, robj *obj, size_t sz) {
     /* Update block counters */
     multi_block->count++;
     size_t entry_size = sz;
-    multi_block->total_size += entry_size;
     c->reply_bytes += entry_size;
 
     closeClientOnOutputBufferLimitReached(c, 1);
