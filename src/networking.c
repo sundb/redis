@@ -429,7 +429,6 @@ static void _addReplyObjectToListOptimized(client *c, robj *obj, size_t sz) {
 
     /* Update block counters */
     multi_block->count++;
-    // size_t entry_size = len + entry->prefix_cnt + 2; /* data + prefix + crlf */
     size_t entry_size = sz;
     multi_block->total_size += entry_size;
     c->reply_bytes += entry_size;
@@ -2323,7 +2322,6 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
 
             /* Process references starting from written_index */
             while (multi_block->written_index < multi_block->count) {
-            // for (int i = multi_block->written_index; i < multi_block->count; i++) {
                 clientReplyRefEntry *entry = &multi_block->refs[multi_block->written_index];
                 size_t slen = sdslen(entry->obj->ptr);
                 size_t len = slen + entry->prefix_cnt + 2;
