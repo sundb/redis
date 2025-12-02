@@ -437,6 +437,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_INTERNAL (1ULL<<52) /* Internal client connection */
 #define CLIENT_ASM_MIGRATING (1ULL<<53) /* Client is migrating RDB/stream data during atomic slot migration. */
 #define CLIENT_ASM_IMPORTING (1ULL<<54) /* Client is importing RDB/stream data during atomic slot migration. */
+#define CLIENT_BUF_ENCODED (1ULL<<55) /* c->buf is used as clientReplyRefEntry array for large bulk string replies */
 
 /* Any flag that does not let optimize FLUSH SYNC to run it in bg as blocking client ASYNC */
 #define CLIENT_AVOID_BLOCKING_ASYNC_FLUSH (CLIENT_DENY_BLOCKING|CLIENT_MULTI|CLIENT_LUA_DEBUG|CLIENT_LUA_DEBUG_SYNC|CLIENT_MODULE)
@@ -1531,6 +1532,9 @@ typedef struct client {
     int bufpos;
     size_t buf_usable_size; /* Usable size of buffer. */
     char *buf;
+    /* When CLIENT_BUF_ENCODED is set, c->buf is used as clientReplyRefEntry array */
+    int buf_ref_count;       /* Number of clientReplyRefEntry in c->buf when encoded */
+    int buf_ref_written_idx; /* Index of first not-fully-written entry */
 #ifdef LOG_REQ_RES
     clientReqResInfo reqres;
 #endif
