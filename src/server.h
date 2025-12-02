@@ -1103,6 +1103,8 @@ typedef struct clientReplyBlockPlain {
 /* Single reference entry in multi-ref block */
 typedef struct clientReplyRefEntry {
     robj *obj;
+    sds str;
+    size_t slen;
     unsigned int prefix_cnt;
     char prefix[LONG_STR_SIZE + 3]; /* $<len>\r\n */
     char crlf[2]; /* \r\n */

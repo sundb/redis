@@ -411,6 +411,8 @@ static void _addReplyObjectToList(client *c, robj *obj, size_t sz) {
     /* Add the reference to this block. */
     clientReplyRefEntry *entry = &ref_block->refs[ref_block->count++];
     entry->obj = obj;
+    entry->str = obj->ptr;
+    entry->slen = sz;
     incrRefCount(obj);
     c->reply_bytes += sz;
 
@@ -2201,12 +2203,11 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             /* Start processing from written_index to avoid processing already-written entries */
             for (int i = multi_block->written_index; i < multi_block->count; i++) {
                 clientReplyRefEntry *entry = &multi_block->refs[i];
-                size_t data_len = sdslen(entry->obj->ptr);
 
                 if (!entry->prefix_cnt) {
                     /* Fill prefix with bulk string length: "$<len>\r\n" */
                     entry->prefix[0] = '$';
-                    size_t num_len = ll2string(entry->prefix + 1, sizeof(entry->prefix) - 3, data_len);
+                    size_t num_len = ll2string(entry->prefix + 1, sizeof(entry->prefix) - 3, entry->slen);
                     entry->prefix[num_len + 1] = '\r';
                     entry->prefix[num_len + 2] = '\n';
                     entry->prefix_cnt = num_len + 3;
@@ -2214,14 +2215,8 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                     entry->crlf[1] = '\n'; 
                 }
 
-                size_t entry_total_size = entry->prefix_cnt + data_len + 2; /* prefix + data + crlf */
+                size_t entry_total_size = entry->prefix_cnt + entry->slen + 2; /* prefix + data + crlf */
                 serverAssert(offset < entry_total_size);
-
-                /* Skip this entry if offset is beyond it */
-                // if (offset >= entry_total_size) {
-                //     offset -= entry_total_size;
-                //     continue;
-                // }
 
                 /* Add prefix if needed */
                 if (offset < entry->prefix_cnt) {
@@ -2235,14 +2230,14 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                 }
 
                 /* Add data if needed */
-                if (offset < data_len) {
-                    iov[iovcnt].iov_base = (char*)entry->obj->ptr + offset;
-                    iov[iovcnt].iov_len = data_len - offset;
+                if (offset < entry->slen) {
+                    iov[iovcnt].iov_base = (char*)entry->str + offset;
+                    iov[iovcnt].iov_len = entry->slen - offset;
                     iov_bytes_len += iov[iovcnt++].iov_len;
                     // if (iovcnt >= iovmax || iov_bytes_len >= NET_MAX_WRITES_PER_EVENT) break;
                     offset = 0;
                 } else {
-                    offset -= data_len;
+                    offset -= entry->slen;
                 }
 
                 /* Add CRLF if needed */
@@ -2303,14 +2298,13 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             /* Process references starting from written_index */
             while (multi_block->written_index < multi_block->count) {
                 clientReplyRefEntry *entry = &multi_block->refs[multi_block->written_index];
-                size_t slen = sdslen(entry->obj->ptr);
-                size_t len = slen + entry->prefix_cnt + 2;
+                size_t len = entry->slen + entry->prefix_cnt + 2;
                 if (remaining < (ssize_t)(len - c->sentlen)) {
                     c->sentlen += remaining;
                     break;
                 }
                 remaining -= (ssize_t)(len - c->sentlen);
-                c->reply_bytes -= slen;
+                c->reply_bytes -= entry->slen;
                 c->sentlen = 0;
                 multi_block->written_index++;
             }
