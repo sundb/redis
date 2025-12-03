@@ -1063,7 +1063,7 @@ struct redisObject {
     unsigned iskvobj : 1;   /* 1 if this struct serves as a kvobj base */
     unsigned expirable : 1; /* 1 if this key has expiration time attached.
                              * If set, then this object is of type kvobj */
-    unsigned refcount : OBJ_REFCOUNT_BITS;
+    redisAtomic unsigned refcount;
     void *ptr;
 };
 
@@ -1087,10 +1087,14 @@ char *getObjectTypeName(robj*);
 
 struct evictionPoolEntry; /* Defined in evict.c */
 
+typedef struct payloadHeader payloadHeader; /* Defined in networking.c */
+
 /* This structure is used in order to represent the output buffer of a client,
  * which is actually a linked list of blocks like that, that is: client->reply. */
 typedef struct clientReplyBlock {
     size_t size, used;
+    payloadHeader *last_header; /* points to a last header in an encoded buffer */
+    int buf_encoded: 1;
     char buf[];
 } clientReplyBlock;
 
@@ -1361,6 +1365,14 @@ typedef struct {
 } clientReqResInfo;
 #endif
 
+typedef struct LastWrittenBuf {
+    char *buf;       /* Last buffer that has been written to the client connection
+                      * Last buffer is either c->buf or c->reply list node (i.e. buf from a clientReplyBlock) */
+    size_t bufpos;   /* The buffer has been written until this position */
+    size_t data_len; /* The actual reply length written from this buffer
+                      * This length differs from bufpos in case of copy avoidance */
+} LastWrittenBuf;
+
 typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
@@ -1401,6 +1413,7 @@ typedef struct client {
     list *reply;            /* List of reply objects to send to the client. */
     unsigned long long reply_bytes; /* Tot bytes of objects in reply list. */
     list *deferred_reply_errors;    /* Used for module thread safe contexts. */
+    LastWrittenBuf io_last_written; /* Track state for last written buffer */
     size_t sentlen;         /* Amount of bytes already sent in the current
                                buffer or object being sent. */
     time_t ctime;           /* Client creation time. */
@@ -1503,6 +1516,8 @@ typedef struct client {
     int bufpos;
     size_t buf_usable_size; /* Usable size of buffer. */
     char *buf;
+    uint8_t buf_encoded; /* True if c->buf content is encoded (e.g. for copy avoidance) */
+    payloadHeader *last_header; /* Pointer to the last header in a buffer when using copy avoidance */
 #ifdef LOG_REQ_RES
     clientReqResInfo reqres;
 #endif
@@ -1913,6 +1928,10 @@ struct redisServer {
     int enable_protected_configs;    /* Enable the modification of protected configs, see PROTECTED_ACTION_ALLOWED_* */
     int enable_debug_cmd;            /* Enable DEBUG commands, see PROTECTED_ACTION_ALLOWED_* */
     int enable_module_cmd;           /* Enable MODULE commands, see PROTECTED_ACTION_ALLOWED_* */
+    /* Reply construction copy avoidance */
+    int min_io_threads_copy_avoid;           /* Minimum number of IO threads for copy avoidance in reply construction */
+    int min_string_size_copy_avoid_threaded; /* Minimum bulk string size for copy avoidance in reply construction when IO threads enabled */
+    int min_string_size_copy_avoid;          /* Minimum bulk string size for copy avoidance in reply construction when IO threads disabled */
 
     /* RDB / AOF loading information */
     volatile sig_atomic_t loading; /* We are loading data from disk if true */
