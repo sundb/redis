@@ -221,9 +221,9 @@ client *createClient(connection *conn) {
     c->buf_peak_last_reset_time = server.unixtime;
     c->buf_encoded = 0;
     c->last_header = NULL;
-    c->io_last_written.buf = NULL;
-    c->io_last_written.bufpos = 0;
-    c->io_last_written.data_len = 0;
+    // c->io_last_written.buf = NULL;
+    // c->io_last_written.bufpos = 0;
+    // c->io_last_written.data_len = 0;
     c->ref_repl_buf_node = NULL;
     c->ref_block_pos = 0;
     c->qb_pos = 0;
@@ -2300,102 +2300,102 @@ typedef struct bufWriteMetadata {
                           process stopped due encountered limit */
 } bufWriteMetadata;
 
-static void initReplyIOV(client *c, int iovsize, struct iovec *iov_arr, char (*prefixes)[], char *crlf, replyIOV *reply) {
-    reply->iovcnt = 0;
-    reply->iovsize = iovsize;
-    reply->limit_reached = 0;
-    reply->iov = iov_arr;
-    reply->iov_len_total = 0;
-    reply->last_written_len = c->io_last_written.data_len;
-    reply->prfxcnt = 0;
-    reply->prefixes = prefixes;
-    reply->crlf = crlf;
-}
+// static void initReplyIOV(client *c, int iovsize, struct iovec *iov_arr, char (*prefixes)[], char *crlf, replyIOV *reply) {
+//     reply->iovcnt = 0;
+//     reply->iovsize = iovsize;
+//     reply->limit_reached = 0;
+//     reply->iov = iov_arr;
+//     reply->iov_len_total = 0;
+//     reply->last_written_len = c->io_last_written.data_len;
+//     reply->prfxcnt = 0;
+//     reply->prefixes = prefixes;
+//     reply->crlf = crlf;
+// }
 
-static void addPlainBufferToReplyIOV(char *buf, size_t buf_len, replyIOV *reply, bufWriteMetadata *metadata) {
-    if (reply->limit_reached) return;
+// static void addPlainBufferToReplyIOV(char *buf, size_t buf_len, replyIOV *reply, bufWriteMetadata *metadata) {
+//     if (reply->limit_reached) return;
 
-    if (reply->iovcnt == reply->iovsize) {
-        reply->limit_reached = 1;
-        return;
-    }
+//     if (reply->iovcnt == reply->iovsize) {
+//         reply->limit_reached = 1;
+//         return;
+//     }
 
-    /* Aggregate data length from the beginning of the buffer even though
-     * part of the data can be skipped in this _writevToClient invocation due to last_written_len */
-    metadata->data_len += buf_len;
+//     /* Aggregate data length from the beginning of the buffer even though
+//      * part of the data can be skipped in this _writevToClient invocation due to last_written_len */
+//     metadata->data_len += buf_len;
 
-    /* Skip data written in the previous _writevToClient invocation(s) */
-    if (reply->last_written_len >= buf_len) {
-        reply->last_written_len -= buf_len;
-        return;
-    }
+//     /* Skip data written in the previous _writevToClient invocation(s) */
+//     if (reply->last_written_len >= buf_len) {
+//         reply->last_written_len -= buf_len;
+//         return;
+//     }
 
-    reply->iov[reply->iovcnt].iov_base = buf + reply->last_written_len;
-    reply->iov[reply->iovcnt].iov_len = buf_len - reply->last_written_len;
-    reply->last_written_len = 0;
+//     reply->iov[reply->iovcnt].iov_base = buf + reply->last_written_len;
+//     reply->iov[reply->iovcnt].iov_len = buf_len - reply->last_written_len;
+//     reply->last_written_len = 0;
 
-    reply->iov_len_total += reply->iov[reply->iovcnt++].iov_len;
-}
+//     reply->iov_len_total += reply->iov[reply->iovcnt++].iov_len;
+// }
 
-static void addBulkStringToReplyIOV(char *buf, size_t buf_len, replyIOV *reply, bufWriteMetadata *metadata) {
-    bulkStrRef *str_ref = (bulkStrRef *)buf;
-    while (buf_len > 0 && !reply->limit_reached) {
-        size_t str_len = sdslen(str_ref->obj->ptr);
+// static void addBulkStringToReplyIOV(char *buf, size_t buf_len, replyIOV *reply, bufWriteMetadata *metadata) {
+//     bulkStrRef *str_ref = (bulkStrRef *)buf;
+//     while (buf_len > 0 && !reply->limit_reached) {
+//         size_t str_len = sdslen(str_ref->obj->ptr);
 
-        /* RESP encodes bulk strings as $<length>\r\n<data>\r\n */
-        char *prefix = reply->prefixes[reply->prfxcnt];
-        prefix[0] = '$';
-        size_t num_len = ll2string(prefix + 1, sizeof(reply->prefixes[0]) - 3, str_len);
-        prefix[num_len + 1] = '\r';
-        prefix[num_len + 2] = '\n';
+//         /* RESP encodes bulk strings as $<length>\r\n<data>\r\n */
+//         char *prefix = reply->prefixes[reply->prfxcnt];
+//         prefix[0] = '$';
+//         size_t num_len = ll2string(prefix + 1, sizeof(reply->prefixes[0]) - 3, str_len);
+//         prefix[num_len + 1] = '\r';
+//         prefix[num_len + 2] = '\n';
 
-        int cnt = reply->iovcnt;
-        addPlainBufferToReplyIOV(reply->prefixes[reply->prfxcnt], num_len + 3, reply, metadata);
-        /* Increment prfxcnt only if prefix was added to reply in this _writevToClient invocation */
-        if (reply->iovcnt > cnt) reply->prfxcnt++;
-        addPlainBufferToReplyIOV(str_ref->obj->ptr, str_len, reply, metadata);
-        addPlainBufferToReplyIOV(reply->crlf, 2, reply, metadata);
+//         int cnt = reply->iovcnt;
+//         addPlainBufferToReplyIOV(reply->prefixes[reply->prfxcnt], num_len + 3, reply, metadata);
+//         /* Increment prfxcnt only if prefix was added to reply in this _writevToClient invocation */
+//         if (reply->iovcnt > cnt) reply->prfxcnt++;
+//         addPlainBufferToReplyIOV(str_ref->obj->ptr, str_len, reply, metadata);
+//         addPlainBufferToReplyIOV(reply->crlf, 2, reply, metadata);
 
-        str_ref++;
-        buf_len -= sizeof(bulkStrRef);
-    }
-}
+//         str_ref++;
+//         buf_len -= sizeof(bulkStrRef);
+//     }
+// }
 
-static void addEncodedBufferToReplyIOV(char *buf, size_t bufpos, replyIOV *reply, bufWriteMetadata *metadata) {
-    char *ptr = buf;
-    while (ptr < buf + bufpos && !reply->limit_reached) {
-        payloadHeader *header = (payloadHeader *)ptr;
-        ptr += sizeof(payloadHeader);
-        if (header->payload_type == PLAIN_REPLY) {
-            addPlainBufferToReplyIOV(ptr, header->payload_len, reply, metadata);
-        } else {
-            uint64_t data_len = metadata->data_len;
-            addBulkStringToReplyIOV(ptr, header->payload_len, reply, metadata);
-            /* Store actual reply len for cluster slot stats */
-            // header->reply_len = metadata->data_len - data_len;
-        }
-        ptr += header->payload_len;
-    }
-}
+// static void addEncodedBufferToReplyIOV(char *buf, size_t bufpos, replyIOV *reply, bufWriteMetadata *metadata) {
+//     char *ptr = buf;
+//     while (ptr < buf + bufpos && !reply->limit_reached) {
+//         payloadHeader *header = (payloadHeader *)ptr;
+//         ptr += sizeof(payloadHeader);
+//         if (header->payload_type == PLAIN_REPLY) {
+//             addPlainBufferToReplyIOV(ptr, header->payload_len, reply, metadata);
+//         } else {
+//             uint64_t data_len = metadata->data_len;
+//             addBulkStringToReplyIOV(ptr, header->payload_len, reply, metadata);
+//             /* Store actual reply len for cluster slot stats */
+//             // header->reply_len = metadata->data_len - data_len;
+//         }
+//         ptr += header->payload_len;
+//     }
+// }
 
-static void addBufferToReplyIOV(int encoded, char *buf, size_t bufpos, replyIOV *reply, bufWriteMetadata *metadata) {
-    metadata->data_len = 0;
+// static void addBufferToReplyIOV(int encoded, char *buf, size_t bufpos, replyIOV *reply, bufWriteMetadata *metadata) {
+//     metadata->data_len = 0;
 
-    if (encoded) {
-        addEncodedBufferToReplyIOV(buf, bufpos, reply, metadata);
-        metadata->complete = !reply->limit_reached;
-    } else {
-        addPlainBufferToReplyIOV(buf, bufpos, reply, metadata);
-        metadata->complete = 1;
-    }
+//     if (encoded) {
+//         addEncodedBufferToReplyIOV(buf, bufpos, reply, metadata);
+//         metadata->complete = !reply->limit_reached;
+//     } else {
+//         addPlainBufferToReplyIOV(buf, bufpos, reply, metadata);
+//         metadata->complete = 1;
+//     }
 
-    if (reply->iov_len_total > NET_MAX_WRITES_PER_EVENT) {
-        reply->limit_reached = 1;
-    }
+//     if (reply->iov_len_total > NET_MAX_WRITES_PER_EVENT) {
+//         reply->limit_reached = 1;
+//     }
 
-    metadata->buf = buf;
-    metadata->bufpos = bufpos;
-}
+//     metadata->buf = buf;
+//     metadata->bufpos = bufpos;
+// }
 
 /*
  * This function calculates and stores on the client next:
@@ -2410,40 +2410,40 @@ static void addBufferToReplyIOV(int encoded, char *buf, size_t bufpos, replyIOV 
  * The io_last_written.data_len is used by _writevToClient for resuming write from the point
  * where previous _writevToClient invocation stopped
  **/
-static void saveLastWrittenBuf(client *c, bufWriteMetadata *metadata, int bufcnt, size_t totlen, size_t totwritten) {
-    int last = bufcnt - 1;
-    if (totwritten == totlen) {
-        c->io_last_written.buf = metadata[last].buf;
-        /* Zero io_last_written.bufpos indicates buffer written incompletely */
-        c->io_last_written.bufpos = (metadata[last].complete ? metadata[last].bufpos : 0);
-        c->io_last_written.data_len = metadata[last].data_len;
-        return;
-    }
+// static void saveLastWrittenBuf(client *c, bufWriteMetadata *metadata, int bufcnt, size_t totlen, size_t totwritten) {
+//     int last = bufcnt - 1;
+//     if (totwritten == totlen) {
+//         c->io_last_written.buf = metadata[last].buf;
+//         /* Zero io_last_written.bufpos indicates buffer written incompletely */
+//         c->io_last_written.bufpos = (metadata[last].complete ? metadata[last].bufpos : 0);
+//         c->io_last_written.data_len = metadata[last].data_len;
+//         return;
+//     }
 
-    last = -1;
-    int64_t remaining = totwritten + c->io_last_written.data_len;
-    while (remaining > 0) remaining -= metadata[++last].data_len;
-    serverAssert(last < bufcnt);
+//     last = -1;
+//     int64_t remaining = totwritten + c->io_last_written.data_len;
+//     while (remaining > 0) remaining -= metadata[++last].data_len;
+//     serverAssert(last < bufcnt);
 
-    c->io_last_written.buf = metadata[last].buf;
-    /* Zero io_last_written.bufpos indicates buffer written incompletely */
-    c->io_last_written.bufpos = (metadata[last].complete && remaining == 0 ? metadata[last].bufpos : 0);
-    c->io_last_written.data_len = (size_t)(metadata[last].data_len + remaining);
-}
+//     c->io_last_written.buf = metadata[last].buf;
+//     /* Zero io_last_written.bufpos indicates buffer written incompletely */
+//     c->io_last_written.bufpos = (metadata[last].complete && remaining == 0 ? metadata[last].bufpos : 0);
+//     c->io_last_written.data_len = (size_t)(metadata[last].data_len + remaining);
+// }
 
 /* Adjust reply->iov to point to start of unwritten blocks */
-static void proceedToUnwritten(replyIOV *reply, int nwritten) {
-    while (nwritten > 0) {
-        if ((size_t)nwritten < reply->iov[0].iov_len) {
-            reply->iov[0].iov_base = (char *)reply->iov[0].iov_base + nwritten;
-            reply->iov[0].iov_len -= nwritten;
-            break;
-        }
-        nwritten -= reply->iov[0].iov_len;
-        reply->iov++;
-        reply->iovcnt--;
-    }
-}
+// static void proceedToUnwritten(replyIOV *reply, int nwritten) {
+//     while (nwritten > 0) {
+//         if ((size_t)nwritten < reply->iov[0].iov_len) {
+//             reply->iov[0].iov_base = (char *)reply->iov[0].iov_base + nwritten;
+//             reply->iov[0].iov_len -= nwritten;
+//             break;
+//         }
+//         nwritten -= reply->iov[0].iov_len;
+//         reply->iov++;
+//         reply->iovcnt--;
+//     }
+// }
 
 /* This function should be called from _writeToClient when the reply list is not empty,
  * it gathers the scattered buffers from reply list and sends them away with connWritev.
@@ -2767,11 +2767,11 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
     return C_OK;
 }
 
-void resetLastWrittenBuf(client *c) {
-    c->io_last_written.buf = NULL;
-    c->io_last_written.bufpos = 0;
-    c->io_last_written.data_len = 0;
-}
+// void resetLastWrittenBuf(client *c) {
+//     c->io_last_written.buf = NULL;
+//     c->io_last_written.bufpos = 0;
+//     c->io_last_written.data_len = 0;
+// }
 
 /* Release references to string objects inside an encoded buffer */
 static void releaseBufReferences(char *buf, size_t bufpos) {
