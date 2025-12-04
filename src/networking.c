@@ -2642,6 +2642,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                     break;
                 }
                 decrRefCount(str_ref->obj);
+                c->sentlen = 0;
             }
             ptr = ptr + sizeof(payloadHeader) + head->payload_len;
         }
@@ -2708,6 +2709,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                     if (remaining >= (ssize_t)wire_len) {
                         /* Fully sent, release the reference */
                         decrRefCount(str_ref->obj);
+                        str_ref->obj = NULL; /* Mark as released to prevent double free */
                         remaining -= wire_len;
                         ptr += sizeof(payloadHeader) + head->payload_len;
                     } else {
@@ -2787,7 +2789,10 @@ static void releaseBufReferences(char *buf, size_t bufpos) {
             bulkStrRef *str_ref = (bulkStrRef *)ptr;
             size_t len = header->payload_len;
             while (len > 0) {
-                decrRefCount(str_ref->obj);
+                /* Only release if not already released (obj != NULL) */
+                if (str_ref->obj != NULL) {
+                    decrRefCount(str_ref->obj);
+                }
                 str_ref++;
                 len -= sizeof(bulkStrRef);
             }
