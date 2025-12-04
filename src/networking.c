@@ -433,11 +433,29 @@ static void _addReplyPayloadToList(client *c, list *reply_list, const char *payl
 
     /* Append to tail string when possible. */
     if (tail) {
-        /*  */
+        /* Copy the part we can fit into the tail, and leave the rest for a
+         * new node */
+        size_t avail = tail->size - tail->used;
+        size_t copy = avail >= len? len: avail;
+
         if (tail->buf_encoded) {
             if (tryAddPayload(tail->buf, &tail->used, tail->size, payload_type, (void *)payload, len)) {
                 len = 0;
             }
+            copy = 0;
+        } else if (encoded) {
+            copy = 0;
+        }
+
+        if (copy) {
+            /* Copy the part we can fit into the tail, and leave the rest for a
+             * new node */
+            size_t avail = tail->size - tail->used;
+            size_t copy = avail >= len? len: avail;
+            memcpy(tail->buf + tail->used, payload, copy);
+            tail->used += copy;
+            payload += copy;
+            len -= copy;
         }
     }
     if (len) {
@@ -453,9 +471,10 @@ static void _addReplyPayloadToList(client *c, list *reply_list, const char *payl
         tail->buf_encoded = encoded;
         if (tail->buf_encoded) {
             serverAssert(tryAddPayload(tail->buf, &tail->used, tail->size, payload_type, (void *)payload, len));
+        } else {
+            memcpy(tail->buf + tail->used, payload, len);
+            tail->used += len;
         }
-        // memcpy(tail->buf + tail->used, payload, len);
-        // tail->used += len;
         listAddNodeTail(reply_list, tail);
         c->reply_bytes += tail->size;
 
@@ -525,19 +544,25 @@ static int tryAddPayload(char *buf, size_t *used, size_t size, uint8_t type, con
 
 /* Attempts to add the reply to the static buffer in the client struct.
  * Returns the length of data that is added to the reply buffer. */
-static int _addReplyPayloadToBuffer(client *c, const void *payload, size_t len, uint8_t payload_type) {
+static size_t _addReplyPayloadToBuffer(client *c, const void *payload, size_t len, uint8_t payload_type) {
     /* If there already are entries in the reply list, we cannot
      * add anything more to the static buffer. */
     if (listLength(c->reply) > 0) return 0;
 
+    size_t available = c->buf_usable_size - c->bufpos;
+    size_t reply_len = min(available, len);
     if (c->buf_encoded) {
         if (!tryAddPayload(c->buf, &c->bufpos, c->buf_usable_size, payload_type, payload, len))
             return 0;
+        reply_len = len;
+    } else {
+        memcpy(c->buf + c->bufpos, payload, reply_len);
+        c->bufpos+=reply_len;
     }
 
     /* We update the buffer peak after appending the reply to the buffer */
     if (c->buf_peak < (size_t)c->bufpos) c->buf_peak = (size_t)c->bufpos;
-    return 1;
+    return reply_len;
 }
 
 static size_t _addReplyToBuffer(client *c, const char *s, size_t len) {
@@ -907,29 +932,29 @@ void addReplyStatusFormat(client *c, const char *fmt, ...) {
  * the previous one, when that happens, we wanna try to trim the unused space
  * at the end of the last reply node which we won't use anymore. */
 void trimReplyUnusedTailSpace(client *c) {
-    listNode *ln = listLast(c->reply);
-    clientReplyBlock *tail = ln? listNodeValue(ln): NULL;
+    // listNode *ln = listLast(c->reply);
+    // clientReplyBlock *tail = ln? listNodeValue(ln): NULL;
 
-    /* Note that 'tail' may be NULL even if we have a tail node, because when
-     * addReplyDeferredLen() is used */
-    if (!tail) return;
+    // /* Note that 'tail' may be NULL even if we have a tail node, because when
+    //  * addReplyDeferredLen() is used */
+    // if (!tail) return;
 
-    /* We only try to trim the space is relatively high (more than a 1/4 of the
-     * allocation), otherwise there's a high chance realloc will NOP.
-     * Also, to avoid large memmove which happens as part of realloc, we only do
-     * that if the used part is small.  */
-    if (tail->size - tail->used > tail->size / 4 &&
-        tail->used < PROTO_REPLY_CHUNK_BYTES)
-    {
-        size_t usable_size;
-        size_t old_size = tail->size;
-        tail = zrealloc_usable(tail, tail->used + sizeof(clientReplyBlock), &usable_size, NULL);
-        /* take over the allocation's internal fragmentation (at least for
-         * memory usage tracking) */
-        tail->size = usable_size - sizeof(clientReplyBlock);
-        c->reply_bytes = c->reply_bytes + tail->size - old_size;
-        listNodeValue(ln) = tail;
-    }
+    // /* We only try to trim the space is relatively high (more than a 1/4 of the
+    //  * allocation), otherwise there's a high chance realloc will NOP.
+    //  * Also, to avoid large memmove which happens as part of realloc, we only do
+    //  * that if the used part is small.  */
+    // if (tail->size - tail->used > tail->size / 4 &&
+    //     tail->used < PROTO_REPLY_CHUNK_BYTES)
+    // {
+    //     size_t usable_size;
+    //     size_t old_size = tail->size;
+    //     tail = zrealloc_usable(tail, tail->used + sizeof(clientReplyBlock), &usable_size, NULL);
+    //     /* take over the allocation's internal fragmentation (at least for
+    //      * memory usage tracking) */
+    //     tail->size = usable_size - sizeof(clientReplyBlock);
+    //     c->reply_bytes = c->reply_bytes + tail->size - old_size;
+    //     listNodeValue(ln) = tail;
+    // }
 }
 
 /* Adds an empty object to the reply list that will contain the multi bulk
@@ -1013,6 +1038,7 @@ void setDeferredReply(client *c, void *node, const char *s, size_t length) {
         /* Take over the allocation's internal fragmentation */
         buf->size = usable_size - sizeof(clientReplyBlock);
         buf->used = length;
+        buf->buf_encoded = 0;
         memcpy(buf->buf, s, length);
         c->net_output_bytes_curr_cmd += length;
         listNodeValue(ln) = buf;
@@ -2425,55 +2451,157 @@ static void proceedToUnwritten(replyIOV *reply, int nwritten) {
  * and 'nwritten' is an output parameter, it means how many bytes server write
  * to client. */
 static int _writevToClient(client *c, ssize_t *nwritten) {
+    int iovcnt = 0;
     int iovmax = min(IOV_MAX, c->conn->iovcnt);
-    struct iovec iov_arr[iovmax];
-    /* iov_arr can accommodate iovmax / NUM_OF_IOV_PER_BULK_STR full bulk string replies
-     * and one partial bulk reply */
-    char prefixes[iovmax / NUM_OF_IOV_PER_BULK_STR + 1][BULK_STR_LEN_PREFIX_MAX_SIZE];
-    char crlf[2] = {'\r', '\n'};
-    size_t bufcnt = 0;
+    struct iovec iov[iovmax];
+    size_t iov_bytes_len = 0;
 
-    listNode *lastblock = listLast(c->reply);
-    int reply_blocks = (lastblock ? listLength(c->reply) : 0);
-    /* +1 is for c->buf */
-    size_t replyLen = min(reply_blocks + 1, iovmax);
-    bufWriteMetadata buf_metadata[replyLen];
-
-    replyIOV reply;
-    initReplyIOV(c, iovmax, iov_arr, prefixes, crlf, &reply);
-
-    /* If the static reply buffer is not empty,
-     * add it to the iov array for writev() as well. */
+    /* Add c->buf to iov array */
     if (c->bufpos > 0) {
-        addBufferToReplyIOV(c->buf_encoded, c->buf, c->bufpos, &reply, &buf_metadata[bufcnt++]);
-    }
+        if (!c->buf_encoded) {
+            /* Non-encoded buffer - add directly */
+            iov[iovcnt].iov_base = c->buf + c->sentlen;
+            iov[iovcnt].iov_len = c->bufpos - c->sentlen;
+            iov_bytes_len += iov[iovcnt].iov_len;
+            iovcnt++;
+        } else {
+            /* Encoded buffer - traverse payload headers */
+            char *ptr = c->last_header ? (char *)c->last_header : c->buf;
+            size_t offset = c->sentlen;
 
-    if (lastblock) {
-        listIter iter;
-        listNode *next;
-        listRewind(c->reply, &iter);
-        while ((next = listNext(&iter)) && !reply.limit_reached) {
-            clientReplyBlock *o = listNodeValue(next);
+            while (ptr < c->buf + c->bufpos && iovcnt < iovmax) {
+                payloadHeader *head = (payloadHeader *)ptr;
 
-            if (o->used == 0) { /* empty node, skip over it. */
-                if (next == lastblock) break;
-                continue;
-            }
+                if (head->payload_type == PLAIN_REPLY) {
+                    /* Plain data - add directly */
+                    if (offset < head->payload_len) {
+                        iov[iovcnt].iov_base = ptr + sizeof(payloadHeader) + offset;
+                        iov[iovcnt].iov_len = head->payload_len - offset;
+                        iov_bytes_len += iov[iovcnt].iov_len;
+                        iovcnt++;
+                        offset = 0;
+                    } else {
+                        offset -= head->payload_len;
+                    }
+                } else {
+                    /* BULK_STR_REF - expand to prefix + string + crlf */
+                    bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
+                    size_t prefix_len = str_ref->prefix_cnt;
+                    size_t str_len = sdslen(str_ref->obj->ptr);
+                    size_t total_len = prefix_len + str_len + 2;
 
-            addBufferToReplyIOV(o->buf_encoded, o->buf, o->used, &reply, &buf_metadata[bufcnt]);
-            if (!buf_metadata[bufcnt].data_len) break;
-            bufcnt++;
+                    if (offset < total_len) {
+                        /* Add prefix if not fully sent */
+                        if (offset < prefix_len) {
+                            if (iovcnt >= iovmax) break;
+                            iov[iovcnt].iov_base = str_ref->prefix + offset;
+                            iov[iovcnt].iov_len = prefix_len - offset;
+                            iov_bytes_len += iov[iovcnt].iov_len;
+                            iovcnt++;
+                            offset = 0;
+                        } else {
+                            offset -= prefix_len;
+                        }
 
-            if (next == lastblock) break;
+                        /* Add string data if not fully sent */
+                        if (offset < str_len) {
+                            if (iovcnt >= iovmax) break;
+                            iov[iovcnt].iov_base = (char *)str_ref->obj->ptr + offset;
+                            iov[iovcnt].iov_len = str_len - offset;
+                            iov_bytes_len += iov[iovcnt].iov_len;
+                            iovcnt++;
+                            offset = 0;
+                        } else {
+                            offset -= str_len;
+                        }
 
-            if (reply.iovcnt == reply.iovsize) {
-                reply.limit_reached = 1;
+                        /* Add crlf if not fully sent */
+                        if (offset < 2) {
+                            if (iovcnt >= iovmax) break;
+                            iov[iovcnt].iov_base = str_ref->crlf + offset;
+                            iov[iovcnt].iov_len = 2 - offset;
+                            iov_bytes_len += iov[iovcnt].iov_len;
+                            iovcnt++;
+                            offset = 0;
+                        } else {
+                            offset -= 2;
+                        }
+                    } else {
+                        offset -= total_len;
+                    }
+                }
+
+                ptr += sizeof(payloadHeader) + head->payload_len;
             }
         }
     }
 
-    if (reply.iovcnt == 0) return C_OK;
-    *nwritten = connWritev(c->conn, reply.iov, reply.iovcnt);
+    /* Add c->reply list nodes to iov array */
+    if (iovcnt < iovmax) {
+        listIter iter;
+        listNode *next;
+        listRewind(c->reply, &iter);
+
+        while ((next = listNext(&iter)) && iovcnt < iovmax) {
+            clientReplyBlock *o = listNodeValue(next);
+
+            if (o->used == 0) continue; /* Skip empty nodes */
+
+            if (!o->buf_encoded) {
+                /* Non-encoded reply block - add directly */
+                iov[iovcnt].iov_base = o->buf;
+                iov[iovcnt].iov_len = o->used;
+                iov_bytes_len += iov[iovcnt].iov_len;
+                iovcnt++;
+            } else {
+                /* Encoded reply block - traverse payload headers */
+                char *ptr = o->buf;
+
+                while (ptr < o->buf + o->used && iovcnt < iovmax) {
+                    payloadHeader *head = (payloadHeader *)ptr;
+
+                    if (head->payload_type == PLAIN_REPLY) {
+                        /* Plain data - add directly */
+                        iov[iovcnt].iov_base = ptr + sizeof(payloadHeader);
+                        iov[iovcnt].iov_len = head->payload_len;
+                        iov_bytes_len += iov[iovcnt].iov_len;
+                        iovcnt++;
+                    } else {
+                        /* BULK_STR_REF - expand to prefix + string + crlf */
+                        bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
+
+                        /* Add prefix */
+                        if (iovcnt >= iovmax) break;
+                        iov[iovcnt].iov_base = str_ref->prefix;
+                        iov[iovcnt].iov_len = str_ref->prefix_cnt;
+                        iov_bytes_len += iov[iovcnt].iov_len;
+                        iovcnt++;
+
+                        /* Add string data */
+                        if (iovcnt >= iovmax) break;
+                        iov[iovcnt].iov_base = str_ref->obj->ptr;
+                        iov[iovcnt].iov_len = sdslen(str_ref->obj->ptr);
+                        iov_bytes_len += iov[iovcnt].iov_len;
+                        iovcnt++;
+
+                        /* Add crlf */
+                        if (iovcnt >= iovmax) break;
+                        iov[iovcnt].iov_base = str_ref->crlf;
+                        iov[iovcnt].iov_len = 2;
+                        iov_bytes_len += iov[iovcnt].iov_len;
+                        iovcnt++;
+                    }
+
+                    ptr += sizeof(payloadHeader) + head->payload_len;
+                }
+
+                if (iovcnt >= iovmax) break;
+            }
+        }
+    }
+
+    if (iovcnt == 0) return C_OK;
+    *nwritten = connWritev(c->conn, iov, iovcnt);
     if (*nwritten <= 0) return C_ERR;
 
     /* Locate the new node which has leftover data and
@@ -2524,6 +2652,80 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             c->sentlen = 0;
             c->buf_encoded = 0;
             c->last_header = NULL;
+        }
+    }
+
+    /* Process c->reply list nodes */
+    listIter iter;
+    listNode *next;
+    listRewind(c->reply, &iter);
+    while ((next = listNext(&iter)) && remaining > 0) {
+        clientReplyBlock *o = listNodeValue(next);
+
+        if (!o->buf_encoded) {
+            /* Non-encoded reply block */
+            if (o->used > 0) {
+                /* Find how much of this block was sent */
+                if (remaining >= (ssize_t)o->used) {
+                    /* Entire block was sent */
+                    remaining -= o->used;
+
+                    /* Remove this block */
+                    c->reply_bytes -= o->size;
+                    listDelNode(c->reply, next);
+                } else {
+                    /* Partial block sent - this shouldn't happen in writev,
+                     * but handle it for completeness */
+                    break;
+                }
+            }
+        } else {
+            /* Encoded reply block - traverse payload headers from the beginning */
+            char *ptr = o->buf;
+            int block_fully_sent = 1;
+
+            while (ptr < o->buf + o->used) {
+                payloadHeader *head = (payloadHeader *)ptr;
+
+                if (head->payload_type == PLAIN_REPLY) {
+                    /* Plain data chunk */
+                    size_t chunk_size = sizeof(payloadHeader) + head->payload_len;
+                    if (remaining >= (ssize_t)chunk_size) {
+                        /* This chunk is fully sent */
+                        remaining -= chunk_size;
+                        ptr += chunk_size;
+                    } else {
+                        /* Partial send of this chunk */
+                        block_fully_sent = 0;
+                        break;
+                    }
+                } else {
+                    /* BULK_STR_REF - need to account for the actual wire format */
+                    bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
+                    /* Wire format: prefix + string data + crlf */
+                    size_t wire_len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
+
+                    if (remaining >= (ssize_t)wire_len) {
+                        /* Fully sent, release the reference */
+                        decrRefCount(str_ref->obj);
+                        remaining -= wire_len;
+                        ptr += sizeof(payloadHeader) + head->payload_len;
+                    } else {
+                        /* Partial send */
+                        block_fully_sent = 0;
+                        break;
+                    }
+                }
+            }
+
+            /* If all data in this block written, remove it */
+            if (block_fully_sent) {
+                c->reply_bytes -= o->size;
+                listDelNode(c->reply, next);
+            } else {
+                /* Partial write, stop processing */
+                break;
+            }
         }
     }
 
