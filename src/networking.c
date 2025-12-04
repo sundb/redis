@@ -2816,46 +2816,46 @@ static void releaseAllBufReferences(client *c) {
     }
 }
 
-static void _postWriteToClient(client *c, ssize_t nwritten) {
-    if (nwritten <= 0) return;
+// static void _postWriteToClient(client *c, ssize_t nwritten) {
+//     if (nwritten <= 0) return;
 
-    int last_written = 0;
-    if (c->bufpos > 0) {
-        /* Is this buffer is last written? */
-        last_written = (c->buf == c->io_last_written.buf);
-        /* If buffer is completely written */
-        if (!last_written || (size_t)c->bufpos == c->io_last_written.bufpos) {
-            /* If encoded then release references to bulk string objects */
-            if (c->buf_encoded) releaseBufReferences(c->buf, c->bufpos);
-            /* Reset buffer metadata */
-            c->bufpos = 0;
-            c->buf_encoded = 0;
-            c->last_header = NULL;
-            /* If completely written buffer is last written then reset last written state */
-            if (last_written) resetLastWrittenBuf(c);
-        }
-        if (last_written) return;
-    }
+//     int last_written = 0;
+//     if (c->bufpos > 0) {
+//         /* Is this buffer is last written? */
+//         last_written = (c->buf == c->io_last_written.buf);
+//         /* If buffer is completely written */
+//         if (!last_written || (size_t)c->bufpos == c->io_last_written.bufpos) {
+//             /* If encoded then release references to bulk string objects */
+//             if (c->buf_encoded) releaseBufReferences(c->buf, c->bufpos);
+//             /* Reset buffer metadata */
+//             c->bufpos = 0;
+//             c->buf_encoded = 0;
+//             c->last_header = NULL;
+//             /* If completely written buffer is last written then reset last written state */
+//             if (last_written) resetLastWrittenBuf(c);
+//         }
+//         if (last_written) return;
+//     }
 
-    listIter iter;
-    listNode *next;
-    listRewind(c->reply, &iter);
-    while ((next = listNext(&iter))) {
-        clientReplyBlock *o = listNodeValue(next);
-        /* Is this buffer is last written? */
-        last_written = (o->buf == c->io_last_written.buf);
-        /* If buffer is completely written */
-        if (!last_written || o->used == c->io_last_written.bufpos) {
-            c->reply_bytes -= o->size;
-            /* If encoded then release references to bulk string objects */
-            if (o->buf_encoded) releaseBufReferences(o->buf, o->used);
-            listDelNode(c->reply, next);
-            /* If completely written buffer is last written then reset last written state */
-            if (last_written) resetLastWrittenBuf(c);
-        }
-        if (last_written) return;
-    }
-}
+//     listIter iter;
+//     listNode *next;
+//     listRewind(c->reply, &iter);
+//     while ((next = listNext(&iter))) {
+//         clientReplyBlock *o = listNodeValue(next);
+//         /* Is this buffer is last written? */
+//         last_written = (o->buf == c->io_last_written.buf);
+//         /* If buffer is completely written */
+//         if (!last_written || o->used == c->io_last_written.bufpos) {
+//             c->reply_bytes -= o->size;
+//             /* If encoded then release references to bulk string objects */
+//             if (o->buf_encoded) releaseBufReferences(o->buf, o->used);
+//             listDelNode(c->reply, next);
+//             /* If completely written buffer is last written then reset last written state */
+//             if (last_written) resetLastWrittenBuf(c);
+//         }
+//         if (last_written) return;
+//     }
+// }
 
 /* This function does actual writing output buffers for non slave client types,
  * it is called by writeToClient.
@@ -2868,7 +2868,7 @@ static inline int _writeToClientNonSlave(client *c, ssize_t *nwritten) {
      * system calls and TCP packets. */
     if (listLength(c->reply) > 0) {
         int ret = _writevToClient(c, nwritten);
-        _postWriteToClient(c, *nwritten);
+        // _postWriteToClient(c, *nwritten);
         if (ret != C_OK) return ret;
 
         /* If there are no longer objects in the list, we expect
@@ -2879,7 +2879,7 @@ static inline int _writeToClientNonSlave(client *c, ssize_t *nwritten) {
         /* For encoded buffers, we need to use writev to handle bulk string references */
         if (c->buf_encoded) {
             int ret = _writevToClient(c, nwritten);
-            _postWriteToClient(c, *nwritten);
+            // _postWriteToClient(c, *nwritten);
             return ret;
         }
 
