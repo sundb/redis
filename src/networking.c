@@ -875,29 +875,29 @@ void addReplyStatusFormat(client *c, const char *fmt, ...) {
  * the previous one, when that happens, we wanna try to trim the unused space
  * at the end of the last reply node which we won't use anymore. */
 void trimReplyUnusedTailSpace(client *c) {
-    // listNode *ln = listLast(c->reply);
-    // clientReplyBlock *tail = ln? listNodeValue(ln): NULL;
+    listNode *ln = listLast(c->reply);
+    clientReplyBlock *tail = ln? listNodeValue(ln): NULL;
 
-    // /* Note that 'tail' may be NULL even if we have a tail node, because when
-    //  * addReplyDeferredLen() is used */
-    // if (!tail) return;
+    /* Note that 'tail' may be NULL even if we have a tail node, because when
+     * addReplyDeferredLen() is used */
+    if (!tail) return;
 
-    // /* We only try to trim the space is relatively high (more than a 1/4 of the
-    //  * allocation), otherwise there's a high chance realloc will NOP.
-    //  * Also, to avoid large memmove which happens as part of realloc, we only do
-    //  * that if the used part is small.  */
-    // if (tail->size - tail->used > tail->size / 4 &&
-    //     tail->used < PROTO_REPLY_CHUNK_BYTES)
-    // {
-    //     size_t usable_size;
-    //     size_t old_size = tail->size;
-    //     tail = zrealloc_usable(tail, tail->used + sizeof(clientReplyBlock), &usable_size, NULL);
-    //     /* take over the allocation's internal fragmentation (at least for
-    //      * memory usage tracking) */
-    //     tail->size = usable_size - sizeof(clientReplyBlock);
-    //     c->reply_bytes = c->reply_bytes + tail->size - old_size;
-    //     listNodeValue(ln) = tail;
-    // }
+    /* We only try to trim the space is relatively high (more than a 1/4 of the
+     * allocation), otherwise there's a high chance realloc will NOP.
+     * Also, to avoid large memmove which happens as part of realloc, we only do
+     * that if the used part is small.  */
+    if (tail->size - tail->used > tail->size / 4 &&
+        tail->used < PROTO_REPLY_CHUNK_BYTES)
+    {
+        size_t usable_size;
+        size_t old_size = tail->size;
+        tail = zrealloc_usable(tail, tail->used + sizeof(clientReplyBlock), &usable_size, NULL);
+        /* take over the allocation's internal fragmentation (at least for
+         * memory usage tracking) */
+        tail->size = usable_size - sizeof(clientReplyBlock);
+        c->reply_bytes = c->reply_bytes + tail->size - old_size;
+        listNodeValue(ln) = tail;
+    }
 }
 
 /* Adds an empty object to the reply list that will contain the multi bulk
