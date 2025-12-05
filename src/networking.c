@@ -431,7 +431,7 @@ static void _addReplyPayloadToList(client *c, list *reply_list, const char *payl
 
     /* Append to tail node when possible. */
     if (tail) {
-        if (tail->buf_encoded) {
+        if (unlikely(tail->buf_encoded)) {
             /* Try to add to encoded buffer */
             if (tryAddPayload(tail->buf, &tail->used, tail->size, payload_type, (void *)payload, len)) {
                 len = 0;
