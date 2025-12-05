@@ -63,6 +63,12 @@ static pendingCommand *acquirePendingCommand(void);
 static void reclaimPendingCommand(client *c, pendingCommand *pcmd);
 static int tryAddPayload(char *buf, size_t *used, size_t size, uint8_t type, const void *payload, size_t len);
 static void releaseAllBufReferences(client *c);
+static int addBulkStrRefToIov(struct iovec *iov, int iovcnt, int iovmax, bulkStrRef *str_ref,
+                               size_t *offset, size_t *iov_bytes_len);
+static int processEncodedBufferForWrite(char *buf, size_t bufpos, char *start_ptr, size_t offset,
+                                        struct iovec *iov, int iovcnt, int iovmax, size_t *iov_bytes_len);
+static ssize_t consumeEncodedBuffer(char *buf, size_t *bufpos, payloadHeader **last_header, size_t *sentlen, ssize_t remaining);
+static int consumeEncodedReplyBlock(clientReplyBlock *o, ssize_t *remaining);
 
 int ProcessingEventsWhileBlocked = 0; /* See processEventsWhileBlocked(). */
 __thread sds thread_reusable_qb = NULL;
@@ -2224,6 +2230,199 @@ client *lookupClientByID(uint64_t id) {
     return c;
 }
 
+/* Helper function to add BULK_STR_REF components to iov array with offset support.
+ * Returns the new iovcnt, or -1 if iovmax is reached before completing. */
+static int addBulkStrRefToIov(struct iovec *iov, int iovcnt, int iovmax, bulkStrRef *str_ref,
+                               size_t *offset, size_t *iov_bytes_len) {
+    /* Skip if object reference was already released */
+    if (str_ref->obj == NULL) {
+        return iovcnt;
+    }
+
+    size_t prefix_len = str_ref->prefix_cnt;
+    size_t str_len = sdslen(str_ref->obj->ptr);
+    size_t total_len = prefix_len + str_len + 2;
+
+    /* If offset is beyond this entire bulk string, just adjust offset and return */
+    if (*offset >= total_len) {
+        *offset -= total_len;
+        return iovcnt;
+    }
+
+    /* Add prefix if not fully sent */
+    if (*offset < prefix_len) {
+        if (iovcnt >= iovmax) return -1;
+        iov[iovcnt].iov_base = str_ref->prefix + *offset;
+        iov[iovcnt].iov_len = prefix_len - *offset;
+        *iov_bytes_len += iov[iovcnt].iov_len;
+        iovcnt++;
+        *offset = 0;
+    } else {
+        *offset -= prefix_len;
+    }
+
+    /* Add string data if not fully sent */
+    if (*offset < str_len) {
+        if (iovcnt >= iovmax) return -1;
+        iov[iovcnt].iov_base = (char *)str_ref->obj->ptr + *offset;
+        iov[iovcnt].iov_len = str_len - *offset;
+        *iov_bytes_len += iov[iovcnt].iov_len;
+        iovcnt++;
+        *offset = 0;
+    } else {
+        *offset -= str_len;
+    }
+
+    /* Add crlf if not fully sent */
+    if (*offset < 2) {
+        if (iovcnt >= iovmax) return -1;
+        iov[iovcnt].iov_base = str_ref->crlf + *offset;
+        iov[iovcnt].iov_len = 2 - *offset;
+        *iov_bytes_len += iov[iovcnt].iov_len;
+        iovcnt++;
+        *offset = 0;
+    } else {
+        *offset -= 2;
+    }
+
+    return iovcnt;
+}
+
+/* Helper function to process encoded buffer and build iov array.
+ * Returns the new iovcnt, or -1 if iovmax is reached. */
+static int processEncodedBufferForWrite(char *buf, size_t bufpos, char *start_ptr, size_t offset,
+                                        struct iovec *iov, int iovcnt, int iovmax, size_t *iov_bytes_len) {
+    char *ptr = start_ptr;
+
+    while (ptr < buf + bufpos && iovcnt < iovmax) {
+        payloadHeader *head = (payloadHeader *)ptr;
+
+        if (head->payload_type == PLAIN_REPLY) {
+            /* Plain data - add directly */
+            if (offset < head->payload_len) {
+                iov[iovcnt].iov_base = ptr + sizeof(payloadHeader) + offset;
+                iov[iovcnt].iov_len = head->payload_len - offset;
+                *iov_bytes_len += iov[iovcnt].iov_len;
+                iovcnt++;
+                offset = 0;
+            } else {
+                offset -= head->payload_len;
+            }
+        } else {
+            /* BULK_STR_REF - expand to prefix + string + crlf */
+            bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
+            int new_iovcnt = addBulkStrRefToIov(iov, iovcnt, iovmax, str_ref, &offset, iov_bytes_len);
+            if (new_iovcnt == -1) return -1;
+            iovcnt = new_iovcnt;
+        }
+
+        ptr += sizeof(payloadHeader) + head->payload_len;
+    }
+
+    return iovcnt;
+}
+
+/* Helper function to consume sent data from encoded buffer and release references.
+ * Returns the remaining bytes not consumed. */
+static ssize_t consumeEncodedBuffer(char *buf, size_t *bufpos, payloadHeader **last_header, size_t *sentlen, ssize_t remaining) {
+    char *ptr = *last_header ? (char *)*last_header : buf;
+
+    while (ptr < buf + *bufpos && remaining > 0) {
+        payloadHeader *head = (payloadHeader *)ptr;
+        *last_header = head;
+
+        if (head->payload_type == PLAIN_REPLY) {
+            size_t chunk_len = head->payload_len;
+            if (remaining < (ssize_t)(chunk_len - *sentlen)) {
+                *sentlen += remaining;
+                return 0;
+            }
+            remaining -= (chunk_len - *sentlen);
+            *sentlen = 0;
+        } else {
+            /* BULK_STR_REF - release object references */
+            bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
+
+            if (str_ref->obj == NULL) {
+                /* Already released, just skip */
+                *sentlen = 0;
+            } else {
+                size_t wire_len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
+                if (remaining < (ssize_t)(wire_len - *sentlen)) {
+                    *sentlen += remaining;
+                    return 0;
+                }
+                remaining -= (wire_len - *sentlen);
+                decrRefCount(str_ref->obj);
+                str_ref->obj = NULL; /* Mark as released to prevent double free */
+                *sentlen = 0;
+            }
+        }
+
+        ptr += sizeof(payloadHeader) + head->payload_len;
+    }
+
+    /* If all data consumed, reset buffer */
+    if (ptr >= buf + *bufpos) {
+        *bufpos = 0;
+        *sentlen = 0;
+        *last_header = NULL;
+        return remaining;
+    }
+
+    return remaining;
+}
+
+/* Helper function to consume sent data from an encoded reply block.
+ * Returns 1 if the block is fully consumed, 0 otherwise.
+ * Updates *remaining with the bytes not consumed. */
+static int consumeEncodedReplyBlock(clientReplyBlock *o, ssize_t *remaining) {
+    char *ptr = o->buf;
+
+    while (ptr < o->buf + o->used && *remaining > 0) {
+        payloadHeader *head = (payloadHeader *)ptr;
+
+        if (head->payload_type == PLAIN_REPLY) {
+            /* Plain data chunk */
+            size_t chunk_size = sizeof(payloadHeader) + head->payload_len;
+            if (*remaining >= (ssize_t)chunk_size) {
+                /* This chunk is fully sent */
+                *remaining -= chunk_size;
+                ptr += chunk_size;
+            } else {
+                /* Partial send of this chunk */
+                return 0;
+            }
+        } else {
+            /* BULK_STR_REF - need to account for the actual wire format */
+            bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
+
+            /* Skip if already released */
+            if (str_ref->obj == NULL) {
+                /* Already released in previous write, just skip */
+                ptr += sizeof(payloadHeader) + head->payload_len;
+            } else {
+                /* Wire format: prefix + string data + crlf */
+                size_t wire_len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
+
+                if (*remaining >= (ssize_t)wire_len) {
+                    /* Fully sent, release the reference */
+                    decrRefCount(str_ref->obj);
+                    str_ref->obj = NULL; /* Mark as released to prevent double free */
+                    *remaining -= wire_len;
+                    ptr += sizeof(payloadHeader) + head->payload_len;
+                } else {
+                    /* Partial send */
+                    return 0;
+                }
+            }
+        }
+    }
+
+    /* Block fully consumed */
+    return 1;
+}
+
 /* This function should be called from _writeToClient when the reply list is not empty,
  * it gathers the scattered buffers from reply list and sends them away with connWritev.
  * If we write successfully, it returns C_OK, otherwise, C_ERR is returned,
@@ -2244,81 +2443,11 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             iov_bytes_len += iov[iovcnt].iov_len;
             iovcnt++;
         } else {
-            /* Encoded buffer - traverse payload headers */
-            char *ptr = c->last_header ? (char *)c->last_header : c->buf;
-            size_t offset = c->sentlen;
-
-            while (ptr < c->buf + c->bufpos && iovcnt < iovmax) {
-                payloadHeader *head = (payloadHeader *)ptr;
-
-                if (head->payload_type == PLAIN_REPLY) {
-                    /* Plain data - add directly */
-                    if (offset < head->payload_len) {
-                        iov[iovcnt].iov_base = ptr + sizeof(payloadHeader) + offset;
-                        iov[iovcnt].iov_len = head->payload_len - offset;
-                        iov_bytes_len += iov[iovcnt].iov_len;
-                        iovcnt++;
-                        offset = 0;
-                    } else {
-                        offset -= head->payload_len;
-                    }
-                } else {
-                    /* BULK_STR_REF - expand to prefix + string + crlf */
-                    bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
-
-                    /* Skip if object reference was already released */
-                    if (str_ref->obj == NULL) {
-                        /* This chunk was already fully sent and reference released */
-                        /* Just skip it */
-                    } else {
-                        size_t prefix_len = str_ref->prefix_cnt;
-                        size_t str_len = sdslen(str_ref->obj->ptr);
-                        size_t total_len = prefix_len + str_len + 2;
-
-                        if (offset < total_len) {
-                            /* Add prefix if not fully sent */
-                            if (offset < prefix_len) {
-                                if (iovcnt >= iovmax) break;
-                                iov[iovcnt].iov_base = str_ref->prefix + offset;
-                                iov[iovcnt].iov_len = prefix_len - offset;
-                                iov_bytes_len += iov[iovcnt].iov_len;
-                                iovcnt++;
-                                offset = 0;
-                            } else {
-                                offset -= prefix_len;
-                            }
-
-                            /* Add string data if not fully sent */
-                            if (offset < str_len) {
-                                if (iovcnt >= iovmax) break;
-                                iov[iovcnt].iov_base = (char *)str_ref->obj->ptr + offset;
-                                iov[iovcnt].iov_len = str_len - offset;
-                                iov_bytes_len += iov[iovcnt].iov_len;
-                                iovcnt++;
-                                offset = 0;
-                            } else {
-                                offset -= str_len;
-                            }
-
-                            /* Add crlf if not fully sent */
-                            if (offset < 2) {
-                                if (iovcnt >= iovmax) break;
-                                iov[iovcnt].iov_base = str_ref->crlf + offset;
-                                iov[iovcnt].iov_len = 2 - offset;
-                                iov_bytes_len += iov[iovcnt].iov_len;
-                                iovcnt++;
-                                offset = 0;
-                            } else {
-                                offset -= 2;
-                            }
-                        } else {
-                            offset -= total_len;
-                        }
-                    }
-                }
-
-                ptr += sizeof(payloadHeader) + head->payload_len;
-            }
+            /* Encoded buffer - use helper function */
+            char *start_ptr = c->last_header ? (char *)c->last_header : c->buf;
+            iovcnt = processEncodedBufferForWrite(c->buf, c->bufpos, start_ptr, c->sentlen,
+                                                  iov, iovcnt, iovmax, &iov_bytes_len);
+            if (iovcnt == -1) iovcnt = iovmax; /* Reached iovmax */
         }
     }
 
@@ -2340,51 +2469,14 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                 iov_bytes_len += iov[iovcnt].iov_len;
                 iovcnt++;
             } else {
-                /* Encoded reply block - traverse payload headers */
-                char *ptr = o->buf;
-
-                while (ptr < o->buf + o->used && iovcnt < iovmax) {
-                    payloadHeader *head = (payloadHeader *)ptr;
-
-                    if (head->payload_type == PLAIN_REPLY) {
-                        /* Plain data - add directly */
-                        iov[iovcnt].iov_base = ptr + sizeof(payloadHeader);
-                        iov[iovcnt].iov_len = head->payload_len;
-                        iov_bytes_len += iov[iovcnt].iov_len;
-                        iovcnt++;
-                    } else {
-                        /* BULK_STR_REF - expand to prefix + string + crlf */
-                        bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
-
-                        /* Skip if object reference was already released */
-                        if (str_ref->obj != NULL) {
-                            /* Add prefix */
-                            if (iovcnt >= iovmax) break;
-                            iov[iovcnt].iov_base = str_ref->prefix;
-                            iov[iovcnt].iov_len = str_ref->prefix_cnt;
-                            iov_bytes_len += iov[iovcnt].iov_len;
-                            iovcnt++;
-
-                            /* Add string data */
-                            if (iovcnt >= iovmax) break;
-                            iov[iovcnt].iov_base = str_ref->obj->ptr;
-                            iov[iovcnt].iov_len = sdslen(str_ref->obj->ptr);
-                            iov_bytes_len += iov[iovcnt].iov_len;
-                            iovcnt++;
-
-                            /* Add crlf */
-                            if (iovcnt >= iovmax) break;
-                            iov[iovcnt].iov_base = str_ref->crlf;
-                            iov[iovcnt].iov_len = 2;
-                            iov_bytes_len += iov[iovcnt].iov_len;
-                            iovcnt++;
-                        }
-                    }
-
-                    ptr += sizeof(payloadHeader) + head->payload_len;
+                /* Encoded reply block - use helper function */
+                int new_iovcnt = processEncodedBufferForWrite(o->buf, o->used, o->buf, 0,
+                                                              iov, iovcnt, iovmax, &iov_bytes_len);
+                if (new_iovcnt == -1) {
+                    iovcnt = iovmax;
+                    break;
                 }
-
-                if (iovcnt >= iovmax) break;
+                iovcnt = new_iovcnt;
             }
         }
     }
@@ -2409,47 +2501,10 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             remaining -= buf_len;
         }
     } else {
-        /* For encoded buffers, traverse payload headers to track consumption */
-        char *ptr = c->last_header ? (char *)c->last_header : c->buf;
-        while (ptr < c->buf + c->bufpos) {
-            payloadHeader *head = (payloadHeader *)ptr;
-            c->last_header = head;
-
-            /* This chunk is fully written */
-            if (head->payload_type == PLAIN_REPLY) {
-                if (remaining < (ssize_t)(head->payload_len - c->sentlen)) {
-                    c->sentlen += remaining;
-                    break;
-                }
-                c->sentlen = 0;
-            } else {
-                /* BULK_STR_REF - release object references */
-                bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
-
-                /* Skip if already released */
-                if (str_ref->obj == NULL) {
-                    /* Already released, just skip */
-                    c->sentlen = 0;
-                } else {
-                    size_t len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
-                    if (remaining < (ssize_t)(len - c->sentlen)) {
-                        c->sentlen += remaining;
-                        break;
-                    }
-                    decrRefCount(str_ref->obj);
-                    str_ref->obj = NULL; /* Mark as released to prevent double free */
-                    c->sentlen = 0;
-                }
-            }
-            ptr = ptr + sizeof(payloadHeader) + head->payload_len;
-        }
-
-        /* If all data written, reset buffer */
-        if (ptr >= c->buf + c->bufpos) {
-            c->bufpos = 0;
-            c->sentlen = 0;
+        /* For encoded buffers, use helper function */
+        remaining = consumeEncodedBuffer(c->buf, &c->bufpos, &c->last_header, &c->sentlen, remaining);
+        if (c->bufpos == 0) {
             c->buf_encoded = 0;
-            c->last_header = NULL;
         }
     }
 
@@ -2478,54 +2533,9 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                 }
             }
         } else {
-            /* Encoded reply block - traverse payload headers from the beginning */
-            char *ptr = o->buf;
-            int block_fully_sent = 1;
-
-            while (ptr < o->buf + o->used) {
-                payloadHeader *head = (payloadHeader *)ptr;
-
-                if (head->payload_type == PLAIN_REPLY) {
-                    /* Plain data chunk */
-                    size_t chunk_size = sizeof(payloadHeader) + head->payload_len;
-                    if (remaining >= (ssize_t)chunk_size) {
-                        /* This chunk is fully sent */
-                        remaining -= chunk_size;
-                        ptr += chunk_size;
-                    } else {
-                        /* Partial send of this chunk */
-                        block_fully_sent = 0;
-                        break;
-                    }
-                } else {
-                    /* BULK_STR_REF - need to account for the actual wire format */
-                    bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
-
-                    /* Skip if already released */
-                    if (str_ref->obj == NULL) {
-                        /* Already released in previous write, just skip */
-                        ptr += sizeof(payloadHeader) + head->payload_len;
-                    } else {
-                        /* Wire format: prefix + string data + crlf */
-                        size_t wire_len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
-
-                        if (remaining >= (ssize_t)wire_len) {
-                            /* Fully sent, release the reference */
-                            decrRefCount(str_ref->obj);
-                            str_ref->obj = NULL; /* Mark as released to prevent double free */
-                            remaining -= wire_len;
-                            ptr += sizeof(payloadHeader) + head->payload_len;
-                        } else {
-                            /* Partial send */
-                            block_fully_sent = 0;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            /* If all data in this block written, remove it */
-            if (block_fully_sent) {
+            /* Encoded reply block - use helper function */
+            if (consumeEncodedReplyBlock(o, &remaining)) {
+                /* Block fully consumed, remove it */
                 c->reply_bytes -= o->size;
                 listDelNode(c->reply, next);
             } else {
