@@ -2419,7 +2419,6 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
         listIter iter;
         listNode *next;
         listRewind(c->reply, &iter);
-
         while ((next = listNext(&iter)) && iovcnt < iovmax) {
             clientReplyBlock *o = listNodeValue(next);
             if (o->used == 0) { /* empty node, just release it and skip. */
@@ -2455,8 +2454,8 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
     /* Locate the new node which has leftover data and
      * release all nodes in front of it. */
     ssize_t remaining = *nwritten;
-    if (likely(!c->buf_encoded)) {
-        if (c->bufpos > 0) {
+    if (c->bufpos > 0) {
+        if (likely(!c->buf_encoded)) {
             int buf_len = c->bufpos - c->sentlen;
             c->sentlen += remaining;
             /* If the buffer was sent, set bufpos to zero to continue with
@@ -2466,12 +2465,12 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                 c->sentlen = 0;
             }
             remaining -= buf_len;
-        }
-    } else {
-        /* For encoded buffers, use helper function */
-        remaining = consumeEncodedBuffer(c->buf, &c->bufpos, &c->last_header, &c->sentlen, remaining);
-        if (c->bufpos == 0) {
-            c->buf_encoded = 0;
+        } else {
+            /* For encoded buffers, use helper function */
+            remaining = consumeEncodedBuffer(c->buf, &c->bufpos, &c->last_header, &c->sentlen, remaining);
+            if (c->bufpos == 0) {
+                c->buf_encoded = 0;
+            }
         }
     }
 
@@ -2479,26 +2478,19 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
     listIter iter;
     listNode *next;
     listRewind(c->reply, &iter);
-    while ((next = listNext(&iter)) && remaining > 0) {
+    while (remaining > 0) {
+        next = listNext(&iter);
         clientReplyBlock *o = listNodeValue(next);
 
         if (!o->buf_encoded) {
-            /* Non-encoded reply block */
-            if (o->used > 0) {
-                /* Find how much of this block was sent */
-                if (remaining >= (ssize_t)o->used) {
-                    /* Entire block was sent */
-                    remaining -= o->used;
-
-                    /* Remove this block */
-                    c->reply_bytes -= o->size;
-                    listDelNode(c->reply, next);
-                } else {
-                    /* Partial block sent - this shouldn't happen in writev,
-                     * but handle it for completeness */
-                    break;
-                }
+            if (remaining < (ssize_t)(o->used - c->sentlen)) {
+                c->sentlen += remaining;
+                break;
             }
+            remaining -= (ssize_t)(o->used - c->sentlen);
+            c->reply_bytes -= o->size;
+            listDelNode(c->reply, next);
+            c->sentlen = 0;
         } else {
             /* Encoded reply block - use helper function */
             if (consumeEncodedReplyBlock(o, &remaining)) {
