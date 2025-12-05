@@ -474,11 +474,6 @@ static void _addReplyPayloadToList(client *c, list *reply_list, const char *payl
     }
 }
 
-void _addReplyProtoToList(client *c, list *reply_list, const char *s, size_t len) {
-    if (!len) return;
-    _addReplyPayloadToList(c, reply_list, s, len, PLAIN_REPLY);
-}
-
 /* The subscribe / unsubscribe command family has a push as a reply,
  * or in other words, it responds with a push (or several of them
  * depending on how many arguments it got), and has no reply. */
@@ -564,7 +559,7 @@ void _addReplyToBufferOrList(client *c, const char *s, size_t len) {
     if ((c->flags & CLIENT_PUSHING) && c == server.current_client &&
         server.executing_client && !cmdHasPushAsReply(server.executing_client->cmd))
     {
-        _addReplyProtoToList(c,server.pending_push_messages,s,len);
+        _addReplyPayloadToList(c,server.pending_push_messages,s,len,PLAIN_REPLY);
         return;
     }
 
