@@ -485,8 +485,8 @@ int cmdHasPushAsReply(struct redisCommand *cmd) {
 }
 
 static int tryAddPayload(char *buf, size_t *used, size_t size, uint8_t type, const void *payload, size_t len) {
-    size_t avaliable = size - *used;
-    if (sizeof(payloadHeader) + len > avaliable) return 0;
+    size_t available = size - *used;
+    if (sizeof(payloadHeader) + len > available) return 0;
 
     /* Start a new payload chunk */
     payloadHeader *header = (payloadHeader *)(buf + *used);
