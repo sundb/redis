@@ -525,11 +525,6 @@ static size_t _addReplyPayloadToBuffer(client *c, const void *payload, size_t le
     return reply_len;
 }
 
-static size_t _addReplyToBuffer(client *c, const char *s, size_t len) {
-    if (!len) return 0;
-    return _addReplyPayloadToBuffer(c, s, len, PLAIN_REPLY);
-}
-
 /* Adds bulk string reference (i.e. pointer to object and pointer to string itself) to static buffer
  * Returns non-zero value if succeeded to add */
 static size_t _addBulkStrRefToBuffer(client *c, const void *payload, size_t len) {
@@ -539,11 +534,6 @@ static size_t _addBulkStrRefToBuffer(client *c, const void *payload, size_t len)
         c->buf_encoded = 1;
     }
     return _addReplyPayloadToBuffer(c, payload, len, BULK_STR_REF);
-}
-
-/* Adds bulk string reference (i.e. pointer to object and pointer to string itself) to reply list */
-static void _addBulkStrRefToList(client *c, const void *payload, size_t len) {
-    _addReplyPayloadToList(c, c->reply, payload, len, BULK_STR_REF);
 }
 
 void _addReplyToBufferOrList(client *c, const char *s, size_t len) {
@@ -578,8 +568,9 @@ void _addReplyToBufferOrList(client *c, const char *s, size_t len) {
         return;
     }
 
-    size_t reply_len = _addReplyToBuffer(c, s, len);
-    if (len > reply_len) _addReplyProtoToList(c, c->reply, s + reply_len, len - reply_len);
+    size_t reply_len = _addReplyPayloadToBuffer(c, s, len, PLAIN_REPLY);
+    if (len > reply_len)
+        _addReplyPayloadToList(c, c->reply, s + reply_len, len - reply_len, PLAIN_REPLY);
 }
 
 /* Increment reference to object and add pointer to object and
@@ -603,7 +594,7 @@ static void _addBulkStrRefToBufferOrList(client *c, robj *obj, size_t len) {
     str_ref.crlf[1] = '\n'; 
 
     if (!_addBulkStrRefToBuffer(c, (void *)&str_ref, sizeof(str_ref))) {
-        _addBulkStrRefToList(c, (void *)&str_ref, sizeof(str_ref));
+        _addReplyPayloadToList(c, c->reply, (void *)&str_ref, sizeof(str_ref), BULK_STR_REF);
     }
 }
 
