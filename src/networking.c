@@ -2211,11 +2211,6 @@ client *lookupClientByID(uint64_t id) {
  * Returns the new iovcnt, or -1 if iovmax is reached before completing. */
 static int addBulkStrRefToIov(struct iovec *iov, int iovcnt, int iovmax, bulkStrRef *str_ref,
                                size_t *offset, size_t *iov_bytes_len) {
-    /* Skip if object reference was already released */
-    if (str_ref->obj == NULL) {
-        return iovcnt;
-    }
-
     size_t prefix_len = str_ref->prefix_cnt;
     size_t str_len = sdslen(str_ref->obj->ptr);
     size_t total_len = prefix_len + str_len + 2;
@@ -2320,20 +2315,15 @@ static ssize_t consumeEncodedBuffer(char *buf, size_t *bufpos, payloadHeader **l
             /* BULK_STR_REF - release object references */
             bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
 
-            if (str_ref->obj == NULL) {
-                /* Already released, just skip */
-                *sentlen = 0;
-            } else {
-                size_t wire_len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
-                if (remaining < (ssize_t)(wire_len - *sentlen)) {
-                    *sentlen += remaining;
-                    return 0;
-                }
-                remaining -= (wire_len - *sentlen);
-                decrRefCount(str_ref->obj);
-                str_ref->obj = NULL; /* Mark as released to prevent double free */
-                *sentlen = 0;
+            size_t wire_len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
+            if (remaining < (ssize_t)(wire_len - *sentlen)) {
+                *sentlen += remaining;
+                return 0;
             }
+            remaining -= (wire_len - *sentlen);
+            decrRefCount(str_ref->obj);
+            str_ref->obj = NULL; /* Mark as released to prevent double free */
+            *sentlen = 0;
         }
 
         ptr += sizeof(payloadHeader) + head->payload_len;
@@ -2374,24 +2364,18 @@ static int consumeEncodedReplyBlock(clientReplyBlock *o, ssize_t *remaining) {
             /* BULK_STR_REF - need to account for the actual wire format */
             bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
 
-            /* Skip if already released */
-            if (str_ref->obj == NULL) {
-                /* Already released in previous write, just skip */
+            /* Wire format: prefix + string data + crlf */
+            size_t wire_len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
+
+            if (*remaining >= (ssize_t)wire_len) {
+                /* Fully sent, release the reference */
+                decrRefCount(str_ref->obj);
+                str_ref->obj = NULL; /* Mark as released to prevent double free */
+                *remaining -= wire_len;
                 ptr += sizeof(payloadHeader) + head->payload_len;
             } else {
-                /* Wire format: prefix + string data + crlf */
-                size_t wire_len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
-
-                if (*remaining >= (ssize_t)wire_len) {
-                    /* Fully sent, release the reference */
-                    decrRefCount(str_ref->obj);
-                    str_ref->obj = NULL; /* Mark as released to prevent double free */
-                    *remaining -= wire_len;
-                    ptr += sizeof(payloadHeader) + head->payload_len;
-                } else {
-                    /* Partial send */
-                    return 0;
-                }
+                /* Partial send */
+                return 0;
             }
         }
     }
