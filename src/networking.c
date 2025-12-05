@@ -1269,8 +1269,8 @@ void addReplyBulk(client *c, robj *obj) {
 
     if (sdsEncodedObject(obj)) {
         const size_t len = sdslen(obj->ptr);
-        if (tryAvoidBulkStrCopyToReply(c, obj, len) == C_OK)
-            return;
+        // if (tryAvoidBulkStrCopyToReply(c, obj, len) == C_OK)
+        //     return;
         _addReplyLongLongBulk(c, len);
         _addReplyToBufferOrList(c,obj->ptr,len);
         _addReplyToBufferOrList(c,"\r\n",2);
