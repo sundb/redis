@@ -1258,6 +1258,7 @@ void addReplyBulkLen(client *c, robj *obj) {
 /* Try to avoid whole bulk string copy to a reply buffer
  * If copy avoidance allowed then only pointer to object and string will be copied to the buffer */
 static int tryAvoidBulkStrCopyToReply(client *c, robj *obj, size_t len) {
+    return C_ERR;
     if (!isCopyAvoidPreferred(c, obj, len)) return C_ERR;
     _addBulkStrRefToBufferOrList(c, obj, len);
     return C_OK;
@@ -1269,8 +1270,8 @@ void addReplyBulk(client *c, robj *obj) {
 
     if (sdsEncodedObject(obj)) {
         const size_t len = sdslen(obj->ptr);
-        // if (tryAvoidBulkStrCopyToReply(c, obj, len) == C_OK)
-        //     return;
+        if (tryAvoidBulkStrCopyToReply(c, obj, len) == C_OK)
+            return;
         _addReplyLongLongBulk(c, len);
         _addReplyToBufferOrList(c,obj->ptr,len);
         _addReplyToBufferOrList(c,"\r\n",2);
