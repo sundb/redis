@@ -2401,8 +2401,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             /* Non-encoded buffer - add directly */
             iov[iovcnt].iov_base = c->buf + c->sentlen;
             iov[iovcnt].iov_len = c->bufpos - c->sentlen;
-            iov_bytes_len += iov[iovcnt].iov_len;
-            iovcnt++;
+            iov_bytes_len += iov[iovcnt++].iov_len;
         } else {
             /* Encoded buffer - use helper function */
             char *start_ptr = c->last_header ? (char *)c->last_header : c->buf;
@@ -2414,21 +2413,28 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
 
     /* Add c->reply list nodes to iov array */
     if (iovcnt < iovmax) {
+        /* The first node of reply list might be incomplete from the last call,
+         * thus it needs to be calibrated to get the actual data address and length. */
+        size_t offset = c->bufpos > 0 ? 0 : c->sentlen;
         listIter iter;
         listNode *next;
         listRewind(c->reply, &iter);
 
         while ((next = listNext(&iter)) && iovcnt < iovmax) {
             clientReplyBlock *o = listNodeValue(next);
-
-            if (o->used == 0) continue; /* Skip empty nodes */
+            if (o->used == 0) { /* empty node, just release it and skip. */
+                c->reply_bytes -= o->size;
+                listDelNode(c->reply, next);
+                offset = 0;
+                continue;
+            }
 
             if (!o->buf_encoded) {
                 /* Non-encoded reply block - add directly */
-                iov[iovcnt].iov_base = o->buf;
-                iov[iovcnt].iov_len = o->used;
-                iov_bytes_len += iov[iovcnt].iov_len;
-                iovcnt++;
+                iov[iovcnt].iov_base = o->buf + offset;
+                iov[iovcnt].iov_len = o->used - offset;
+                iov_bytes_len += iov[iovcnt++].iov_len;
+                offset = 0;
             } else {
                 /* Encoded reply block - use helper function */
                 int new_iovcnt = processEncodedBufferForWrite(o->buf, o->used, o->buf, 0,
