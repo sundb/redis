@@ -128,7 +128,7 @@ void freeClientReplyValue(void *o) {
 /* Check if copy avoidance is preferred for this client and object.
  * Copy avoidance allows I/O threads to directly reference obj->ptr
  * instead of copying data to reply buffers. */
-static int isCopyAvoidPreferred(client *c, robj *obj) {
+static int isCopyAvoidPreferred(client *c, robj *obj, size_t len) {
     /* Don't use copy avoidance for fake clients or when deferred replies are enabled */
     if (!c->conn) return 0;
 
@@ -143,15 +143,13 @@ static int isCopyAvoidPreferred(client *c, robj *obj) {
     /* Copy avoidance is preferred for any string size starting certain number of I/O threads  */
     if (server.min_io_threads_copy_avoid && server.io_threads_num >= server.min_io_threads_copy_avoid) return 1;
 
-    if (!obj) return 0;
-
     /* Main thread only. No I/O threads */
     if (server.io_threads_num == 1) {
         /* Copy avoidance is preferred starting certain string size */
-        return server.min_string_size_copy_avoid && sdslen(obj->ptr) >= (size_t)server.min_string_size_copy_avoid;
+        return server.min_string_size_copy_avoid && len >= (size_t)server.min_string_size_copy_avoid;
     }
     /* Main thread + I/O threads */
-    return server.min_string_size_copy_avoid_threaded && sdslen(obj->ptr) >= (size_t)server.min_string_size_copy_avoid_threaded;
+    return server.min_string_size_copy_avoid_threaded && len >= (size_t)server.min_string_size_copy_avoid_threaded;
 }
 
 /* This function links the client to the global linked list of clients.
@@ -425,7 +423,7 @@ static void _addReplyPayloadToList(client *c, list *reply_list, const char *payl
     listNode *ln = listLast(reply_list);
     clientReplyBlock *tail = ln ? listNodeValue(ln) : NULL;
     /* Determine if encoded buffer is required */
-    int encoded = payload_type == BULK_STR_REF || isCopyAvoidPreferred(c, NULL);
+    int encoded = payload_type == BULK_STR_REF;
 
     /* Note that 'tail' may be NULL even if we have a tail node, because when
      * addReplyDeferredLen() is used, it sets a dummy node to NULL just
@@ -529,9 +527,6 @@ static size_t _addReplyPayloadToBuffer(client *c, const void *payload, size_t le
 
 static size_t _addReplyToBuffer(client *c, const char *s, size_t len) {
     if (!len) return 0;
-    if (!c->bufpos) {
-        c->buf_encoded = isCopyAvoidPreferred(c, NULL);
-    }
     return _addReplyPayloadToBuffer(c, s, len, PLAIN_REPLY);
 }
 
@@ -589,7 +584,7 @@ void _addReplyToBufferOrList(client *c, const char *s, size_t len) {
 
 /* Increment reference to object and add pointer to object and
  * pointer to string itself to current reply buffer */
-static void _addBulkStrRefToBufferOrList(client *c, robj *obj) {
+static void _addBulkStrRefToBufferOrList(client *c, robj *obj, size_t len) {
     if (c->flags & CLIENT_CLOSE_AFTER_REPLY) return;
 
     /* Refcount will be decremented in write completion handler by the main thread */
@@ -600,7 +595,7 @@ static void _addBulkStrRefToBufferOrList(client *c, robj *obj) {
 
     /* Fill prefix with bulk string length: "$<len>\r\n" */
     str_ref.prefix[0] = '$';
-    size_t num_len = ll2string(str_ref.prefix + 1, sizeof(str_ref.prefix) - 3, sdslen(obj->ptr));
+    size_t num_len = ll2string(str_ref.prefix + 1, sizeof(str_ref.prefix) - 3, len);
     str_ref.prefix[num_len + 1] = '\r';
     str_ref.prefix[num_len + 2] = '\n';
     str_ref.prefix_cnt = num_len + 3;
@@ -1276,24 +1271,20 @@ void addReplyBulkLen(client *c, robj *obj) {
 
 /* Try to avoid whole bulk string copy to a reply buffer
  * If copy avoidance allowed then only pointer to object and string will be copied to the buffer */
-static int tryAvoidBulkStrCopyToReply(client *c, robj *obj) {
-    if (!isCopyAvoidPreferred(c, obj)) return C_ERR;
-    if (_prepareClientToWrite(c) != C_OK) return C_ERR;
-
-    _addBulkStrRefToBufferOrList(c, obj);
-
+static int tryAvoidBulkStrCopyToReply(client *c, robj *obj, size_t len) {
+    if (!isCopyAvoidPreferred(c, obj, len)) return C_ERR;
+    _addBulkStrRefToBufferOrList(c, obj, len);
     return C_OK;
 }
 
 /* Add a Redis Object as a bulk reply */
 void addReplyBulk(client *c, robj *obj) {
-    /* Try copy avoidance first */
-    if (tryAvoidBulkStrCopyToReply(c, obj) == C_OK) return;
-
     if (_prepareClientToWrite(c) != C_OK) return;
 
     if (sdsEncodedObject(obj)) {
         const size_t len = sdslen(obj->ptr);
+        if (tryAvoidBulkStrCopyToReply(c, obj, len) == C_OK)
+            return;
         _addReplyLongLongBulk(c, len);
         _addReplyToBufferOrList(c,obj->ptr,len);
         _addReplyToBufferOrList(c,"\r\n",2);
