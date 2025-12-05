@@ -2413,7 +2413,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
 
     /* Add c->buf to iov array */
     if (c->bufpos > 0) {
-        if (!c->buf_encoded) {
+        if (likely(!c->buf_encoded)) {
             /* Non-encoded buffer - add directly */
             iov[iovcnt].iov_base = c->buf + c->sentlen;
             iov[iovcnt].iov_len = c->bufpos - c->sentlen;
@@ -2465,7 +2465,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
     /* Locate the new node which has leftover data and
      * release all nodes in front of it. */
     ssize_t remaining = *nwritten;
-    if (!c->buf_encoded) {
+    if (likely(!c->buf_encoded)) {
         if (c->bufpos > 0) {
             int buf_len = c->bufpos - c->sentlen;
             c->sentlen += remaining;
