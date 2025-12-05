@@ -2486,48 +2486,55 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                 } else {
                     /* BULK_STR_REF - expand to prefix + string + crlf */
                     bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
-                    size_t prefix_len = str_ref->prefix_cnt;
-                    size_t str_len = sdslen(str_ref->obj->ptr);
-                    size_t total_len = prefix_len + str_len + 2;
 
-                    if (offset < total_len) {
-                        /* Add prefix if not fully sent */
-                        if (offset < prefix_len) {
-                            if (iovcnt >= iovmax) break;
-                            iov[iovcnt].iov_base = str_ref->prefix + offset;
-                            iov[iovcnt].iov_len = prefix_len - offset;
-                            iov_bytes_len += iov[iovcnt].iov_len;
-                            iovcnt++;
-                            offset = 0;
-                        } else {
-                            offset -= prefix_len;
-                        }
-
-                        /* Add string data if not fully sent */
-                        if (offset < str_len) {
-                            if (iovcnt >= iovmax) break;
-                            iov[iovcnt].iov_base = (char *)str_ref->obj->ptr + offset;
-                            iov[iovcnt].iov_len = str_len - offset;
-                            iov_bytes_len += iov[iovcnt].iov_len;
-                            iovcnt++;
-                            offset = 0;
-                        } else {
-                            offset -= str_len;
-                        }
-
-                        /* Add crlf if not fully sent */
-                        if (offset < 2) {
-                            if (iovcnt >= iovmax) break;
-                            iov[iovcnt].iov_base = str_ref->crlf + offset;
-                            iov[iovcnt].iov_len = 2 - offset;
-                            iov_bytes_len += iov[iovcnt].iov_len;
-                            iovcnt++;
-                            offset = 0;
-                        } else {
-                            offset -= 2;
-                        }
+                    /* Skip if object reference was already released */
+                    if (str_ref->obj == NULL) {
+                        /* This chunk was already fully sent and reference released */
+                        /* Just skip it */
                     } else {
-                        offset -= total_len;
+                        size_t prefix_len = str_ref->prefix_cnt;
+                        size_t str_len = sdslen(str_ref->obj->ptr);
+                        size_t total_len = prefix_len + str_len + 2;
+
+                        if (offset < total_len) {
+                            /* Add prefix if not fully sent */
+                            if (offset < prefix_len) {
+                                if (iovcnt >= iovmax) break;
+                                iov[iovcnt].iov_base = str_ref->prefix + offset;
+                                iov[iovcnt].iov_len = prefix_len - offset;
+                                iov_bytes_len += iov[iovcnt].iov_len;
+                                iovcnt++;
+                                offset = 0;
+                            } else {
+                                offset -= prefix_len;
+                            }
+
+                            /* Add string data if not fully sent */
+                            if (offset < str_len) {
+                                if (iovcnt >= iovmax) break;
+                                iov[iovcnt].iov_base = (char *)str_ref->obj->ptr + offset;
+                                iov[iovcnt].iov_len = str_len - offset;
+                                iov_bytes_len += iov[iovcnt].iov_len;
+                                iovcnt++;
+                                offset = 0;
+                            } else {
+                                offset -= str_len;
+                            }
+
+                            /* Add crlf if not fully sent */
+                            if (offset < 2) {
+                                if (iovcnt >= iovmax) break;
+                                iov[iovcnt].iov_base = str_ref->crlf + offset;
+                                iov[iovcnt].iov_len = 2 - offset;
+                                iov_bytes_len += iov[iovcnt].iov_len;
+                                iovcnt++;
+                                offset = 0;
+                            } else {
+                                offset -= 2;
+                            }
+                        } else {
+                            offset -= total_len;
+                        }
                     }
                 }
 
@@ -2570,26 +2577,29 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                         /* BULK_STR_REF - expand to prefix + string + crlf */
                         bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
 
-                        /* Add prefix */
-                        if (iovcnt >= iovmax) break;
-                        iov[iovcnt].iov_base = str_ref->prefix;
-                        iov[iovcnt].iov_len = str_ref->prefix_cnt;
-                        iov_bytes_len += iov[iovcnt].iov_len;
-                        iovcnt++;
+                        /* Skip if object reference was already released */
+                        if (str_ref->obj != NULL) {
+                            /* Add prefix */
+                            if (iovcnt >= iovmax) break;
+                            iov[iovcnt].iov_base = str_ref->prefix;
+                            iov[iovcnt].iov_len = str_ref->prefix_cnt;
+                            iov_bytes_len += iov[iovcnt].iov_len;
+                            iovcnt++;
 
-                        /* Add string data */
-                        if (iovcnt >= iovmax) break;
-                        iov[iovcnt].iov_base = str_ref->obj->ptr;
-                        iov[iovcnt].iov_len = sdslen(str_ref->obj->ptr);
-                        iov_bytes_len += iov[iovcnt].iov_len;
-                        iovcnt++;
+                            /* Add string data */
+                            if (iovcnt >= iovmax) break;
+                            iov[iovcnt].iov_base = str_ref->obj->ptr;
+                            iov[iovcnt].iov_len = sdslen(str_ref->obj->ptr);
+                            iov_bytes_len += iov[iovcnt].iov_len;
+                            iovcnt++;
 
-                        /* Add crlf */
-                        if (iovcnt >= iovmax) break;
-                        iov[iovcnt].iov_base = str_ref->crlf;
-                        iov[iovcnt].iov_len = 2;
-                        iov_bytes_len += iov[iovcnt].iov_len;
-                        iovcnt++;
+                            /* Add crlf */
+                            if (iovcnt >= iovmax) break;
+                            iov[iovcnt].iov_base = str_ref->crlf;
+                            iov[iovcnt].iov_len = 2;
+                            iov_bytes_len += iov[iovcnt].iov_len;
+                            iovcnt++;
+                        }
                     }
 
                     ptr += sizeof(payloadHeader) + head->payload_len;
@@ -2636,13 +2646,21 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             } else {
                 /* BULK_STR_REF - release object references */
                 bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
-                size_t len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
-                if (remaining < (ssize_t)(len - c->sentlen)) {
-                    c->sentlen += remaining;
-                    break;
+
+                /* Skip if already released */
+                if (str_ref->obj == NULL) {
+                    /* Already released, just skip */
+                    c->sentlen = 0;
+                } else {
+                    size_t len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
+                    if (remaining < (ssize_t)(len - c->sentlen)) {
+                        c->sentlen += remaining;
+                        break;
+                    }
+                    decrRefCount(str_ref->obj);
+                    str_ref->obj = NULL; /* Mark as released to prevent double free */
+                    c->sentlen = 0;
                 }
-                decrRefCount(str_ref->obj);
-                c->sentlen = 0;
             }
             ptr = ptr + sizeof(payloadHeader) + head->payload_len;
         }
@@ -2703,19 +2721,26 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                 } else {
                     /* BULK_STR_REF - need to account for the actual wire format */
                     bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
-                    /* Wire format: prefix + string data + crlf */
-                    size_t wire_len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
 
-                    if (remaining >= (ssize_t)wire_len) {
-                        /* Fully sent, release the reference */
-                        decrRefCount(str_ref->obj);
-                        str_ref->obj = NULL; /* Mark as released to prevent double free */
-                        remaining -= wire_len;
+                    /* Skip if already released */
+                    if (str_ref->obj == NULL) {
+                        /* Already released in previous write, just skip */
                         ptr += sizeof(payloadHeader) + head->payload_len;
                     } else {
-                        /* Partial send */
-                        block_fully_sent = 0;
-                        break;
+                        /* Wire format: prefix + string data + crlf */
+                        size_t wire_len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
+
+                        if (remaining >= (ssize_t)wire_len) {
+                            /* Fully sent, release the reference */
+                            decrRefCount(str_ref->obj);
+                            str_ref->obj = NULL; /* Mark as released to prevent double free */
+                            remaining -= wire_len;
+                            ptr += sizeof(payloadHeader) + head->payload_len;
+                        } else {
+                            /* Partial send */
+                            block_fully_sent = 0;
+                            break;
+                        }
                     }
                 }
             }
