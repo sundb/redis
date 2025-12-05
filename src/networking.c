@@ -68,7 +68,7 @@ static int addBulkStrRefToIov(struct iovec *iov, int iovcnt, int iovmax, bulkStr
 static int processEncodedBufferForWrite(char *buf, size_t bufpos, char *start_ptr, size_t offset,
                                         struct iovec *iov, int iovcnt, int iovmax, size_t *iov_bytes_len);
 static ssize_t consumeEncodedBuffer(char *buf, size_t *bufpos, payloadHeader **last_header, size_t *sentlen, ssize_t remaining);
-static int consumeEncodedReplyBlock(clientReplyBlock *o, ssize_t *remaining);
+static int consumeEncodedReplyBlock(clientReplyBlock *o, size_t *sentlen, ssize_t *remaining);
 
 int ProcessingEventsWhileBlocked = 0; /* See processEventsWhileBlocked(). */
 __thread sds thread_reusable_qb = NULL;
@@ -1269,8 +1269,8 @@ void addReplyBulk(client *c, robj *obj) {
 
     if (sdsEncodedObject(obj)) {
         const size_t len = sdslen(obj->ptr);
-        // if (tryAvoidBulkStrCopyToReply(c, obj, len) == C_OK)
-        //     return;
+        if (tryAvoidBulkStrCopyToReply(c, obj, len) == C_OK)
+            return;
         _addReplyLongLongBulk(c, len);
         _addReplyToBufferOrList(c,obj->ptr,len);
         _addReplyToBufferOrList(c,"\r\n",2);
@@ -2226,8 +2226,7 @@ static int addBulkStrRefToIov(struct iovec *iov, int iovcnt, int iovmax, bulkStr
         if (iovcnt >= iovmax) return -1;
         iov[iovcnt].iov_base = str_ref->prefix + *offset;
         iov[iovcnt].iov_len = prefix_len - *offset;
-        *iov_bytes_len += iov[iovcnt].iov_len;
-        iovcnt++;
+        *iov_bytes_len += iov[iovcnt++].iov_len;
         *offset = 0;
     } else {
         *offset -= prefix_len;
@@ -2238,8 +2237,7 @@ static int addBulkStrRefToIov(struct iovec *iov, int iovcnt, int iovmax, bulkStr
         if (iovcnt >= iovmax) return -1;
         iov[iovcnt].iov_base = (char *)str_ref->obj->ptr + *offset;
         iov[iovcnt].iov_len = str_len - *offset;
-        *iov_bytes_len += iov[iovcnt].iov_len;
-        iovcnt++;
+        *iov_bytes_len += iov[iovcnt++].iov_len;
         *offset = 0;
     } else {
         *offset -= str_len;
@@ -2250,8 +2248,7 @@ static int addBulkStrRefToIov(struct iovec *iov, int iovcnt, int iovmax, bulkStr
         if (iovcnt >= iovmax) return -1;
         iov[iovcnt].iov_base = str_ref->crlf + *offset;
         iov[iovcnt].iov_len = 2 - *offset;
-        *iov_bytes_len += iov[iovcnt].iov_len;
-        iovcnt++;
+        *iov_bytes_len += iov[iovcnt++].iov_len;
         *offset = 0;
     } else {
         *offset -= 2;
@@ -2274,8 +2271,7 @@ static int processEncodedBufferForWrite(char *buf, size_t bufpos, char *start_pt
             if (offset < head->payload_len) {
                 iov[iovcnt].iov_base = ptr + sizeof(payloadHeader) + offset;
                 iov[iovcnt].iov_len = head->payload_len - offset;
-                *iov_bytes_len += iov[iovcnt].iov_len;
-                iovcnt++;
+                *iov_bytes_len += iov[iovcnt++].iov_len;
                 offset = 0;
             } else {
                 offset -= head->payload_len;
@@ -2342,41 +2338,43 @@ static ssize_t consumeEncodedBuffer(char *buf, size_t *bufpos, payloadHeader **l
 
 /* Helper function to consume sent data from an encoded reply block.
  * Returns 1 if the block is fully consumed, 0 otherwise.
- * Updates *remaining with the bytes not consumed. */
-static int consumeEncodedReplyBlock(clientReplyBlock *o, ssize_t *remaining) {
+ * Updates *remaining with the bytes not consumed.
+ * Updates *sentlen to track partial sends within a chunk. */
+static int consumeEncodedReplyBlock(clientReplyBlock *o, size_t *sentlen, ssize_t *remaining) {
     char *ptr = o->buf;
 
     while (ptr < o->buf + o->used && *remaining > 0) {
         payloadHeader *head = (payloadHeader *)ptr;
 
         if (head->payload_type == PLAIN_REPLY) {
-            /* Plain data chunk */
-            size_t chunk_size = sizeof(payloadHeader) + head->payload_len;
-            if (*remaining >= (ssize_t)chunk_size) {
-                /* This chunk is fully sent */
-                *remaining -= chunk_size;
-                ptr += chunk_size;
-            } else {
+            /* Plain data chunk - wire format is just the payload */
+            size_t chunk_len = head->payload_len;
+            if (*remaining < (ssize_t)(chunk_len - *sentlen)) {
                 /* Partial send of this chunk */
+                *sentlen += *remaining;
                 return 0;
             }
+            /* This chunk is fully sent */
+            *remaining -= (chunk_len - *sentlen);
+            *sentlen = 0;
+            ptr += sizeof(payloadHeader) + head->payload_len;
         } else {
-            /* BULK_STR_REF - need to account for the actual wire format */
+            /* BULK_STR_REF - wire format: prefix + string data + crlf */
             bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
 
-            /* Wire format: prefix + string data + crlf */
             size_t wire_len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
 
-            if (*remaining >= (ssize_t)wire_len) {
-                /* Fully sent, release the reference */
-                decrRefCount(str_ref->obj);
-                str_ref->obj = NULL; /* Mark as released to prevent double free */
-                *remaining -= wire_len;
-                ptr += sizeof(payloadHeader) + head->payload_len;
-            } else {
+            if (*remaining < (ssize_t)(wire_len - *sentlen)) {
                 /* Partial send */
+                *sentlen += *remaining;
                 return 0;
             }
+            /* Fully sent, release the reference */
+            *remaining -= (wire_len - *sentlen);
+            decrRefCount(str_ref->obj);
+            str_ref->obj = NULL; /* Mark as released to prevent double free */
+            *sentlen = 0;
+            ptr += sizeof(payloadHeader) + head->payload_len;
         }
     }
 
@@ -2493,12 +2491,13 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             c->sentlen = 0;
         } else {
             /* Encoded reply block - use helper function */
-            if (consumeEncodedReplyBlock(o, &remaining)) {
+            if (consumeEncodedReplyBlock(o, &c->sentlen, &remaining)) {
                 /* Block fully consumed, remove it */
                 c->reply_bytes -= o->size;
                 listDelNode(c->reply, next);
+                c->sentlen = 0;
             } else {
-                /* Partial write, stop processing */
+                /* Partial write, c->sentlen already updated, stop processing */
                 break;
             }
         }
