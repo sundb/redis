@@ -2601,7 +2601,6 @@ static inline int _writeToClientNonSlave(client *c, ssize_t *nwritten) {
      * system calls and TCP packets. */
     if (listLength(c->reply) > 0) {
         int ret = _writevToClient(c, nwritten);
-        // _postWriteToClient(c, *nwritten);
         if (ret != C_OK) return ret;
 
         /* If there are no longer objects in the list, we expect
@@ -2612,7 +2611,6 @@ static inline int _writeToClientNonSlave(client *c, ssize_t *nwritten) {
         /* For encoded buffers, we need to use writev to handle bulk string references */
         if (c->buf_encoded) {
             int ret = _writevToClient(c, nwritten);
-            // _postWriteToClient(c, *nwritten);
             return ret;
         }
 
