@@ -1258,7 +1258,6 @@ void addReplyBulkLen(client *c, robj *obj) {
 /* Try to avoid whole bulk string copy to a reply buffer
  * If copy avoidance allowed then only pointer to object and string will be copied to the buffer */
 static int tryAvoidBulkStrCopyToReply(client *c, robj *obj, size_t len) {
-    return C_ERR;
     if (!isCopyAvoidPreferred(c, obj, len)) return C_ERR;
     _addBulkStrRefToBufferOrList(c, obj, len);
     return C_OK;
@@ -2435,13 +2434,14 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
                 offset = 0;
             } else {
                 /* Encoded reply block - use helper function */
-                int new_iovcnt = processEncodedBufferForWrite(o->buf, o->used, o->buf, 0,
+                int new_iovcnt = processEncodedBufferForWrite(o->buf, o->used, o->buf, offset,
                                                               iov, iovcnt, iovmax, &iov_bytes_len);
                 if (new_iovcnt == -1) {
                     iovcnt = iovmax;
                     break;
                 }
                 iovcnt = new_iovcnt;
+                offset = 0;
             }
         }
     }
