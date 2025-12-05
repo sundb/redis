@@ -1093,7 +1093,6 @@ typedef struct payloadHeader payloadHeader; /* Defined in networking.c */
  * which is actually a linked list of blocks like that, that is: client->reply. */
 typedef struct clientReplyBlock {
     size_t size, used;
-    // payloadHeader *last_header; /* points to a last header in an encoded buffer */
     int buf_encoded: 1;
     char buf[];
 } clientReplyBlock;
@@ -1365,14 +1364,6 @@ typedef struct {
 } clientReqResInfo;
 #endif
 
-typedef struct LastWrittenBuf {
-    char *buf;       /* Last buffer that has been written to the client connection
-                      * Last buffer is either c->buf or c->reply list node (i.e. buf from a clientReplyBlock) */
-    size_t bufpos;   /* The buffer has been written until this position */
-    size_t data_len; /* The actual reply length written from this buffer
-                      * This length differs from bufpos in case of copy avoidance */
-} LastWrittenBuf;
-
 typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
@@ -1413,7 +1404,6 @@ typedef struct client {
     list *reply;            /* List of reply objects to send to the client. */
     unsigned long long reply_bytes; /* Tot bytes of objects in reply list. */
     list *deferred_reply_errors;    /* Used for module thread safe contexts. */
-    // LastWrittenBuf io_last_written; /* Track state for last written buffer */
     size_t sentlen;         /* Amount of bytes already sent in the current
                                buffer or object being sent. */
     time_t ctime;           /* Client creation time. */
