@@ -425,33 +425,27 @@ static void _addReplyPayloadToList(client *c, list *reply_list, const char *payl
      * addReplyDeferredLen() is used, it sets a dummy node to NULL just
      * to fill it later, when the size of the bulk length is set. */
 
-    /* Append to tail string when possible. */
+    /* Append to tail node when possible. */
     if (tail) {
-        /* Copy the part we can fit into the tail, and leave the rest for a
-         * new node */
-        size_t avail = tail->size - tail->used;
-        size_t copy = avail >= len? len: avail;
-
         if (tail->buf_encoded) {
+            /* Try to add to encoded buffer */
             if (tryAddPayload(tail->buf, &tail->used, tail->size, payload_type, (void *)payload, len)) {
                 len = 0;
             }
-            copy = 0;
-        } else if (encoded) {
-            copy = 0;
-        }
-
-        if (copy) {
-            /* Copy the part we can fit into the tail, and leave the rest for a
-             * new node */
+        } else if (!encoded) {
+            /* Both tail and new payload are non-encoded, can append directly */
             size_t avail = tail->size - tail->used;
-            size_t copy = avail >= len? len: avail;
-            memcpy(tail->buf + tail->used, payload, copy);
-            tail->used += copy;
-            payload += copy;
-            len -= copy;
+            size_t copy = avail >= len ? len : avail;
+            if (copy > 0) {
+                memcpy(tail->buf + tail->used, payload, copy);
+                tail->used += copy;
+                payload += copy;
+                len -= copy;
+            }
         }
+        /* else: tail is non-encoded but new payload needs encoding, can't append */
     }
+
     if (len) {
         /* Create a new node, make sure it is allocated to at
          * least PROTO_REPLY_CHUNK_BYTES */
