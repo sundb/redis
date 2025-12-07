@@ -2436,19 +2436,10 @@ static void releaseBufReferences(char *buf, size_t bufpos) {
         ptr += sizeof(payloadHeader);
 
         if (header->payload_type == BULK_STR_REF) {
-            /* TODO: Add clusterSlotStatsAddNetworkBytesOutForSlot function to cluster_slot_stats.c */
-            /* clusterSlotStatsAddNetworkBytesOutForSlot(header->slot, header->reply_len); */
-
             bulkStrRef *str_ref = (bulkStrRef *)ptr;
-            size_t len = header->payload_len;
-            while (len > 0) {
-                /* Only release if not already released (obj != NULL) */
-                if (str_ref->obj != NULL) {
-                    decrRefCount(str_ref->obj);
-                }
-                str_ref++;
-                len -= sizeof(bulkStrRef);
-            }
+            /* Only release if not already released. */
+            if (str_ref->obj != NULL)
+                decrRefCount(str_ref->obj);
         } else {
             serverAssert(header->payload_type == PLAIN_REPLY);
         }
