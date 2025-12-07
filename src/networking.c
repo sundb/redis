@@ -129,10 +129,7 @@ static int isCopyAvoidPreferred(client *c, robj *obj, size_t len) {
     int type = getClientType(c);
     if (type != CLIENT_TYPE_NORMAL && type != CLIENT_TYPE_PUBSUB) return 0;
 
-    if (obj) {
-        if (obj->encoding != OBJ_ENCODING_RAW) return 0;
-        if (obj->refcount == OBJ_STATIC_REFCOUNT) return 0;
-    }
+    if (obj->encoding != OBJ_ENCODING_RAW || obj->refcount == OBJ_STATIC_REFCOUNT) return 0;
 
     /* Copy avoidance is preferred for any string size starting certain number of I/O threads  */
     if (server.min_io_threads_copy_avoid && server.io_threads_num >= server.min_io_threads_copy_avoid) return 1;
@@ -943,7 +940,7 @@ void setDeferredReply(client *c, void *node, const char *s, size_t length) {
      * - It has enough room already allocated
      * - And not too large (avoid large memmove) */
     if (ln->prev != NULL && (prev = listNodeValue(ln->prev)) &&
-        prev->size - prev->used > 0)
+        prev->size - prev->used > 0 && !prev->buf_encoded)
     {
         size_t len_to_copy = prev->size - prev->used;
         if (len_to_copy > length)
@@ -961,7 +958,8 @@ void setDeferredReply(client *c, void *node, const char *s, size_t length) {
 
     if (ln->next != NULL && (next = listNodeValue(ln->next)) &&
         next->size - next->used >= length &&
-        next->used < PROTO_REPLY_CHUNK_BYTES * 4)
+        next->used < PROTO_REPLY_CHUNK_BYTES * 4 &&
+        !next->buf_encoded)
     {
         memmove(next->buf + length, next->buf, next->used);
         memcpy(next->buf, s, length);
@@ -2286,13 +2284,13 @@ static payloadHeader *consumeEncodedBuffer(char *start_ptr, char *end_ptr, size_
             /* BULK_STR_REF - release object references */
             bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
 
-            size_t wire_len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
-            if (*remaining < (ssize_t)(wire_len - *sentlen)) {
+            size_t wrire_len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
+            if (*remaining < (ssize_t)(wrire_len - *sentlen)) {
                 *sentlen += *remaining;
                 *remaining = 0;
                 return head;
             }
-            *remaining -= (wire_len - *sentlen);
+            *remaining -= (wrire_len - *sentlen);
             decrRefCount(str_ref->obj);
             str_ref->obj = NULL; /* Mark as released to prevent double free */
             *sentlen = 0;

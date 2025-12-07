@@ -1095,7 +1095,7 @@ typedef struct payloadHeader payloadHeader; /* Defined in networking.c */
  * which is actually a linked list of blocks like that, that is: client->reply. */
 typedef struct clientReplyBlock {
     size_t size, used;
-    int buf_encoded: 1;
+    char buf_encoded;
     char buf[];
 } clientReplyBlock;
 
