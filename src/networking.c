@@ -881,7 +881,7 @@ void trimReplyUnusedTailSpace(client *c) {
      * Also, to avoid large memmove which happens as part of realloc, we only do
      * that if the used part is small.  */
     if (tail->size - tail->used > tail->size / 4 &&
-        tail->used < PROTO_REPLY_CHUNK_BYTES)
+        tail->used < PROTO_REPLY_CHUNK_BYTES && !tail->buf_encoded)
     {
         size_t usable_size;
         size_t old_size = tail->size;
@@ -2209,66 +2209,62 @@ typedef struct ReplyIOV {
 } ReplyIOV;
 
 /* Helper function to add BULK_STR_REF components to iov array with offset support. */
-static void addBulkStrRefToIov(ReplyIOV *reply_iov, bulkStrRef *str_ref, size_t *offset) {
+static void addBulkStrRefToIov(ReplyIOV *reply_iov, bulkStrRef *str_ref, size_t offset) {
     size_t prefix_len = str_ref->prefix_cnt;
     size_t str_len = sdslen(str_ref->obj->ptr);
 
     /* Add prefix if not fully sent */
-    if (*offset < prefix_len) {
+    if (offset < prefix_len) {
         if (reply_iov->iovcnt >= reply_iov->iovmax || reply_iov->iov_bytes_len >= NET_MAX_WRITES_PER_EVENT) return;
-        reply_iov->iov[reply_iov->iovcnt].iov_base = str_ref->prefix + *offset;
-        reply_iov->iov[reply_iov->iovcnt].iov_len = prefix_len - *offset;
+        reply_iov->iov[reply_iov->iovcnt].iov_base = str_ref->prefix + offset;
+        reply_iov->iov[reply_iov->iovcnt].iov_len = prefix_len - offset;
         reply_iov->iov_bytes_len += reply_iov->iov[reply_iov->iovcnt++].iov_len;
-        *offset = 0;
+        offset = 0;
     } else {
-        *offset -= prefix_len;
+        offset -= prefix_len;
     }
 
     /* Add string data if not fully sent */
-    if (*offset < str_len) {
+    if (offset < str_len) {
         if (reply_iov->iovcnt >= reply_iov->iovmax || reply_iov->iov_bytes_len >= NET_MAX_WRITES_PER_EVENT) return;
-        reply_iov->iov[reply_iov->iovcnt].iov_base = (char *)str_ref->obj->ptr + *offset;
-        reply_iov->iov[reply_iov->iovcnt].iov_len = str_len - *offset;
+        reply_iov->iov[reply_iov->iovcnt].iov_base = (char *)str_ref->obj->ptr + offset;
+        reply_iov->iov[reply_iov->iovcnt].iov_len = str_len - offset;
         reply_iov->iov_bytes_len += reply_iov->iov[(reply_iov->iovcnt)++].iov_len;
-        *offset = 0;
+        offset = 0;
     } else {
-        *offset -= str_len;
+        offset -= str_len;
     }
 
     /* Add crlf if not fully sent */
-    if (*offset < 2) {
+    if (offset < 2) {
         if (reply_iov->iovcnt >= reply_iov->iovmax || reply_iov->iov_bytes_len >= NET_MAX_WRITES_PER_EVENT) return;
-        reply_iov->iov[reply_iov->iovcnt].iov_base = str_ref->crlf + *offset;
-        reply_iov->iov[reply_iov->iovcnt].iov_len = 2 - *offset;
+        reply_iov->iov[reply_iov->iovcnt].iov_base = str_ref->crlf + offset;
+        reply_iov->iov[reply_iov->iovcnt].iov_len = 2 - offset;
         reply_iov->iov_bytes_len += reply_iov->iov[reply_iov->iovcnt++].iov_len;
     }
-
-    *offset = 0;
 }
 
 /* Helper function to process encoded buffer and build iov array.
  * Uses last_header and sentlen to track position for partial sends. */
-static void processEncodedBufferForWrite(ReplyIOV *reply_iov, char *start_ptr, char *end_ptr, size_t *offset) {
+static void processEncodedBufferForWrite(ReplyIOV *reply_iov, char *start_ptr, char *end_ptr, size_t offset) {
     char *ptr = start_ptr;
     while (ptr < end_ptr && reply_iov->iovcnt < reply_iov->iovmax && reply_iov->iov_bytes_len < NET_MAX_WRITES_PER_EVENT) {
         payloadHeader *head = (payloadHeader *)ptr;
 
         if (head->payload_type == PLAIN_REPLY) {
             /* Plain data - add directly */
-            reply_iov->iov[reply_iov->iovcnt].iov_base = ptr + sizeof(payloadHeader) + *offset;
-            reply_iov->iov[reply_iov->iovcnt].iov_len = head->payload_len - *offset;
+            reply_iov->iov[reply_iov->iovcnt].iov_base = ptr + sizeof(payloadHeader) + offset;
+            reply_iov->iov[reply_iov->iovcnt].iov_len = head->payload_len - offset;
             reply_iov->iov_bytes_len += reply_iov->iov[reply_iov->iovcnt++].iov_len;
-            *offset = 0;
         } else {
             /* BULK_STR_REF - expand to prefix + string + crlf */
             bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
             addBulkStrRefToIov(reply_iov, str_ref, offset);
         }
 
+        offset = 0;
         ptr += sizeof(payloadHeader) + head->payload_len;
     }
-
-    serverAssert(ptr == end_ptr);
 }
 
 /* Helper function to consume sent data from encoded buffer and release references.
@@ -2296,7 +2292,7 @@ static payloadHeader *consumeEncodedBuffer(char *start_ptr, char *end_ptr, size_
                 *remaining = 0;
                 return head;
             }
-            remaining -= (wire_len - *sentlen);
+            *remaining -= (wire_len - *sentlen);
             decrRefCount(str_ref->obj);
             str_ref->obj = NULL; /* Mark as released to prevent double free */
             *sentlen = 0;
@@ -2328,8 +2324,8 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
         } else {
             /* Encoded buffer - use helper function */
             char *start_ptr = c->last_header ? (char *)c->last_header : c->buf;
-            serverAssert(start_ptr >= c->buf && start_ptr < c->buf + c->bufpos);
-            processEncodedBufferForWrite(&reply_iov, start_ptr, c->buf + c->bufpos, &c->sentlen);
+            serverAssert(start_ptr >= c->buf && start_ptr < (c->buf + c->bufpos));
+            processEncodedBufferForWrite(&reply_iov, start_ptr, c->buf + c->bufpos, c->sentlen);
         }
     }
 
@@ -2352,6 +2348,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             }
 
             if (!o->buf_encoded) {
+                serverAssert(!last_header);
                 /* Non-encoded reply block - add directly */
                 iov[reply_iov.iovcnt].iov_base = o->buf + offset;
                 iov[reply_iov.iovcnt].iov_len = o->used - offset;
@@ -2360,7 +2357,9 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
             } else {
                 /* Encoded reply block - use helper function */
                 char *start_ptr = last_header ? (char *)last_header : o->buf;
-                processEncodedBufferForWrite(&reply_iov, start_ptr, o->buf + o->used, &offset);
+                processEncodedBufferForWrite(&reply_iov, start_ptr, o->buf + o->used, offset);
+                offset = 0;
+                last_header = NULL;
             }
         }
     }
@@ -2386,7 +2385,9 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
         } else {
             /* For encoded buffers, use helper function */
             char *start_ptr = c->last_header ? (char *)c->last_header : c->buf;
+            printf("aaaaaaaa c->buf: %p, start_ptr: %p, sent: %d, remain: %d\n", c->buf, start_ptr, c->sentlen, remaining);
             c->last_header = consumeEncodedBuffer(start_ptr, c->buf + c->bufpos, &c->sentlen, &remaining);
+            printf("bbbbbbbb c->buf: %p, start_ptr: %p, sent: %d, remain: %d\n", c->buf, c->last_header, c->sentlen, remaining);
             if (!c->last_header) { /* reach end */
                 c->bufpos = 0;
                 c->buf_encoded = 0;
