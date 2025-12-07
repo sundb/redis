@@ -2385,9 +2385,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
         } else {
             /* For encoded buffers, use helper function */
             char *start_ptr = c->last_header ? (char *)c->last_header : c->buf;
-            printf("aaaaaaaa c->buf: %p, start_ptr: %p, sent: %d, remain: %d\n", c->buf, start_ptr, c->sentlen, remaining);
             c->last_header = consumeEncodedBuffer(start_ptr, c->buf + c->bufpos, &c->sentlen, &remaining);
-            printf("bbbbbbbb c->buf: %p, start_ptr: %p, sent: %d, remain: %d\n", c->buf, c->last_header, c->sentlen, remaining);
             if (!c->last_header) { /* reach end */
                 c->bufpos = 0;
                 c->buf_encoded = 0;
