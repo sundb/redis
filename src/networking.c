@@ -61,8 +61,6 @@ static inline int _writeToClientNonSlave(client *c, ssize_t *nwritten);
 static inline int _writeToClientSlave(client *c, ssize_t *nwritten);
 static pendingCommand *acquirePendingCommand(void);
 static void reclaimPendingCommand(client *c, pendingCommand *pcmd);
-static int tryAddPayload(char *buf, size_t *used, size_t size, uint8_t type, const void *payload, size_t len);
-static void releaseAllBufReferences(client *c);
 
 int ProcessingEventsWhileBlocked = 0; /* See processEventsWhileBlocked(). */
 __thread sds thread_reusable_qb = NULL;
@@ -117,30 +115,6 @@ void *dupClientReplyValue(void *o) {
 
 void freeClientReplyValue(void *o) {
     zfree(o);
-}
-
-/* Check if copy avoidance is preferred for this client and object.
- * Copy avoidance allows I/O threads to directly reference obj->ptr
- * instead of copying data to reply buffers. */
-static int isCopyAvoidPreferred(client *c, robj *obj, size_t len) {
-    /* Don't use copy avoidance for fake clients or when deferred replies are enabled */
-    if (!c->conn) return 0;
-
-    int type = getClientType(c);
-    if (type != CLIENT_TYPE_NORMAL && type != CLIENT_TYPE_PUBSUB) return 0;
-
-    if (obj->encoding != OBJ_ENCODING_RAW || obj->refcount == OBJ_STATIC_REFCOUNT) return 0;
-
-    /* Copy avoidance is preferred for any string size starting certain number of I/O threads  */
-    if (server.min_io_threads_copy_avoid && server.io_threads_num >= server.min_io_threads_copy_avoid) return 1;
-
-    /* Main thread only. No I/O threads */
-    if (server.io_threads_num == 1) {
-        /* Copy avoidance is preferred starting certain string size */
-        return server.min_string_size_copy_avoid && len >= (size_t)server.min_string_size_copy_avoid;
-    }
-    /* Main thread + I/O threads */
-    return server.min_string_size_copy_avoid_threaded && len >= (size_t)server.min_string_size_copy_avoid_threaded;
 }
 
 /* This function links the client to the global linked list of clients.
@@ -408,6 +382,19 @@ int prepareClientToWrite(client *c) {
  * Low level functions to add more data to output buffers.
  * -------------------------------------------------------------------------- */
 
+static int tryAddPayload(char *buf, size_t *used, size_t size, uint8_t type, const void *payload, size_t len) {
+    size_t available = size - *used;
+    if (sizeof(payloadHeader) + len > available) return 0;
+
+    /* Start a new payload chunk */
+    payloadHeader *header = (payloadHeader *)(buf + *used);
+    header->payload_type = type;
+    header->payload_len = len;
+    memcpy((char *)header + sizeof(payloadHeader), payload, len);
+    *used += sizeof(payloadHeader) + len;
+    return 1;
+}
+
 /* Adds the payload to the reply linked list.
  * Note: some edits to this function need to be relayed to AddReplyFromClient. */
 static void _addReplyPayloadToList(client *c, list *reply_list, const char *payload, size_t len, uint8_t payload_type) {
@@ -473,19 +460,6 @@ int cmdHasPushAsReply(struct redisCommand *cmd) {
     return cmd->proc == subscribeCommand  || cmd->proc == unsubscribeCommand ||
            cmd->proc == psubscribeCommand || cmd->proc == punsubscribeCommand ||
            cmd->proc == ssubscribeCommand || cmd->proc == sunsubscribeCommand;
-}
-
-static int tryAddPayload(char *buf, size_t *used, size_t size, uint8_t type, const void *payload, size_t len) {
-    size_t available = size - *used;
-    if (sizeof(payloadHeader) + len > available) return 0;
-
-    /* Start a new payload chunk */
-    payloadHeader *header = (payloadHeader *)(buf + *used);
-    header->payload_type = type;
-    header->payload_len = len;
-    memcpy((char *)header + sizeof(payloadHeader), payload, len);
-    *used += sizeof(payloadHeader) + len;
-    return 1;
 }
 
 /* Attempts to add the reply to the static buffer in the client struct.
@@ -1247,6 +1221,30 @@ void addReplyBulkLen(client *c, robj *obj) {
     _addReplyLongLongBulk(c, len);
 }
 
+/* Check if copy avoidance is preferred for this client and object.
+ * Copy avoidance allows I/O threads to directly reference obj->ptr
+ * instead of copying data to reply buffers. */
+static int isCopyAvoidPreferred(client *c, robj *obj, size_t len) {
+    /* Don't use copy avoidance for fake clients or when deferred replies are enabled */
+    if (!c->conn) return 0;
+
+    int type = getClientType(c);
+    if (type != CLIENT_TYPE_NORMAL && type != CLIENT_TYPE_PUBSUB) return 0;
+
+    if (obj->encoding != OBJ_ENCODING_RAW || obj->refcount == OBJ_STATIC_REFCOUNT) return 0;
+
+    /* Copy avoidance is preferred for any string size starting certain number of I/O threads  */
+    if (server.min_io_threads_copy_avoid && server.io_threads_num >= server.min_io_threads_copy_avoid) return 1;
+
+    /* Main thread only. No I/O threads */
+    if (server.io_threads_num == 1) {
+        /* Copy avoidance is preferred starting certain string size */
+        return server.min_string_size_copy_avoid && len >= (size_t)server.min_string_size_copy_avoid;
+    }
+    /* Main thread + I/O threads */
+    return server.min_string_size_copy_avoid_threaded && len >= (size_t)server.min_string_size_copy_avoid_threaded;
+}
+
 /* Try to avoid whole bulk string copy to a reply buffer
  * If copy avoidance allowed then only pointer to object and string will be copied to the buffer */
 static int tryAvoidBulkStrCopyToReply(client *c, robj *obj, size_t len) {
@@ -1912,6 +1910,43 @@ static void resetReusableQueryBuf(client *c) {
     thread_reusable_qb_used = 0;
 }
 
+/* Release references to string objects inside an encoded buffer */
+static void releaseBufReferences(char *buf, size_t bufpos) {
+    char *ptr = buf;
+    while (ptr < buf + bufpos) {
+        payloadHeader *header = (payloadHeader *)ptr;
+        ptr += sizeof(payloadHeader);
+
+        if (header->payload_type == BULK_STR_REF) {
+            bulkStrRef *str_ref = (bulkStrRef *)ptr;
+            /* Only release if not already released. */
+            if (str_ref->obj != NULL)
+                decrRefCount(str_ref->obj);
+        } else {
+            serverAssert(header->payload_type == PLAIN_REPLY);
+        }
+
+        ptr += header->payload_len;
+    }
+}
+
+/* Release all references to string objects in all encoded buffers */
+static void releaseAllBufReferences(client *c) {
+    if (c->buf_encoded) {
+        releaseBufReferences(c->buf, c->bufpos);
+    }
+
+    listIter iter;
+    listNode *next;
+    listRewind(c->reply, &iter);
+    while ((next = listNext(&iter))) {
+        clientReplyBlock *o = (clientReplyBlock *)listNodeValue(next);
+        if (o->buf_encoded) {
+            releaseBufReferences(o->buf, o->used);
+        }
+    }
+}
+
 void freeClient(client *c) {
     listNode *ln;
 
@@ -2424,43 +2459,6 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
     }
 
     return C_OK;
-}
-
-/* Release references to string objects inside an encoded buffer */
-static void releaseBufReferences(char *buf, size_t bufpos) {
-    char *ptr = buf;
-    while (ptr < buf + bufpos) {
-        payloadHeader *header = (payloadHeader *)ptr;
-        ptr += sizeof(payloadHeader);
-
-        if (header->payload_type == BULK_STR_REF) {
-            bulkStrRef *str_ref = (bulkStrRef *)ptr;
-            /* Only release if not already released. */
-            if (str_ref->obj != NULL)
-                decrRefCount(str_ref->obj);
-        } else {
-            serverAssert(header->payload_type == PLAIN_REPLY);
-        }
-
-        ptr += header->payload_len;
-    }
-}
-
-/* Release all references to string objects in all encoded buffers */
-static void releaseAllBufReferences(client *c) {
-    if (c->buf_encoded) {
-        releaseBufReferences(c->buf, c->bufpos);
-    }
-
-    listIter iter;
-    listNode *next;
-    listRewind(c->reply, &iter);
-    while ((next = listNext(&iter))) {
-        clientReplyBlock *o = (clientReplyBlock *)listNodeValue(next);
-        if (o->buf_encoded) {
-            releaseBufReferences(o->buf, o->used);
-        }
-    }
 }
 
 /* This function does actual writing output buffers for non slave client types,
