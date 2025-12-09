@@ -510,9 +510,15 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # 4. Migrate slot 6000 from node-1 to node-0
         # 5. Stop write traffic, verify db's are identical.
 
-        set prev_config [lindex [R 0 config get cluster-slot-migration-handoff-max-lag-bytes] 1]
+        # This test runs slowly under the thread sanitizer.
+        #  1. Increase the lag threshold from the default 1 MB to 10 MB to let the destination catch up easily.
+        #  2. Increase the write pause timeout from the default 10s to 60s so the source can wait longer.
+        set prev_config_lag [lindex [R 0 config get cluster-slot-migration-handoff-max-lag-bytes] 1]
         R 0 config set cluster-slot-migration-handoff-max-lag-bytes 10mb
         R 1 config set cluster-slot-migration-handoff-max-lag-bytes 10mb
+        set prev_config_timeout [lindex [R 0 config get cluster-slot-migration-write-pause-timeout] 1]
+        R 0 config set cluster-slot-migration-write-pause-timeout 60000
+        R 1 config set cluster-slot-migration-write-pause-timeout 60000
 
         R 0 flushall
         R 0 debug asm-trim-method none
@@ -528,7 +534,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             # Start the slot 0 write load on the R 0
             set port [get_port 0]
             set key [slot_key 0 mykey]
-            set load_handle0 [start_write_load "127.0.0.1" $port 100 $key]
+            set load_handle0 [start_write_load "127.0.0.1" $port 100 $key 0 5]
         }
 
         # Start write traffic on node-1
@@ -537,7 +543,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             # Start the slot 6000 write load on the R 1
             set port [get_port 1]
             set key [slot_key 6000 mykey]
-            set load_handle1 [start_write_load "127.0.0.1" $port 100 $key]
+            set load_handle1 [start_write_load "127.0.0.1" $port 100 $key 0 5]
         }
 
         # Migrate keys
@@ -554,10 +560,12 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         assert_equal [R 0 debug digest] [R 1 debug digest]
 
         # cleanup
-        R 0 config set cluster-slot-migration-handoff-max-lag-bytes $prev_config
+        R 0 config set cluster-slot-migration-handoff-max-lag-bytes $prev_config_lag
+        R 0 config set cluster-slot-migration-write-pause-timeout $prev_config_timeout
         R 0 debug asm-trim-method default
         R 0 flushall
-        R 1 config set cluster-slot-migration-handoff-max-lag-bytes $prev_config
+        R 1 config set cluster-slot-migration-handoff-max-lag-bytes $prev_config_lag
+        R 1 config set cluster-slot-migration-write-pause-timeout $prev_config_timeout
         R 1 debug asm-trim-method default
         R 1 flushall
 
@@ -1342,11 +1350,8 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # start migration from #0 to #1
         set task_id [setup_slot_migration_with_delay 0 1 0 100]
 
-        # Create some traffic on slot 0, so the destination node will enter streaming buffer state
+        # Create 200 keys of 16k size traffic on slot 0, streaming buffer need 10s (200*50ms)
         populate_slot 200 -idx 0 -slot 0 -size 16384
-
-        # Start the slot 0 write load on the R 0
-        set load_handle [start_write_load "127.0.0.1" [get_port 0] 100 [slot_key 0 mykey] 500]
 
         # wait for streaming buffer state, then pause the destination node
         wait_for_condition 1000 20 {
@@ -1355,6 +1360,9 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             fail "ASM task did not stream buffer, state: [migration_status 1 $task_id state]"
         }
         pause_process $r1_pid
+
+        # Start the slot 0 write load on the R 0
+        set load_handle [start_write_load "127.0.0.1" [get_port 0] 100 [slot_key 0 mykey] 500]
 
         # the source node will fail after several seconds (including the time
         # to fill the socket buffer of source node), the main channel can not
@@ -1445,6 +1453,28 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 0 debug asm-failpoint "" ""
         R 0 cluster migration cancel id $task_id
         R 1 cluster migration cancel id $task_id
+    }
+
+    test "Cluster implementation cannot start migrate task temporarily" {
+        # Inject a fail point to make the source node not ready
+        R 0 debug asm-failpoint "migrate-main-channel" "none"
+
+        # start migration from node 0 to 1
+        set task_id [R 1 CLUSTER MIGRATION IMPORT 0 100]
+
+        # verify source node replies SYNCSLOTS with -NOTREADY
+        set loglines [count_log_lines -1]
+        wait_for_log_messages -1 {"*Source node replied to SYNCSLOTS SYNC with -NOTREADY, will retry later*"} $loglines 100 100
+
+        # clear the fail point and verify the task is completed
+        R 0 debug asm-failpoint "" ""
+        wait_for_asm_done
+        assert_equal "completed" [migration_status 0 $task_id state]
+        assert_equal "completed" [migration_status 1 $task_id state]
+
+        # cleanup
+        R 0 CLUSTER MIGRATION IMPORT 0 100
+        wait_for_asm_done
     }
 }
 
@@ -2271,6 +2301,9 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
         } else {
             fail "migrate failed"
         }
+
+        # Wait for config propagation before checking the slot ownership on replica
+        wait_for_cluster_propagation
 
         # Verify slots that are being trimmed are not local
         assert_equal 0 [R 0 asm.cluster_can_access_keys_in_slot 0]

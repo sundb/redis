@@ -77,7 +77,7 @@ void updateKeysizesHist(redisDb *db, int didx, uint32_t type, int64_t oldLen, in
     if(unlikely(type >= OBJ_TYPE_BASIC_MAX))
         return;
 
-    kvstoreDictMetadata *dictMeta = kvstoreGetDictMetadata(db->keys, didx);
+    kvstoreDictMetadata *dictMeta = kvstoreGetDictMeta(db->keys, didx, 0);
     kvstoreMetadata *kvstoreMeta = kvstoreGetMetadata(db->keys);
 
     if (oldLen > 0) {
@@ -127,11 +127,9 @@ void updateKeysizesHist(redisDb *db, int didx, uint32_t type, int64_t oldLen, in
 
 void updateSlotAllocSize(redisDb *db, int didx, size_t oldsize, size_t newsize) {
     debugServerAssert(server.memory_tracking_per_slot);
-    kvstoreDictMetadata *dictMeta = kvstoreGetDictMetadata(db->keys, didx);
+    kvstoreDictMetadata *dictMeta = kvstoreGetDictMeta(db->keys, didx, 0);
     if (!dictMeta) return;
-#ifdef REDIS_TEST
-    serverAssert(oldsize <= dictMeta->alloc_size);
-#endif
+    debugServerAssert(oldsize <= dictMeta->alloc_size);
     dictMeta->alloc_size -= oldsize;
     dictMeta->alloc_size += newsize;
 }
@@ -144,17 +142,19 @@ void dbgAssertKeysizesHist(redisDb *db) {
     /* Scan DB and build expected histogram by scanning all keys */
     int64_t scanHist[MAX_KEYSIZES_TYPES][MAX_KEYSIZES_BINS] = {{0}};
     dictEntry *de;
-    kvstoreIterator *kvs_it = kvstoreIteratorInit(db->keys);
-    while ((de = kvstoreIteratorNext(kvs_it)) != NULL) {
+    kvstoreIterator kvs_it;
+    kvstoreIteratorInit(&kvs_it, db->keys);
+    while ((de = kvstoreIteratorNext(&kvs_it)) != NULL) {
         kvobj *kv = dictGetKV(de);
         if (kv->type < OBJ_TYPE_BASIC_MAX) {
             int64_t len = getObjectLength(kv);
             scanHist[kv->type][(len == 0) ? 0 : log2ceil(len) + 1]++;
         }
     }
-    kvstoreIteratorRelease(kvs_it);
+    kvstoreIteratorReset(&kvs_it);
     for (int type = 0; type < OBJ_TYPE_BASIC_MAX; type++) {
-        volatile int64_t *keysizesHist = kvstoreGetMetadata(db->keys)->keysizes_hist[type];
+        kvstoreMetadata *meta = kvstoreGetMetadata(db->keys);
+        volatile int64_t *keysizesHist = meta->keysizes_hist[type];
         for (int i = 0; i < MAX_KEYSIZES_BINS; i++) {
             if (scanHist[type][i] == keysizesHist[i])
                 continue;
@@ -184,17 +184,18 @@ void dbgAssertAllocSizePerSlot(redisDb *db) {
     if (!server.memory_tracking_per_slot) return;
     size_t slot_sizes[CLUSTER_SLOTS] = {0};
     dictEntry *de;
-    kvstoreIterator *kvs_it = kvstoreIteratorInit(db->keys);
-    while ((de = kvstoreIteratorNext(kvs_it)) != NULL) {
-        int slot = kvstoreIteratorGetCurrentDictIndex(kvs_it);
+    kvstoreIterator kvs_it;
+    kvstoreIteratorInit(&kvs_it, db->keys);
+    while ((de = kvstoreIteratorNext(&kvs_it)) != NULL) {
+        int slot = kvstoreIteratorGetCurrentDictIndex(&kvs_it);
         kvobj *kv = dictGetKV(de);
         slot_sizes[slot] += kvobjAllocSize(kv);
     }
-    kvstoreIteratorRelease(kvs_it);
+    kvstoreIteratorReset(&kvs_it);
 
     int num_slots = kvstoreNumDicts(db->keys);
     for (int slot = 0; slot < num_slots; slot++) {
-        kvstoreDictMetadata *dictMeta = kvstoreGetDictMetadata(db->keys, slot);
+        kvstoreDictMetadata *dictMeta = kvstoreGetDictMeta(db->keys, slot, 0);
         size_t want = slot_sizes[slot];
         size_t have = dictMeta ? dictMeta->alloc_size : 0;
         if (have == want) continue;
@@ -426,27 +427,16 @@ int getKeySlot(sds key) {
 }
 
 /* Return the slot of the key in the command.
- * GETSLOT_NOKEYS if no keys, GETSLOT_CROSSSLOT if cross slot, otherwise the slot number. */
+ * INVALID_CLUSTER_SLOT if no keys, CLUSTER_CROSSSLOT if cross slot, otherwise the slot number. */
 int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc) {
-    int slot = GETSLOT_NOKEYS;
-    if (!cmd || !server.cluster_enabled) return slot;
+    if (!cmd || !server.cluster_enabled) return INVALID_CLUSTER_SLOT;
 
     /* Get the keys from the command */
     getKeysResult result = GETKEYS_RESULT_INIT;
-    int numkeys = getKeysFromCommand(cmd, argv, argc, &result);
-    keyReference *keyindex = result.keys;
+    getKeysFromCommand(cmd, argv, argc, &result);
 
-    /* Get slot of each key and check if they are all the same */
-    for (int j = 0; j < numkeys; j++) {
-        robj *thiskey = argv[keyindex[j].pos];
-        int thisslot = keyHashSlot((char*)thiskey->ptr, sdslen(thiskey->ptr));
-        if (slot == GETSLOT_NOKEYS) {
-            slot = thisslot;
-        } else if (slot != thisslot) {
-            slot = GETSLOT_CROSSSLOT; /* Mark as cross slot */
-            break;
-        }
-    }
+    /* Extract slot from the keys result. */
+    int slot = extractSlotFromKeysResult(argv, &result);
     getKeysFreeResult(&result);
     return slot;
 }
@@ -975,9 +965,10 @@ redisDb *initTempDb(void) {
     redisDb *tempDb = zcalloc(sizeof(redisDb)*server.dbnum);
     for (int i=0; i<server.dbnum; i++) {
         tempDb[i].id = i;
-        tempDb[i].keys = kvstoreCreate(&dbDictType, slot_count_bits,
-                                       flags | KVSTORE_ALLOC_META_KEYS_HIST);
-        tempDb[i].expires = kvstoreCreate(&dbExpiresDictType, slot_count_bits, flags);
+        tempDb[i].keys = kvstoreCreate(&kvstoreExType, &dbDictType, slot_count_bits,
+                                       flags);
+        tempDb[i].expires = kvstoreCreate(&kvstoreBaseType, &dbExpiresDictType,
+                                          slot_count_bits, flags);
         tempDb[i].subexpires = estoreCreate(&subexpiresBucketsType, slot_count_bits);
     }
 
@@ -1419,21 +1410,24 @@ void keysCommand(client *c) {
     if (server.cluster_enabled && !allkeys) {
         pslot = patternHashSlot(pattern, plen);
     }
-    kvstoreDictIterator *kvs_di = NULL;
-    kvstoreIterator *kvs_it = NULL;
-    if (pslot != -1) {
+    int has_slot = pslot != -1;
+    union {
+        kvstoreDictIterator kvs_di;
+        kvstoreIterator kvs_it;
+    } it;
+    if (has_slot) {
         if (!kvstoreDictSize(c->db->keys, pslot) || accessKeysShouldSkipDictIndex(pslot)) {
             /* Requested slot is empty */
             setDeferredArrayLen(c,replylen,0);
             return;
         }
-        kvs_di = kvstoreGetDictSafeIterator(c->db->keys, pslot);
+        kvstoreInitDictSafeIterator(&it.kvs_di, c->db->keys, pslot);
     } else {
-        kvs_it = kvstoreIteratorInit(c->db->keys);
+        kvstoreIteratorInit(&it.kvs_it, c->db->keys);
     }
 
-    while ((de = kvs_di ? kvstoreDictIteratorNext(kvs_di) : kvstoreIteratorNext(kvs_it)) != NULL) {
-        if (kvs_it && accessKeysShouldSkipDictIndex(kvstoreIteratorGetCurrentDictIndex(kvs_it))) {
+    while ((de = has_slot ? kvstoreDictIteratorNext(&it.kvs_di) : kvstoreIteratorNext(&it.kvs_it)) != NULL) {
+        if (!has_slot && accessKeysShouldSkipDictIndex(kvstoreIteratorGetCurrentDictIndex(&it.kvs_it))) {
             continue;
         }
 
@@ -1449,10 +1443,10 @@ void keysCommand(client *c) {
         if (c->flags & CLIENT_CLOSE_ASAP)
             break;
     }
-    if (kvs_di)
-        kvstoreReleaseDictIterator(kvs_di);
-    if (kvs_it)
-        kvstoreIteratorRelease(kvs_it);
+    if (has_slot)
+        kvstoreResetDictIterator(&it.kvs_di);
+    else
+        kvstoreIteratorReset(&it.kvs_it);
     setDeferredArrayLen(c,replylen,numkeys);
 }
 
@@ -1499,9 +1493,22 @@ void scanCallback(void *privdata, const dictEntry *de, dictEntryLink plink) {
     /* o and typename can not have values at the same time. */
     serverAssert(!((data->type != LLONG_MAX) && o));
 
+    kvobj *kv = NULL;
     if (!o) { /* If scanning keyspace */
-        kvobj *kv = dictGetKV(de);
-
+        kv = dictGetKV(de);
+        keyStr = kvobjGetKey(kv);
+    } else {
+        keyStr = dictGetKey(de);
+    }
+    
+    /* Filter element if it does not match the pattern. */
+    if (data->pattern) {
+        if (!stringmatchlen(data->pattern, sdslen(data->pattern), keyStr, data->strlen(keyStr), 0)) {
+            return;
+        }
+    }
+    
+    if (!o) {
         /* Expiration check first - only for database keyspace scanning.
          * Use kv obj to avoid robj creation. */
         if (expireIfNeeded(data->db, NULL, kv, 0) != KEY_VALID)
@@ -1515,17 +1522,6 @@ void scanCallback(void *privdata, const dictEntry *de, dictEntryLink plink) {
             /* For known types, skip keys that don't match */
             if (!objectTypeCompare(kv, data->type))
                 return;
-        }
-
-        keyStr = kvobjGetKey(kv);
-    } else {
-        keyStr = dictGetKey(de);
-    }
-
-    /* Filter element if it does not match the pattern. */
-    if (data->pattern) {
-        if (!stringmatchlen(data->pattern, sdslen(data->pattern), keyStr, data->strlen(keyStr), 0)) {
-            return;
         }
     }
 
@@ -1791,9 +1787,10 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
             addReplyArrayLen(c, array_reply_len);
         }
 
-        setTypeIterator *si = setTypeInitIterator(o);
+        setTypeIterator si;
         unsigned long cur_length = 0;
-        while (setTypeNext(si, &str, &len, &llele) != -1) {
+        setTypeInitIterator(&si, o);
+        while (setTypeNext(&si, &str, &len, &llele) != -1) {
             if (str == NULL) {
                 len = ll2string(buf, sizeof(buf), llele);
             }
@@ -1804,7 +1801,7 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
             addReplyBulkCBuffer(c, key, len);
             cur_length++;
         }
-        setTypeReleaseIterator(si);
+        setTypeResetIterator(&si);
         if (use_pattern)
             setDeferredArrayLen(c,replylen,cur_length);
         else
@@ -3209,10 +3206,7 @@ int extractKeysAndSlot(struct redisCommand *cmd, robj **argv, int argc,
         }
     }
 
-    *slot = INVALID_CLUSTER_SLOT;
-    if (num_keys >= 0)
-        *slot = extractSlotFromKeysResult(argv, result);
-
+    *slot = extractSlotFromKeysResult(argv, result);
     return num_keys;
 }
 
