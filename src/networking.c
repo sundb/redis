@@ -502,24 +502,16 @@ void _addReplyToBufferOrList(client *c, const char *s, size_t len) {
 
 /* Increment reference to object and add pointer to object and
  * pointer to string itself to current reply buffer */
-static void _addBulkStrRefToBufferOrList(client *c, robj *obj, size_t len) {
+static void _addBulkStrRefToBufferOrList(client *c, robj *obj) {
     if (c->flags & CLIENT_CLOSE_AFTER_REPLY) return;
 
     bulkStrRef str_ref;
     str_ref.obj = obj;
     incrRefCount(obj); /* Refcount will be decremented in write handler */
 
-    /* Fill prefix with bulk string length: "$<len>\r\n" */
-    str_ref.prefix[0] = '$';
-    size_t num_len = ll2string(str_ref.prefix + 1, sizeof(str_ref.prefix) - 3, len);
-    str_ref.prefix[num_len + 1] = '\r';
-    str_ref.prefix[num_len + 2] = '\n';
-    str_ref.prefix_cnt = num_len + 3;
+    str_ref.prefix_cnt = 0;
     str_ref.crlf[0] = '\r';
-    str_ref.crlf[1] = '\n'; 
-
-    /* Track output bytes: bulk string prefix + content + trailing CRLF */
-    c->net_output_bytes_curr_cmd += str_ref.prefix_cnt + len + 2;
+    str_ref.crlf[1] = '\n';
 
     /* We call it here because this function may affect the reply
      * buffer offset (see function comment) */
@@ -1196,7 +1188,7 @@ void addReplyBulkLen(client *c, robj *obj) {
 /* Check if copy avoidance is preferred for this client and object.
  * Copy avoidance allows I/O threads to directly reference obj->ptr
  * instead of copying data to reply buffers. */
-static int isCopyAvoidPreferred(client *c, robj *obj, size_t len) {
+static int isCopyAvoidPreferred(client *c, robj *obj) {
     /* Don't use copy avoidance for fake clients. */
     if (!c->conn || !server.reply_copy_avoidance_enabled) return 0;
 
@@ -1211,29 +1203,30 @@ static int isCopyAvoidPreferred(client *c, robj *obj, size_t len) {
     /* Main thread only. No I/O threads */
     if (server.io_threads_num == 1) {
         /* Copy avoidance is preferred starting certain string size */
-        return len >= COPY_AVOID_MIN_STRING_SIZE;
+        return sdslen(obj->ptr) >= COPY_AVOID_MIN_STRING_SIZE;
     }
 
     /* Main thread + I/O threads */
-    return len >= COPY_AVOID_MIN_STRING_SIZE_THREADED;
+    return sdslen(obj->ptr) >= COPY_AVOID_MIN_STRING_SIZE_THREADED;
 }
 
 /* Try to avoid whole bulk string copy to a reply buffer
  * If copy avoidance allowed then only pointer to object and string will be copied to the buffer */
-static int tryAvoidBulkStrCopyToReply(client *c, robj *obj, size_t len) {
-    if (!isCopyAvoidPreferred(c, obj, len)) return C_ERR;
-    _addBulkStrRefToBufferOrList(c, obj, len);
-    return C_OK;
-}
+static int tryAvoidBulkStrCopyToReply(client *c, robj *obj) {
+    if (!isCopyAvoidPreferred(c, obj)) return C_ERR;
+    _addBulkStrRefToBufferOrList(c, obj);
+     return C_OK;
+ }
 
 /* Add a Redis Object as a bulk reply */
 void addReplyBulk(client *c, robj *obj) {
     if (_prepareClientToWrite(c) != C_OK) return;
 
-    if (sdsEncodedObject(obj)) {
+     if (sdsEncodedObject(obj)) {
+        if (tryAvoidBulkStrCopyToReply(c, obj) == C_OK)
+             return;
+
         const size_t len = sdslen(obj->ptr);
-        if (tryAvoidBulkStrCopyToReply(c, obj, len) == C_OK)
-            return;
         _addReplyLongLongBulk(c, len);
         _addReplyToBufferOrList(c,obj->ptr,len);
         _addReplyToBufferOrList(c,"\r\n",2);
@@ -2249,6 +2242,16 @@ static void processEncodedBufferForWrite(ReplyIOV *reply_iov, char *start_ptr, c
         } else {
             /* BULK_STR_REF - expand to prefix + string + crlf */
             bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
+
+            if (str_ref->prefix_cnt == 0) {
+                size_t len = sdslen(str_ref->obj->ptr);
+                str_ref->prefix[0] = '$';
+                size_t num_len = ll2string(str_ref->prefix + 1, sizeof(str_ref->prefix) - 3, len);
+                str_ref->prefix[num_len + 1] = '\r';
+                str_ref->prefix[num_len + 2] = '\n';
+                str_ref->prefix_cnt = num_len + 3;
+            }
+
             size_t prefix_len = str_ref->prefix_cnt;
             size_t str_len = sdslen(str_ref->obj->ptr);
 

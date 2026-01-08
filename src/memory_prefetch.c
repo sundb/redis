@@ -66,6 +66,7 @@ typedef struct KeyPrefetchInfo {
     uint64_t key_hash;        /* Hash value of the key being prefetched */
     dictEntry *current_entry; /* Pointer to the current entry being processed */
     kvobj *current_kv;        /* Pointer to the kv object being prefetched */
+    int isWrite;
 } KeyPrefetchInfo;
 
 /* PrefetchCommandsBatch structure holds the state of the current batch of client commands being processed. */
@@ -237,7 +238,7 @@ static void prefetchValueData(KeyPrefetchInfo *info) {
     if ((!dictGetNext(info->current_entry) && !dictIsRehashing(batch->current_dicts[i])) ||
         dictCompareKeys(batch->current_dicts[i], batch->keys[i], key))
     {
-        if (batch->get_value_data_func) {
+        if (batch->get_value_data_func && info->isWrite) {
             void *value_data = batch->get_value_data_func(kv);
             if (value_data) prefetchAndMoveToNextKey(value_data);
         }
@@ -401,6 +402,11 @@ int addCommandToBatch(client *c) {
 
         serverAssert(pcmd->flags & PENDING_CMD_KEYS_RESULT_VALID);
         for (int i = 0; i < pcmd->keys_result.numkeys && batch->key_count < batch->max_prefetch_size; i++) {
+            if (pcmd->cmd->proc == setCommand) {
+                batch->prefetch_info[batch->key_count].isWrite = 1;
+            } else {
+                batch->prefetch_info[batch->key_count].isWrite = 0;
+            }
             batch->keys[batch->key_count] = pcmd->argv[pcmd->keys_result.keys[i].pos];
             batch->keys_dicts[batch->key_count] =
                 kvstoreGetDict(c->db->keys, pcmd->slot > 0 ? pcmd->slot : 0);

@@ -780,7 +780,7 @@ static dictEntryLink dictFindLinkInternal(dict *d, const void *key, dictEntryLin
         idx = hash & DICTHT_SIZE_MASK(d->ht_size_exp[table]);
 
         /* Prefetch the bucket at the calculated index */
-        redis_prefetch_read(&d->ht_table[table][idx]);
+        // redis_prefetch_read(&d->ht_table[table][idx]);
 
         link = &(d->ht_table[table][idx]);
         if (bucket) *bucket = link;
@@ -788,7 +788,7 @@ static dictEntryLink dictFindLinkInternal(dict *d, const void *key, dictEntryLin
             const void *visitedKey = dictStoredKey2Key(d, dictGetKey(*link));
 
             /* Prefetch the next entry to improve cache efficiency */
-            redis_prefetch_read(dictGetNext(*link));
+            // redis_prefetch_read(dictGetNext(*link));
 
             if (key == visitedKey || cmpFunc( &cmpCache, key, visitedKey))                
                 return link;
