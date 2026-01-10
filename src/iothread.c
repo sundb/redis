@@ -447,6 +447,10 @@ int processClientsFromIOThread(IOThread *t) {
         /* Let main thread to run it, set running thread id first. */
         c->running_tid = IOTHREAD_MAIN_THREAD_ID;
 
+        /* The client now is in the main thread, let's free deferred objects
+         * that were queued by the IO thread. */
+        freeClientDeferredObjects(c, 0);
+
         /* If a read error occurs, handle it in the main thread first, since we
          * want to print logs about client information before freeing. */
         if (isClientReadErrorFatal(c)) handleClientReadError(c);

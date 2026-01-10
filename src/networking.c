@@ -1203,7 +1203,7 @@ static int isCopyAvoidPreferred(client *c, robj *obj, size_t len) {
     int type = getClientType(c);
     if (type != CLIENT_TYPE_NORMAL && type != CLIENT_TYPE_PUBSUB) return 0;
 
-    if (obj->encoding != OBJ_ENCODING_RAW || robj_refcount(obj) == OBJ_STATIC_REFCOUNT) return 0;
+    if (obj->encoding != OBJ_ENCODING_RAW || obj->refcount == OBJ_STATIC_REFCOUNT) return 0;
 
     /* Copy avoidance is preferred for any string size starting certain number of I/O threads  */
     if (server.io_threads_num >= COPY_AVOID_MIN_IO_THREADS) return 1;
@@ -1899,8 +1899,9 @@ static void resetReusableQueryBuf(client *c) {
     thread_reusable_qb_used = 0;
 }
 
-/* Release references to string objects inside an encoded buffer */
-static void releaseBufReferences(char *buf, size_t bufpos) {
+/* Release references to string objects inside an encoded buffer.
+ * If client is provided and running in IO thread, defer the free to main thread. */
+static void releaseBufReferences(client *c, char *buf, size_t bufpos) {
     char *ptr = buf;
     while (ptr < buf + bufpos) {
         payloadHeader *header = (payloadHeader *)ptr;
@@ -1910,7 +1911,7 @@ static void releaseBufReferences(char *buf, size_t bufpos) {
             bulkStrRef *str_ref = (bulkStrRef *)ptr;
             /* Only release if not already released. */
             if (str_ref->obj != NULL)
-                decrRefCount(str_ref->obj);
+                tryDeferFreeClientObject(c, DEFERRED_OBJECT_TYPE_ROBJ, str_ref->obj);
         } else {
             serverAssert(header->payload_type == PLAIN_REPLY);
         }
@@ -1922,7 +1923,7 @@ static void releaseBufReferences(char *buf, size_t bufpos) {
 /* Release all references to string objects in all encoded buffers */
 static void releaseAllBufReferences(client *c) {
     if (c->buf_encoded) {
-        releaseBufReferences(c->buf, c->bufpos);
+        releaseBufReferences(c, c->buf, c->bufpos);
     }
 
     listIter iter;
@@ -1931,7 +1932,7 @@ static void releaseAllBufReferences(client *c) {
     while ((next = listNext(&iter))) {
         clientReplyBlock *o = (clientReplyBlock *)listNodeValue(next);
         if (o->buf_encoded) {
-            releaseBufReferences(o->buf, o->used);
+            releaseBufReferences(c, o->buf, o->used);
         }
     }
 }
@@ -2289,8 +2290,9 @@ static void processEncodedBufferForWrite(ReplyIOV *reply_iov, char *start_ptr, c
 }
 
 /* Process sent data in the encoded buffer.
- * Returns pointer to the current payload header being processed, or NULL if all data is processed. */
-static payloadHeader *processSentDataInEncodedBuffer(char *start_ptr, char *end_ptr,
+ * Returns pointer to the current payload header being processed, or NULL if all data is processed.
+ * If client is provided and running in IO thread, defer the free to main thread. */
+static payloadHeader *processSentDataInEncodedBuffer(client *c, char *start_ptr, char *end_ptr,
                                                      size_t *sentlen, ssize_t *remaining)
 {
     char *ptr = start_ptr;
@@ -2316,7 +2318,7 @@ static payloadHeader *processSentDataInEncodedBuffer(char *start_ptr, char *end_
                 return head;
             }
             *remaining -= (writen_len - *sentlen);
-            decrRefCount(str_ref->obj);
+            tryDeferFreeClientObject(c, DEFERRED_OBJECT_TYPE_ROBJ, str_ref->obj);
             str_ref->obj = NULL; /* Mark as released to prevent double free */
             *sentlen = 0;
         }
@@ -2408,7 +2410,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
         } else {
             /* For encoded buffers */
             char *start_ptr = c->last_header ? (char *)c->last_header : c->buf;
-            c->last_header = processSentDataInEncodedBuffer(start_ptr, c->buf + c->bufpos, &c->sentlen, &remaining);
+            c->last_header = processSentDataInEncodedBuffer(c, start_ptr, c->buf + c->bufpos, &c->sentlen, &remaining);
             if (!c->last_header) { /* reach end */
                 c->bufpos = 0;
                 c->buf_encoded = 0;
@@ -2436,7 +2438,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
         } else {
             /* Encoded reply block */
             char *start_ptr = c->last_header ? (char *)c->last_header : o->buf;
-            c->last_header = processSentDataInEncodedBuffer(start_ptr, o->buf + o->used, &c->sentlen, &remaining);
+            c->last_header = processSentDataInEncodedBuffer(c, start_ptr, o->buf + o->used, &c->sentlen, &remaining);
             if (!c->last_header) { /* reach end */
                 /* Block fully consumed, remove it */
                 c->reply_bytes -= o->size;
@@ -5397,7 +5399,7 @@ static void reclaimPendingCommand(client *c, pendingCommand *pcmd) {
              * decrease the reference count to release our reference to it. */
             for (int j = 0; j < pcmd->argc; j++) {
                 robj *o = pcmd->argv[j];
-                if (o && robj_refcount(o) > 1) {
+                if (o && o->refcount > 1) {
                     decrRefCount(o);
                     pcmd->argv[j] = NULL;
                 }
