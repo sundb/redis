@@ -228,6 +228,7 @@ client *createClient(connection *conn) {
     c->auth_callback_privdata = NULL;
     c->auth_module = NULL;
     listInitNode(&c->clients_pending_write_node, c);
+    c->pending_ref_reply_node = NULL;
     c->mem_usage_bucket = NULL;
     c->mem_usage_bucket_node = NULL;
     c->net_input_bytes_curr_cmd = 0;
@@ -519,7 +520,7 @@ static void _addBulkStrRefToBufferOrList(client *c, robj *obj, size_t len) {
     str_ref.prefix[num_len + 2] = '\n';
     str_ref.prefix_cnt = num_len + 3;
     str_ref.crlf[0] = '\r';
-    str_ref.crlf[1] = '\n'; 
+    str_ref.crlf[1] = '\n';
 
     /* Track output bytes: bulk string prefix + content + trailing CRLF */
     c->net_output_bytes_curr_cmd += str_ref.prefix_cnt + len + 2;
@@ -530,6 +531,12 @@ static void _addBulkStrRefToBufferOrList(client *c, robj *obj, size_t len) {
 
     if (!_addBulkStrRefToBuffer(c, (void *)&str_ref, sizeof(str_ref))) {
         _addReplyPayloadToList(c, c->reply, (void *)&str_ref, sizeof(str_ref), BULK_STR_REF);
+    }
+
+    /* Track clients with pending referenced reply objects for async flushdb protection. */
+    if (c->pending_ref_reply_node == NULL) {
+        listAddNodeTail(server.clients_with_pending_ref_reply, c);
+        c->pending_ref_reply_node = listLast(server.clients_with_pending_ref_reply);
     }
 }
 
@@ -2145,6 +2152,12 @@ void freeClient(client *c) {
     if (c->mem_usage_bucket) {
         c->mem_usage_bucket->mem_usage_sum -= c->last_memory_usage;
         listDelNode(c->mem_usage_bucket->clients, c->mem_usage_bucket_node);
+    }
+
+    /* Remove from clients with pending ref reply list. */
+    if (c->pending_ref_reply_node) {
+        listDelNode(server.clients_with_pending_ref_reply, c->pending_ref_reply_node);
+        c->pending_ref_reply_node = NULL;
     }
 
     /* Release other dynamically allocated client structure fields,
