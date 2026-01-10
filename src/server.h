@@ -1575,6 +1575,9 @@ typedef struct client {
     unsigned long long commands_processed; /* Total count of commands this client executed. */
     struct asmTask *task;       /* Atomic slot migration task */
     char *node_id;              /* Node ID to connect to for atomic slot migration */
+    robj **io_deferred_free_objs;    /* Objects to be freed by main thread, queued by IO thread */
+    int io_deferred_free_objs_num;   /* Number of objects in io_deferred_free_objs */
+    int io_deferred_free_objs_size;  /* Allocated size of io_deferred_free_objs */
 } client;
 
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
@@ -3003,6 +3006,8 @@ void freeClientArgv(client *c);
 void freeClientPendingCommands(client *c, int num_pcmds_to_free);
 void tryDeferFreeClientObject(client *c, int type, void *ptr);
 void freeClientDeferredObjects(client *c, int free_array);
+void ioDeferFreeRobj(client *c, robj *obj);
+void freeIODeferredObjects(client *c);
 void sendReplyToClient(connection *conn);
 void *addReplyDeferredLen(client *c);
 void setDeferredArrayLen(client *c, void *node, long length);

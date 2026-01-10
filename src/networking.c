@@ -239,6 +239,9 @@ client *createClient(connection *conn) {
     c->commands_processed = 0;
     c->task = NULL;
     c->node_id = NULL;
+    c->io_deferred_free_objs = NULL;
+    c->io_deferred_free_objs_num = 0;
+    c->io_deferred_free_objs_size = 0;
     return c;
 }
 
@@ -1668,6 +1671,34 @@ void freeClientDeferredObjects(client *c, int free_array) {
     }
 }
 
+#define IO_DEFERRED_FREE_OBJS_INIT_SIZE 8
+
+/* Queue an robj to be freed by the main thread when client returns from IO thread.
+ * This is used in IO thread write path to avoid refcount race conditions. */
+void ioDeferFreeRobj(client *c, robj *obj) {
+    if (c->io_deferred_free_objs_num >= c->io_deferred_free_objs_size) {
+        int new_size = c->io_deferred_free_objs_size == 0
+            ? IO_DEFERRED_FREE_OBJS_INIT_SIZE
+            : c->io_deferred_free_objs_size * 2;
+        c->io_deferred_free_objs = zrealloc(c->io_deferred_free_objs, new_size * sizeof(robj *));
+        c->io_deferred_free_objs_size = new_size;
+    }
+    c->io_deferred_free_objs[c->io_deferred_free_objs_num++] = obj;
+}
+
+/* Free all objects queued by IO thread for deferred freeing.
+ * Called by main thread when client returns from IO thread. */
+void freeIODeferredObjects(client *c) {
+    for (int i = 0; i < c->io_deferred_free_objs_num; i++) {
+        robj *obj = c->io_deferred_free_objs[i];
+        if (obj->refcount == 1)
+            tryDeferFreeClientObject(c, DEFERRED_OBJECT_TYPE_ROBJ, obj);
+        else
+            decrRefCount(obj);
+    }
+    c->io_deferred_free_objs_num = 0;
+}
+
 void freeClientOriginalArgv(client *c) {
     /* We didn't rewrite this client */
     if (!c->original_argv) return;
@@ -1900,8 +1931,9 @@ static void resetReusableQueryBuf(client *c) {
 }
 
 /* Release references to string objects inside an encoded buffer.
- * If client is provided and running in IO thread, defer the free to main thread. */
+ * If running in IO thread, defer the free to main thread via io_deferred_free_objs. */
 static void releaseBufReferences(client *c, char *buf, size_t bufpos) {
+    int in_io_thread = (c && c->running_tid != IOTHREAD_MAIN_THREAD_ID);
     char *ptr = buf;
     while (ptr < buf + bufpos) {
         payloadHeader *header = (payloadHeader *)ptr;
@@ -1910,8 +1942,13 @@ static void releaseBufReferences(client *c, char *buf, size_t bufpos) {
         if (header->payload_type == BULK_STR_REF) {
             bulkStrRef *str_ref = (bulkStrRef *)ptr;
             /* Only release if not already released. */
-            if (str_ref->obj != NULL)
-                tryDeferFreeClientObject(c, DEFERRED_OBJECT_TYPE_ROBJ, str_ref->obj);
+            if (str_ref->obj != NULL) {
+                if (in_io_thread) {
+                    ioDeferFreeRobj(c, str_ref->obj);
+                } else {
+                    decrRefCount(str_ref->obj);
+                }
+            }
         } else {
             serverAssert(header->payload_type == PLAIN_REPLY);
         }
@@ -2115,6 +2152,8 @@ void freeClient(client *c) {
     if (c->name) decrRefCount(c->name);
     if (c->lib_name) decrRefCount(c->lib_name);
     if (c->lib_ver) decrRefCount(c->lib_ver);
+    freeIODeferredObjects(c);
+    zfree(c->io_deferred_free_objs);
     serverAssert(c->all_argv_len_sum == 0);
     sdsfree(c->peerid);
     sdsfree(c->sockname);
@@ -2291,10 +2330,11 @@ static void processEncodedBufferForWrite(ReplyIOV *reply_iov, char *start_ptr, c
 
 /* Process sent data in the encoded buffer.
  * Returns pointer to the current payload header being processed, or NULL if all data is processed.
- * If client is provided and running in IO thread, defer the free to main thread. */
+ * If running in IO thread, defer the free to main thread via io_deferred_free_objs. */
 static payloadHeader *processSentDataInEncodedBuffer(client *c, char *start_ptr, char *end_ptr,
                                                      size_t *sentlen, ssize_t *remaining)
 {
+    int in_io_thread = (c && c->running_tid != IOTHREAD_MAIN_THREAD_ID);
     char *ptr = start_ptr;
     while (ptr < end_ptr && *remaining > 0) {
         payloadHeader *head = (payloadHeader *)ptr;
@@ -2318,7 +2358,11 @@ static payloadHeader *processSentDataInEncodedBuffer(client *c, char *start_ptr,
                 return head;
             }
             *remaining -= (writen_len - *sentlen);
-            tryDeferFreeClientObject(c, DEFERRED_OBJECT_TYPE_ROBJ, str_ref->obj);
+            if (in_io_thread) {
+                ioDeferFreeRobj(c, str_ref->obj);
+            } else {
+                decrRefCount(str_ref->obj);
+            }
             str_ref->obj = NULL; /* Mark as released to prevent double free */
             *sentlen = 0;
         }
