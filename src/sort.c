@@ -467,7 +467,7 @@ void sortCommandGeneric(client *c, int readonly) {
 
         while(rangelen--) {
             serverAssertWithInfo(c,sortval,ln != NULL);
-            sdsele = ln->ele;
+            sdsele = zslGetNodeElement(ln);
             vector[j].obj = createStringObject(sdsele,sdslen(sdsele));
             vector[j].u.score = 0;
             vector[j].u.cmpobj = NULL;
@@ -487,7 +487,7 @@ void sortCommandGeneric(client *c, int readonly) {
             oldsize = zsetAllocSize(sortval);
         dictInitIterator(&di, set);
         while((setele = dictNext(&di)) != NULL) {
-            sdsele =  dictGetKey(setele);
+            sdsele = zslGetNodeElement(dictGetKey(setele));
             vector[j].obj = createStringObject(sdsele,sdslen(sdsele));
             vector[j].u.score = 0;
             vector[j].u.cmpobj = NULL;
@@ -632,7 +632,7 @@ void sortCommandGeneric(client *c, int readonly) {
             /* Ownership of sobj transferred to the db. No need to free it. */
         } else {
             if (dbDelete(c->db, storekey)) {
-                signalModifiedKey(c, c->db, storekey);
+                keyModified(c, c->db, storekey, NULL, 1);
                 notifyKeyspaceEvent(NOTIFY_GENERIC, "del", storekey, c->db->id);
                 server.dirty++;
             }

@@ -24,6 +24,7 @@
 #include <signal.h>
 #include <ctype.h>
 #include "bio.h"
+#include "keymeta.h"
 
 /*-----------------------------------------------------------------------------
  * C-level DB API
@@ -35,12 +36,14 @@ static_assert(MAX_KEYSIZES_TYPES == OBJ_TYPE_BASIC_MAX, "Must be equal");
 #define EXPIRE_FORCE_DELETE_EXPIRED 1
 #define EXPIRE_AVOID_DELETE_EXPIRED 2
 #define EXPIRE_ALLOW_ACCESS_EXPIRED 4
+#define EXPIRE_ALLOW_ACCESS_TRIMMED 8
 
 /* Return values for expireIfNeeded */
 typedef enum {
     KEY_VALID = 0, /* Could be volatile and not yet expired, non-volatile, or even non-existing key. */
     KEY_EXPIRED, /* Logically expired but not yet deleted. */
-    KEY_DELETED /* The key was deleted now. */
+    KEY_DELETED, /* The key was deleted now. */
+    KEY_TRIMMED  /* Logically trimmed but not yet deleted. */
 } keyStatus;
 
 static keyStatus expireIfNeeded(redisDb *db, robj *key, kvobj *kv, int flags);
@@ -52,6 +55,15 @@ void updateLFU(robj *val) {
     unsigned long counter = LFUDecrAndReturn(val);
     counter = LFULogIncr(counter);
     val->lru = (LFUGetTimeInMinutes()<<8) | counter;
+}
+
+/* Update LRM when an object is modified. */
+void updateLRM(robj *o) {
+    if (o->refcount == OBJ_SHARED_REFCOUNT)
+        return;
+    if (server.maxmemory_policy & MAXMEMORY_FLAG_LRM) {
+        o->lru = LRU_CLOCK();
+    }
 }
 
 /* 
@@ -256,6 +268,8 @@ kvobj *lookupKey(redisDb *db, robj *key, int flags, dictEntryLink *link) {
             expire_flags |= EXPIRE_AVOID_DELETE_EXPIRED;
         if (flags & LOOKUP_ACCESS_EXPIRED)
             expire_flags |= EXPIRE_ALLOW_ACCESS_EXPIRED;
+        if (flags & LOOKUP_ACCESS_TRIMMED)
+            expire_flags |= EXPIRE_ALLOW_ACCESS_TRIMMED;
         if (expireIfNeeded(db, key, val, expire_flags) != KEY_VALID) {
             /* The key is no longer valid. */
             val = NULL;
@@ -274,7 +288,8 @@ kvobj *lookupKey(redisDb *db, robj *key, int flags, dictEntryLink *link) {
         if (!hasActiveChildProcess() && !(flags & LOOKUP_NOTOUCH)){
             if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
                 updateLFU(val);
-            } else {
+            } else if (!(server.maxmemory_policy & MAXMEMORY_FLAG_LRM)) {
+                /* LRM policy should NOT update timestamp on reads. */
                 val->lru = LRU_CLOCK();
             }
         }
@@ -366,20 +381,36 @@ kvobj *lookupKeyWriteOrReply(client *c, robj *key, robj *reply) {
  * link - Optional link to bucket where the key should be added.
  *          On return, get updated, by need, to the inserted key.
  *          
- * expire - Set expiry of the key. -1 for no expiry.
+ * keymeta - Defines metadata to be attached to the key. Including optional 
+ *           expiration and modules metadata to be copied (REQUIRED).
  */
-kvobj *dbAddInternal(redisDb *db, robj *key, robj **valref, dictEntryLink *link, long long expire) {
+kvobj *dbAddInternal(redisDb *db, robj *key, robj **valref, dictEntryLink *link, 
+                     const KeyMetaSpec *keymeta) 
+{
     int slot = getKeySlot(key->ptr);
     dictEntryLink tmp = NULL;
     if (link == NULL) link = &tmp;
     robj *val = *valref;
-    int hasExpire = expire != -1;
-    kvobj *kv = kvobjSet(key->ptr, val, hasExpire);
+    kvobj *kv = kvobjSet(key->ptr, val, keymeta->metabits);
     initObjectLRUOrLFU(kv);
     kvstoreDictSetAtLink(db->keys, slot, kv, link, 1);
-
-    /* Add to expires. Leverage setExpireByLink() to reuse the key link. */
-    if (hasExpire) kv = setExpireByLink(NULL, db, key->ptr, expire, *link);
+    
+    /* Handle metadata (expiration and modules metadata) */
+    if (keymeta->metabits) {
+        if (keymeta->metabits & KEY_META_MASK_EXPIRE) {
+            /* Expiry is always the first meta (from last) */
+            long long expire = keymeta->meta[KEY_META_ID_MAX - 1];
+            kvobj *newkv = setExpireByLink(NULL, db, key->ptr, expire, *link);
+            serverAssert(newkv == kv);
+        }
+        
+        /* memcpy modules metadata to beginning of kvobj */
+        if (keymeta->metabits & KEY_META_MASK_MODULES)
+            /* Also trivial overwrite expire */
+            memcpy(kvobjGetAllocPtr(kv), 
+                   keymeta->meta + KEY_META_ID_MAX - keymeta->numMeta, 
+                   keymeta->numMeta * sizeof(uint64_t));
+    }
 
     signalKeyAsReady(db, key, kv->type);
     notifyKeyspaceEvent(NOTIFY_NEW,"new",key,db->id);
@@ -392,11 +423,15 @@ kvobj *dbAddInternal(redisDb *db, robj *key, robj **valref, dictEntryLink *link,
 
 /* Read dbAddInternal() comment */
 kvobj *dbAdd(redisDb *db, robj *key, robj **valref) {
-    return dbAddInternal(db, key, valref, NULL, -1);
+    KeyMetaSpec keyMetaEmpty; /* No metadata added */
+    keyMetaSpecInit(&keyMetaEmpty);
+    return dbAddInternal(db, key, valref, NULL, &keyMetaEmpty);
 }
 
 kvobj *dbAddByLink(redisDb *db, robj *key, robj **valref, dictEntryLink *link) {
-    return dbAddInternal(db, key, valref, link, -1);
+    KeyMetaSpec keyMetaEmpty; /* No metadata added */
+    keyMetaSpecInit(&keyMetaEmpty);
+    return dbAddInternal(db, key, valref, link, &keyMetaEmpty);
 }
 
 /* Returns key's hash slot when cluster mode is enabled, or 0 when disabled.
@@ -451,7 +486,7 @@ int getSlotFromCommand(struct redisCommand *cmd, robj **argv, int argc) {
  *
  * If added to db, returns pointer to the object, Otherwise NULL is returned.
  */
-kvobj *dbAddRDBLoad(redisDb *db, sds key, robj **valref, long long expire) {
+kvobj *dbAddRDBLoad(redisDb *db, sds key, robj **valref, const KeyMetaSpec *keyMetaSpec) {
     /* Add new kvobj to the db. */
     int slot = getKeySlot(key);
 
@@ -462,14 +497,27 @@ kvobj *dbAddRDBLoad(redisDb *db, sds key, robj **valref, long long expire) {
     if (link != NULL)
         return NULL;
 
-    /* prepare kvobj for insertion. Pass expire to reserve space for it */
-    kvobj *kv = kvobjSet(key, *valref, expire != -1);
+    /* Create kvobj with metadata bits from KeyMetaSpec */
+    robj *val = *valref;
+    kvobj *kv = kvobjSet(key, val, keyMetaSpec->metabits);
     initObjectLRUOrLFU(kv);
     kvstoreDictSetAtLink(db->keys, slot, kv, &bucket, 1);
 
-    /* Set the expire time if needed */
-    if (expire != -1)
-        kv = setExpireByLink(NULL, db, key, expire, bucket);
+    /* Handle metadata (expiration and modules metadata) */
+    if (keyMetaSpec->metabits) {
+        if (keyMetaSpec->metabits & KEY_META_MASK_EXPIRE) {
+            /* Expiry is always the first meta (from last) */
+            long long expire = keyMetaSpec->meta[KEY_META_ID_MAX - 1];
+            kvobj *newkv = setExpireByLink(NULL, db, key, expire, bucket);
+            serverAssert(newkv == kv);
+        }
+
+        /* memcpy modules metadata to beginning of kvobj */
+        if (keyMetaSpec->metabits & KEY_META_MASK_MODULES)
+            memcpy(kvobjGetAllocPtr(kv),
+                   keyMetaSpec->meta + KEY_META_ID_MAX - keyMetaSpec->numMeta,
+                   keyMetaSpec->numMeta * sizeof(uint64_t));
+    }
 
     updateKeysizesHist(db, slot, kv->type, -1, (int64_t) getObjectLength(kv));
     if (server.memory_tracking_per_slot)
@@ -497,6 +545,7 @@ kvobj *dbAddRDBLoad(redisDb *db, sds key, robj **valref, long long expire) {
  */
 static void dbSetValue(redisDb *db, robj *key, robj **valref, dictEntryLink link, 
                        int overwrite, int updateKeySizes, int keepTTL) {
+    int freeModuleMeta = 0;
     robj *val = *valref;
     int slot = getKeySlot(key->ptr);
     size_t oldsize = 0;
@@ -515,10 +564,27 @@ static void dbSetValue(redisDb *db, robj *key, robj **valref, dictEntryLink link
     if (old->type == OBJ_HASH)
         estoreRemove(db->subexpires, slot, old);
 
+    long long oldExpire = getExpire(db, key->ptr, old);
+
+    /* All metadata will be kept if not `overwrite` for the new object  */
+    uint32_t newKeyMetaBits = old->metabits;
+    /* clear expire if not keepTTL or no old expire */
+    if ((!keepTTL) || (oldExpire == -1))
+        newKeyMetaBits &= ~KEY_META_MASK_EXPIRE; 
+
     if (overwrite) {
+        /* On overwrite, discard module metadata excluding expire if set */
+        newKeyMetaBits &= KEY_META_MASK_EXPIRE;
         /* RM_StringDMA may call dbUnshareStringValue which may free val, so we
          * need to incr to retain old */
         incrRefCount(old);
+
+        /* Free related metadata. Ignore builtin metadata (currently only expire) */
+        if (getModuleMetaBits(old->metabits)) {
+            keyMetaOnUnlink(db, key, old);
+            freeModuleMeta = 1;
+        }
+
         /* Although the key is not really deleted from the database, we regard
          * overwrite as two steps of unlink+add, so we still need to call the unlink
          * callback of the module. */
@@ -533,7 +599,8 @@ static void dbSetValue(redisDb *db, robj *key, robj **valref, dictEntryLink link
         oldsize = kvobjAllocSize(old);
 
     if ((old->refcount == 1 && old->encoding != OBJ_ENCODING_EMBSTR) &&
-        (val->refcount == 1 && val->encoding != OBJ_ENCODING_EMBSTR)) {
+        (val->refcount == 1 && val->encoding != OBJ_ENCODING_EMBSTR) && (!freeModuleMeta))
+    {
         /* Keep old object in the database. Just swap it's ptr, type and
          * encoding with the content of val. */
         robj tmp = *old;
@@ -548,21 +615,19 @@ static void dbSetValue(redisDb *db, robj *key, robj **valref, dictEntryLink link
         old = val;
 
         /* Handle TTL in the optimization path */
-        if ((!keepTTL) && (getExpire(db, key->ptr, kvNew) >= 0))
+        if ((!keepTTL) && (oldExpire >= 0))
             removeExpire(db, key);
     } else {
         /* Replace the old value at its location in the key space. */
         val->lru = old->lru;
-        /* Update expire reference if needed */
-        long long expire = getExpire(db, key->ptr, old);
-        int hasExpire = keepTTL && (expire != -1);
-        kvNew = kvobjSet(key->ptr, val, hasExpire);
+        
+        kvNew = kvobjSet(key->ptr, val, newKeyMetaBits);
         kvstoreDictSetAtLink(db->keys, slot, kvNew, &link, 0);
 
-        /* Replace the old value at its location in the expire space. */
-        if (expire >= 0) {
+        /* if expiry replace the old value at its location in the expire space. */
+        if (oldExpire != -1) {
             if (keepTTL) {
-                kvobjSetExpire(kvNew, expire); /* kvNew not reallocated here */
+                kvobjSetExpire(kvNew, oldExpire); /* kvNew not reallocated here */
                 dictEntryLink exLink = kvstoreDictFindLink(db->expires, slot,
                                                            key->ptr, NULL);
                 serverAssertWithInfo(NULL, key, exLink != NULL);
@@ -571,6 +636,9 @@ static void dbSetValue(redisDb *db, robj *key, robj **valref, dictEntryLink link
                 kvstoreDictDelete(db->expires, slot, key->ptr);
             }
         }
+
+        if (newKeyMetaBits & KEY_META_MASK_MODULES)
+            keyMetaTransition(old, kvNew);
     }
 
     /* Remove old key and add new key to KEYSIZES histogram */
@@ -678,8 +746,8 @@ void setKeyByLink(client *c, redisDb *db, robj *key, robj **valref, int flags, d
         dbAddByLink(db, key, valref, link);
     }
 
-    if (!(flags & SETKEY_NO_SIGNAL))
-        signalModifiedKey(c,db,key);
+    /* Signal key modification and update LRM timestamp. */
+    keyModified(c,db,key,*valref,!(flags & SETKEY_NO_SIGNAL));
 }
 
 /* During atomic slot migration, keys that are being imported are in an
@@ -753,6 +821,8 @@ int dbGenericDelete(redisDb *db, robj *key, int async, int flags) {
         /* RM_StringDMA may call dbUnshareStringValue which may free kv, so we
          * need to incr to retain kv */
         incrRefCount(kv); /* refcnt=1->2 */
+        /* Metadata hook: notify unlink for key metadata cleanup. */
+        if (getModuleMetaBits(kv->metabits)) keyMetaOnUnlink(db, key, kv);
         /* Tells the module that the key has been unlinked from the database. */
         moduleNotifyKeyUnlink(key, kv, db->id, flags);
         /* We want to try to unblock any module clients or clients using a blocking XREADGROUP */
@@ -1012,16 +1082,27 @@ long long dbTotalServerKeyCount(void) {
  * Hooks for key space changes.
  *
  * Every time a key in the database is modified the function
- * signalModifiedKey() is called.
+ * keyModified() is called.
  *
  * Every time a DB is flushed the function signalFlushDb() is called.
  *----------------------------------------------------------------------------*/
 
-/* Note that the 'c' argument may be NULL if the key was modified out of
- * a context of a client. */
-void signalModifiedKey(client *c, redisDb *db, robj *key) {
-    touchWatchedKey(db,key);
-    trackingInvalidateKey(c,key,1);
+/* Called when a key is modified to update LRM timestamp
+ * and optionally signal watchers/tracking clients.
+ *
+ * Arguments:
+ * - c: client (may be NULL if the key was modified out of a context of a client)
+ * - db: database containing the key
+ * - key: the key that was modified
+ * - val: the value object (if NULL, LRM won't be updated, e.g., for deleted keys)
+ * - signal: if true, trigger WATCH and client-side tracking invalidation
+ */
+void keyModified(client *c, redisDb *db, robj *key, robj *val, int signal) {
+    if (val) updateLRM(val);
+    if (signal) {
+        touchWatchedKey(db,key);
+        trackingInvalidateKey(c,key,1);
+    }
 }
 
 void signalFlushedDb(int dbid, int async, slotRangeArray *slots) {
@@ -1242,7 +1323,7 @@ void delGenericCommand(client *c, int lazy) {
         int deleted  = lazy ? dbAsyncDelete(c->db,c->argv[j]) :
                               dbSyncDelete(c->db,c->argv[j]);
         if (deleted) {
-            signalModifiedKey(c,c->db,c->argv[j]);
+            keyModified(c,c->db,c->argv[j],NULL,1);
             notifyKeyspaceEvent(NOTIFY_GENERIC,
                 "del",c->argv[j],c->db->id);
             server.dirty++;
@@ -1342,7 +1423,7 @@ void delexCommand(client *c) {
 
     if (deleted) {
         rewriteClientCommandVector(c, 2, shared.del, key);
-        signalModifiedKey(c, c->db, key);
+        keyModified(c, c->db, key, NULL, 1);
         notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, c->db->id);
         server.dirty++;
     }
@@ -1458,7 +1539,6 @@ typedef struct {
     sds pattern;  /* pattern string, NULL means no pattern */
     long sampled; /* cumulative number of keys sampled */
     int no_values; /* set to 1 means to return keys only */
-    size_t (*strlen)(char *s); /* (o->type == OBJ_HASH) ? hfieldlen : sdslen */
     sds typename; /* typename string, NULL means no type filter */
     redisDb *db;  /* database reference for expiration checks */
 } scanData;
@@ -1472,7 +1552,8 @@ int objectTypeCompare(robj *o, long long target) {
             return 1;
     }
     /* module type compare */
-    long long mt = (long long)REDISMODULE_TYPE_SIGN(((moduleValue *)o->ptr)->type->id);
+    moduleType *type = ((moduleValue *)o->ptr)->type;
+    long long mt = (long long)REDISMODULE_TYPE_SIGN(type->entity.id);
     if (target != -mt)
         return 0;
     else 
@@ -1482,6 +1563,7 @@ int objectTypeCompare(robj *o, long long target) {
  * returned by the dictionary iterator into a list. */
 void scanCallback(void *privdata, const dictEntry *de, dictEntryLink plink) {
     UNUSED(plink);
+    Entry *hashEntry = NULL;
     scanData *data = (scanData *)privdata;
     list *keys = data->keys;
     robj *o = data->o;
@@ -1494,16 +1576,23 @@ void scanCallback(void *privdata, const dictEntry *de, dictEntryLink plink) {
     serverAssert(!((data->type != LLONG_MAX) && o));
 
     kvobj *kv = NULL;
+    zskiplistNode *znode = NULL;
     if (!o) { /* If scanning keyspace */
         kv = dictGetKV(de);
         keyStr = kvobjGetKey(kv);
+    } else if (o->type == OBJ_HASH) {
+        hashEntry = dictGetKey(de);
+        keyStr = entryGetField(hashEntry);
+    } else if (o->type == OBJ_ZSET) {
+        znode = dictGetKey(de);
+        keyStr = zslGetNodeElement(znode);
     } else {
         keyStr = dictGetKey(de);
     }
     
     /* Filter element if it does not match the pattern. */
     if (data->pattern) {
-        if (!stringmatchlen(data->pattern, sdslen(data->pattern), keyStr, data->strlen(keyStr), 0)) {
+        if (!stringmatchlen(data->pattern, sdslen(data->pattern), keyStr, sdslen(keyStr), 0)) {
             return;
         }
     }
@@ -1531,15 +1620,15 @@ void scanCallback(void *privdata, const dictEntry *de, dictEntryLink plink) {
         key = keyStr;
     } else if (o->type == OBJ_HASH) {
         key = keyStr;
-        val = dictGetVal(de);
+        val = entryGetValue(hashEntry);
 
         /* If field is expired, then ignore */
-        if (hfieldIsExpired(key))
+        if (entryIsExpired(hashEntry))
             return;
 
     } else if (o->type == OBJ_ZSET) {
         char buf[MAX_LONG_DOUBLE_CHARS];
-        int len = ld2string(buf, sizeof(buf), *(double *)dictGetVal(de), LD_STR_AUTO);
+        int len = ld2string(buf, sizeof(buf), znode->score, LD_STR_AUTO);
         key = sdsdup(keyStr);
         val = sdsnewlen(buf, len);
     } else {
@@ -1582,7 +1671,7 @@ long long getObjectTypeByName(char *name) {
     }
 
     moduleType *mt = moduleTypeLookupModuleByNameIgnoreCase(name);
-    if (mt != NULL) return -(REDISMODULE_TYPE_SIGN(mt->id));
+    if (mt != NULL) return -(REDISMODULE_TYPE_SIGN(mt->entity.id));
 
     return LLONG_MAX;
 }
@@ -1596,7 +1685,7 @@ char *getObjectTypeName(robj *o) {
 
     if (o->type == OBJ_MODULE) {
         moduleValue *mv = o->ptr;
-        return mv->type->name;
+        return mv->type->entity.name;
     } else {
         return obj_type_name[o->type];
     }
@@ -1619,7 +1708,6 @@ static int scanShouldSkipDict(dict *d, int didx) {
  * In the case of a Hash object the function returns both the field and value
  * of every element on the Hash. */
 void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
-    int isKeysHfield = 0;
     int i, j;
     listNode *node;
     long count = 10;
@@ -1700,7 +1788,6 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
     } else if (o->type == OBJ_SET && o->encoding == OBJ_ENCODING_HT) {
         ht = o->ptr;
     } else if (o->type == OBJ_HASH && o->encoding == OBJ_ENCODING_HT) {
-        isKeysHfield = 1;
         ht = o->ptr;
     } else if (o->type == OBJ_ZSET && o->encoding == OBJ_ENCODING_SKIPLIST) {
         zset *zs = o->ptr;
@@ -1748,7 +1835,6 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
             .pattern = use_pattern ? pat : NULL,
             .sampled = 0,
             .no_values = no_values,
-            .strlen = (isKeysHfield) ? hfieldlen : sdslen,
             .typename = typename,
             .db = c->db,
         };
@@ -1913,14 +1999,10 @@ void scanGenericCommand(client *c, robj *o, unsigned long long cursor) {
     addReplyArrayLen(c, 2);
     addReplyBulkLongLong(c,cursor);
 
-    unsigned long long idx = 0;
     addReplyArrayLen(c, listLength(keys));
     while ((node = listFirst(keys)) != NULL) {
         void *key = listNodeValue(node);
-        /* For HSCAN, list will contain keys value pairs unless no_values arg
-         * was given. We should call mstrlen for the keys only. */
-        int hfieldkey = isKeysHfield && (no_values || (idx++ % 2 == 0));
-        addReplyBulkCBuffer(c, key, hfieldkey ? mstrlen(key) : sdslen(key));
+        addReplyBulkCBuffer(c, key, sdslen(key));
         listDelNode(keys, node);
     }
 
@@ -2010,7 +2092,6 @@ void shutdownCommand(client *c) {
 
 void renameGenericCommand(client *c, int nx) {
     kvobj *o;
-    long long expire;
     int samekey = 0;
     uint64_t minHashExpireTime = EB_EXPIRE_TIME_INVALID;
 
@@ -2027,7 +2108,6 @@ void renameGenericCommand(client *c, int nx) {
     }
 
     incrRefCount(o);
-    expire = kvobjGetExpire(o);
     kvobj *destval = lookupKeyWrite(c->db,c->argv[2]);
     int overwritten = 0;
     int desttype = -1;
@@ -2052,15 +2132,21 @@ void renameGenericCommand(client *c, int nx) {
     if (srctype == OBJ_HASH)
         minHashExpireTime = estoreRemove(c->db->subexpires, getKeySlot(c->argv[1]->ptr), o);
 
+    /* Prepare metadata for the renamed key */
+    KeyMetaSpec keymeta;
+    keyMetaSpecInit(&keymeta);
+    if (o->metabits) keyMetaOnRename(c->db, o, c->argv[1], c->argv[2], &keymeta);
+
     dbDelete(c->db,c->argv[1]);
-    dbAddInternal(c->db, c->argv[2], &o, NULL, expire);
+    
+    dbAddInternal(c->db, c->argv[2], &o, NULL, &keymeta);
 
     /* If hash with HFEs, register in DB subexpires */
     if (minHashExpireTime != EB_EXPIRE_TIME_INVALID)
         estoreAdd(c->db->subexpires, getKeySlot(c->argv[2]->ptr), o, minHashExpireTime);
 
-    signalModifiedKey(c,c->db,c->argv[1]);
-    signalModifiedKey(c,c->db,c->argv[2]);
+    keyModified(c,c->db,c->argv[1],NULL,1);
+    keyModified(c,c->db,c->argv[2],NULL,1); /* LRM already updated by dbAddInternal */
     notifyKeyspaceEvent(NOTIFY_GENERIC,"rename_from",
         c->argv[1],c->db->id);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"rename_to",
@@ -2085,7 +2171,6 @@ void renamenxCommand(client *c) {
 void moveCommand(client *c) {
     redisDb *src, *dst;
     int srcid, dbid;
-    long long expire;
     uint64_t hashExpireTime = EB_EXPIRE_TIME_INVALID;
 
     if (server.cluster_enabled) {
@@ -2123,7 +2208,6 @@ void moveCommand(client *c) {
         addReply(c,shared.czero);
         return;
     }
-    expire = kvobjGetExpire(kv);
 
     /* Return zero if the key already exists in the target DB */
     dictEntryLink dstBucket;
@@ -2139,21 +2223,24 @@ void moveCommand(client *c) {
      * object since it embeds ExpireMeta that is used by subexpires */
     if (kv->type == OBJ_HASH)
         hashExpireTime = estoreRemove(src->subexpires, slot, kv);
+    
+    /* Move a side metadata before dbDelete() */
+    KeyMetaSpec keymeta;
+    keyMetaSpecInit(&keymeta);
+    keyMetaOnMove(kv, c->argv[1], srcid, dbid, &keymeta);
 
     incrRefCount(kv);            /* ref counter = 1->2 */
     dbDelete(src,c->argv[1]);    /* ref counter = 2->1 */
 
-    dbAddByLink(dst, c->argv[1], &kv, &dstBucket);
-    if (expire != -1)
-        kv = setExpireByLink(c, dst, c->argv[1]->ptr, expire, dstBucket);
+    dbAddInternal(dst, c->argv[1], &kv, &dstBucket, &keymeta);
 
     /* If object of type hash with expiration on fields. Taken care to add the
      * hash to subexpires of `dst` only after dbDelete(). */
     if (hashExpireTime != EB_EXPIRE_TIME_INVALID)
         estoreAdd(dst->subexpires, slot, kv, hashExpireTime);
 
-    signalModifiedKey(c,src,c->argv[1]);
-    signalModifiedKey(c,dst,c->argv[1]);
+    keyModified(c,src,c->argv[1],NULL,1);
+    keyModified(c,dst,c->argv[1],NULL,1); /* LRM already updated by dbAddInternal */
     notifyKeyspaceEvent(NOTIFY_GENERIC,
                 "move_from",c->argv[1],src->id);
     notifyKeyspaceEvent(NOTIFY_GENERIC,
@@ -2167,7 +2254,6 @@ void copyCommand(client *c) {
     kvobj *o;
     redisDb *src, *dst;
     int srcid, dbid;
-    long long expire;
     int j, replace = 0, delete = 0;
 
     /* Obtain source and target DB pointers 
@@ -2223,7 +2309,6 @@ void copyCommand(client *c) {
         addReply(c,shared.czero);
         return;
     }
-    expire = kvobjGetExpire(o);
 
     /* Return zero if the key already exists in the target DB. 
      * If REPLACE option is selected, delete newkey from targetDB. */
@@ -2262,15 +2347,20 @@ void copyCommand(client *c) {
         dbDelete(dst,newkey);
     }
 
-    kvobj *kvCopy = dbAddInternal(dst, newkey, &newobj, NULL, expire);
+    /* Prepare metadata for the new key */
+    KeyMetaSpec keymeta;
+    keyMetaSpecInit(&keymeta);
+    if (o->metabits) keyMetaOnCopy(o, key, newkey, c->db->id, dst->id, &keymeta);
+
+    kvobj *kvCopy = dbAddInternal(dst, newkey, &newobj, NULL, &keymeta);
 
     /* If minExpiredField was set, then the object is hash with expiration
      * on fields and need to register it in global HFE DS */
     if (minHashExpire != EB_EXPIRE_TIME_INVALID)
         estoreAdd(dst->subexpires, getKeySlot(newkey->ptr), kvCopy, minHashExpire);
 
-    /* OK! key copied */
-    signalModifiedKey(c,dst,c->argv[2]);
+    /* OK! key copied. Signal modification (LRM already updated by dbAddInternal) */
+    keyModified(c,dst,c->argv[2],NULL,1);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"copy_to",c->argv[2],dst->id);
 
     /* `delete` implies the destination key was overwritten */
@@ -2588,7 +2678,7 @@ static void deleteKeyAndPropagate(redisDb *db, robj *keyobj, int notify_type, lo
      * we are freeing removing the key, but we can't account for
      * that otherwise we would never exit the loop.
      *
-     * Same for CSC invalidation messages generated by signalModifiedKey.
+     * Same for CSC invalidation messages generated by keyModified.
      *
      * AOF and Output buffer memory will be freed eventually so
      * we only care about memory used by the key space.
@@ -2605,7 +2695,7 @@ static void deleteKeyAndPropagate(redisDb *db, robj *keyobj, int notify_type, lo
     if (key_mem_freed) *key_mem_freed -= (long long) zmalloc_used_memory() - freeMemoryGetNotCountedMemory();
 
     notifyKeyspaceEvent(notify_type, notify_name,keyobj, db->id);
-    signalModifiedKey(NULL, db, keyobj);
+    keyModified(NULL, db, keyobj, NULL, 1);
     propagateDeletion(db, keyobj, lazy_flag);
 
     if (notify_type == NOTIFY_EXPIRED)
@@ -2721,7 +2811,9 @@ int confAllowsExpireDel(void) {
  *
  * The return value of the function is KEY_VALID if the key is still valid.
  * The function returns KEY_EXPIRED if the key is expired BUT not deleted,
- * or returns KEY_DELETED if the key is expired and deleted.
+ * or returns KEY_DELETED if the key is expired and deleted. If the key is in a
+ * trim job due to slot migration, the function returns KEY_TRIMMED, unless
+ * EXPIRE_ALLOW_ACCESS_TRIMMED is set, in which case it returns KEY_VALID.
  *
  * You can optionally pass `kv` to save a lookup.
  */
@@ -2729,9 +2821,15 @@ keyStatus expireIfNeeded(redisDb *db, robj *key, kvobj *kv, int flags) {
     debugAssert(key != NULL || kv != NULL);
 
     /* NOTE: Keys in slots scheduled for trimming can still exist for a while.
-     * If a module touches one of these keys, we remove it right away and
-     * return KEY_DELETED. */
-    if (asmActiveTrimDelIfNeeded(db, key, kv)) return KEY_DELETED;
+     * We don't delete it here, return KEY_VALID if allowing access to trimmed
+     * keys, and return KEY_TRIMMED otherwise. */
+    sds key_name = key ? key->ptr : kvobjGetKey(kv);
+    if (asmIsKeyInTrimJob(key_name)) {
+        if (server.allow_access_trimmed || (flags & EXPIRE_ALLOW_ACCESS_TRIMMED))
+            return KEY_VALID;
+
+        return KEY_TRIMMED;
+    }
 
     if ((flags & EXPIRE_ALLOW_ACCESS_EXPIRED) ||
         (!keyIsExpired(db,  key ? key->ptr : NULL, kv)))
@@ -3006,7 +3104,7 @@ int getKeysUsingKeySpecs(struct redisCommand *cmd, robj **argv, int argc, int se
             }
 
             first += spec->fk.keynum.firstkey;
-            last = first + (long)numkeys-1;
+            last = first + ((long)numkeys - 1) * step;
         } else {
             /* unknown spec */
             goto invalid_spec;
