@@ -183,8 +183,6 @@ void keepClientInMainThread(client *c) {
     c->io_flags |= CLIENT_IO_READ_ENABLED | CLIENT_IO_WRITE_ENABLED;
     c->tid = IOTHREAD_MAIN_THREAD_ID;
     freeClientDeferredObjects(c, 1); /* Free deferred objects. */
-    freeClientIODeferredObjects(c, 1); /* Free IO deferred objects. */
-    tryUnlinkClientFromPendingRefReply(c, 0);
     /* Main thread starts to manage it. */
     server.io_threads_clients_num[c->tid]++;
 }
@@ -585,10 +583,6 @@ int processClientsFromIOThread(IOThread *t) {
 
         /* Let main thread to run it, set running thread id first. */
         c->running_tid = IOTHREAD_MAIN_THREAD_ID;
-
-        /* Free objects queued by IO thread for deferred freeing. */
-        freeClientIODeferredObjects(c, 0);
-        tryUnlinkClientFromPendingRefReply(c, 0);
 
         /* If a read error occurs, handle it in the main thread first, since we
          * want to print logs about client information before freeing. */

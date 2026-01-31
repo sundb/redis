@@ -25,7 +25,7 @@
 /* Map a metadata ID (bit index) to its compacted slot number among set bits,
  * then return a pointer to that slot. Caller must ensure the ID bit is set. */
 uint64_t *kvobjMetaRef(kvobj *kv, int metaId) {
-    uint32_t bits = kv->metabits;
+    uint32_t bits = robj_get_metabits(kv);
 
     /* Expiry is always the first metadata */
     if (likely(metaId == 0)) return ((uint64_t *)kv) - 1;
@@ -86,10 +86,8 @@ kvobj *kvobjCreate(int type, const sds key, void *ptr, uint32_t keyMetaBits) {
     kv->type = type;
     kv->encoding = OBJ_ENCODING_RAW;
     kv->ptr = ptr;
-    kv->refcount = 1;
     kv->lru = 0;
-    kv->iskvobj = 1;
-    kv->metabits = keyMetaBits;
+    kv->flags_refcount = OBJ_BUILD_FLAGS_REFCOUNT(1, 1, keyMetaBits);
 
     /* The memory after the struct where we embedded data. */
     char *data = (void *)(kv + 1);
@@ -109,15 +107,13 @@ robj *createObject(int type, void *ptr) {
     o->type = type;
     o->encoding = OBJ_ENCODING_RAW;
     o->ptr = ptr;
-    o->refcount = 1;
     o->lru = 0;
-    o->iskvobj = 0;
-    o->metabits = 0;
+    o->flags_refcount = OBJ_BUILD_FLAGS_REFCOUNT(1, 0, 0);
     return o;
 }
 
 void initObjectLRUOrLFU(robj *o) {
-    if (o->refcount == OBJ_SHARED_REFCOUNT)
+    if (robj_get_refcount(o) == OBJ_SHARED_REFCOUNT)
         return;
     /* Set the LRU to the current lruclock (seconds resolution), or
      * alternatively the LFU counter. */
@@ -141,8 +137,8 @@ void initObjectLRUOrLFU(robj *o) {
  *
  */
 robj *makeObjectShared(robj *o) {
-    serverAssert(o->refcount == 1);
-    o->refcount = OBJ_SHARED_REFCOUNT;
+    serverAssert(robj_get_refcount(o) == 1);
+    robj_set_refcount(o, OBJ_SHARED_REFCOUNT);
     return o;
 }
 
@@ -187,10 +183,8 @@ static kvobj *kvobjCreateEmbedString(const char *val_ptr, size_t val_len,
 
     o->type = OBJ_STRING;
     o->encoding = OBJ_ENCODING_EMBSTR;
-    o->refcount = 1;
     o->lru = 0;
-    o->metabits = keyMetaBits;
-    o->iskvobj = 1;
+    o->flags_refcount = OBJ_BUILD_FLAGS_REFCOUNT(1, 1, keyMetaBits);
 
     /* The memory after the struct where we embedded data. */
     char *data = (char *)(o + 1);
@@ -227,10 +221,8 @@ robj *createEmbeddedStringObject(const char *val_ptr, size_t val_len) {
     robj *o = zmalloc_usable(sizeof(robj) + val_sds_size, &bufsize);
     o->type = OBJ_STRING;
     o->encoding = OBJ_ENCODING_EMBSTR;
-    o->refcount = 1;
     o->lru = 0;
-    o->metabits = 0;
-    o->iskvobj = 0;
+    o->flags_refcount = OBJ_BUILD_FLAGS_REFCOUNT(1, 0, 0);
 
     /* The memory after the struct where we embedded data. */
     char *data = (char *)(o + 1);
@@ -244,14 +236,14 @@ robj *createEmbeddedStringObject(const char *val_ptr, size_t val_len) {
 
 sds kvobjGetKey(const kvobj *kv) {
     unsigned char *data = (void *)(kv + 1);
-    debugServerAssert(kv->iskvobj);
+    debugServerAssert(robj_get_iskvobj(kv));
     uint8_t hdr_size = *(uint8_t *)data;
     data += 1 + hdr_size;
     return (sds)data;
 }
 
 long long kvobjGetExpire(const kvobj *kv) {
-    if (kv->metabits & KEY_META_MASK_EXPIRE) {
+    if (robj_get_metabits(kv) & KEY_META_MASK_EXPIRE) {
         return (long long) (*kvobjMetaRef((kvobj *)kv, KEY_META_ID_EXPIRE));
     } else {
         return -1;
@@ -262,13 +254,14 @@ long long kvobjGetExpire(const kvobj *kv) {
  * the old object's reference counter is decremented and possibly freed. Use the
  * returned object instead of 'val' after calling this function. */
 kvobj *kvobjSetExpire(kvobj *kv, long long expire) {
-    /* If kv not expirable, then we need to realloc to add expire metadata */ 
-    if (!(kv->metabits & KEY_META_MASK_EXPIRE)) {
+    /* If kv not expirable, then we need to realloc to add expire metadata */
+    uint32_t metabits = robj_get_metabits(kv);
+    if (!(metabits & KEY_META_MASK_EXPIRE)) {
         /* Nothing to do if kv not expirable and expire is -1 */
         if (expire == -1)
             return kv;
-        
-        kv = kvobjSet(kvobjGetKey(kv), kv, kv->metabits | KEY_META_MASK_EXPIRE);
+
+        kv = kvobjSet(kvobjGetKey(kv), kv, metabits | KEY_META_MASK_EXPIRE);
     }
 
     /* kv is expirable. Update expire field. */
@@ -297,7 +290,7 @@ kvobj *kvobjSet(sds key, robj *val, uint32_t keyMetaBits) {
     } else {
         /* Create a new object with embedded key. Reuse ptr if possible. */
         void *valptr;
-        if (val->refcount == 1) {
+        if (robj_get_refcount(val) == 1) {
             /* Reuse the ptr. There are no other references to val. */
             valptr = val->ptr;
             val->ptr = NULL;
@@ -321,7 +314,7 @@ kvobj *kvobjSet(sds key, robj *val, uint32_t keyMetaBits) {
     kv->lru = val->lru;
 
     /* Transfer module metadata from `val` to new `kv` (if `val` of type kvobj with metadata). */
-    if (val->metabits & KEY_META_MASK_MODULES)
+    if (robj_get_metabits(val) & KEY_META_MASK_MODULES)
         keyMetaTransition((kvobj *) val, kv);
     
     decrRefCount(val);
@@ -587,12 +580,23 @@ void freeStreamObject(robj *o) {
 }
 
 void incrRefCount(robj *o) {
-    if (o->refcount < OBJ_FIRST_SPECIAL_REFCOUNT - 1) {
-        o->refcount++;
+    uint32_t old_val, new_val;
+    atomicGet(o->flags_refcount, old_val);
+    unsigned int refcount = OBJ_GET_REFCOUNT(old_val);
+
+    if (refcount < OBJ_FIRST_SPECIAL_REFCOUNT - 1) {
+        if (likely(refcount == 1)) {
+            /* Fast path, only hold by itself. */
+            robj_incr_refcount(o);
+        } else {
+            do {
+                new_val = OBJ_INCR_REFCOUNT(old_val);
+            } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_val, new_val));
+        }
     } else {
-        if (o->refcount == OBJ_SHARED_REFCOUNT) {
+        if (refcount == OBJ_SHARED_REFCOUNT) {
             /* Nothing to do: this refcount is immutable. */
-        } else if (o->refcount == OBJ_STATIC_REFCOUNT) {
+        } else if (refcount == OBJ_STATIC_REFCOUNT) {
             serverPanic("You tried to retain an object allocated in the stack");
         } else {
             serverPanic("You tried to retain an object with maximum refcount");
@@ -601,22 +605,38 @@ void incrRefCount(robj *o) {
 }
 
 void decrRefCount(robj *o) {
-    if (o->refcount == OBJ_SHARED_REFCOUNT)
-        return; /* Nothing to do: this refcount is immutable. */
+    uint32_t old_val, new_val;
 
-    if (unlikely(o->refcount <= 0)) {
+    atomicGet(o->flags_refcount, old_val);
+    unsigned int refcount = OBJ_GET_REFCOUNT(old_val);
+
+    if (refcount == OBJ_SHARED_REFCOUNT)
+        return; /* Nothing to do: this refcount is immutable. */
+    if (unlikely(refcount <= 0)) {
         serverPanic("illegal decrRefCount for object with: type %u, encoding %u, refcount %d",
-            o->type, o->encoding, o->refcount);
+            o->type, o->encoding, refcount);
     }
 
-    if (--(o->refcount) == 0) {
+    if (likely(refcount == 1)) {
+        /* Fast path, only hold by itself. */
+        robj_set_refcount(o, 0);
+        refcount = 0;
+    } else {
+        do {
+            new_val = OBJ_DECR_REFCOUNT(old_val);
+        } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_val, new_val));
+        refcount = OBJ_GET_REFCOUNT(new_val);
+    }
+
+    /* old_val now contains the value before decrement (CAS updates it on failure) */
+    if (refcount == 0) {
         void *alloc = o;
-        
-        if (o->iskvobj) {
+
+        if (robj_get_iskvobj(o)) {
             /* eval real allocation pointer */
             alloc = kvobjGetAllocPtr(o);
             /* if kvobj has metadata attached. */
-            if (getModuleMetaBits(o->metabits))
+            if (getModuleMetaBits(robj_get_metabits(o)))
                 keyMetaOnFree((kvobj *)o);
         }
         
@@ -800,7 +820,7 @@ void dismissObject(robj *o, size_t size_hint) {
     /* Currently we use zmadvise_dontneed only when we use jemalloc with Linux.
      * so we avoid these pointless loops when they're not going to do anything. */
 #if defined(USE_JEMALLOC) && defined(__linux__)
-    if (o->refcount != 1) return;
+    if (robj_get_refcount(o) != 1) return;
     switch(o->type) {
         case OBJ_STRING: dismissStringObject(o); break;
         case OBJ_LIST: dismissListObject(o, size_hint); break;
@@ -876,7 +896,7 @@ robj *tryObjectEncodingEx(robj *o, int try_trim) {
     /* It's not safe to encode shared objects: shared objects can be shared
      * everywhere in the "object space" of Redis and may end in places where
      * they are not handled. We handle them only as values in the keyspace. */
-     if (o->refcount > 1) return o;
+     if (robj_get_refcount(o) > 1) return o;
 
     /* Check if we can represent this string as a long integer.
      * Note that we are sure that a string larger than 20 chars is not
@@ -1602,7 +1622,7 @@ NULL
     } else if (!strcasecmp(c->argv[1]->ptr,"refcount") && c->argc == 3) {
         if ((kv = kvobjCommandLookupOrReply(c, c->argv[2], shared.null[c->resp]))
                 == NULL) return;
-        addReplyLongLong(c, kv->refcount);
+        addReplyLongLong(c, robj_get_refcount(kv));
     } else if (!strcasecmp(c->argv[1]->ptr,"encoding") && c->argc == 3) {
         if ((kv = kvobjCommandLookupOrReply(c, c->argv[2], shared.null[c->resp]))
                 == NULL) return;

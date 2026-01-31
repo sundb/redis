@@ -96,17 +96,55 @@ struct RedisModuleType;
 #define OBJ_STATIC_REFCOUNT ((1 << OBJ_REFCOUNT_BITS) - 2) /* Object allocated in the stack. */
 #define OBJ_FIRST_SPECIAL_REFCOUNT OBJ_STATIC_REFCOUNT
 
+/*
+ * Bit layout of flags_refcount (32 bits):
+ *   bits 0-22  : refcount (23 bits)
+ *   bit  23    : iskvobj (1 bit) - 1 if this struct serves as a kvobj base
+ *   bits 24-31 : metabits (8 bits) - Bitmap of metadata (+expiry) attached to this kvobj
+ */
+#define OBJ_REFCOUNT_SHIFT 0
+#define OBJ_ISKVOBJ_SHIFT OBJ_REFCOUNT_BITS                          /* bit 23 */
+#define OBJ_METABITS_SHIFT (OBJ_REFCOUNT_BITS + 1)                   /* bit 24 */
+#define OBJ_REFCOUNT_MASK ((1U << OBJ_REFCOUNT_BITS) - 1)            /* 0x007FFFFF */
+#define OBJ_ISKVOBJ_MASK (1U << OBJ_ISKVOBJ_SHIFT)                   /* 0x00800000 */
+#define OBJ_METABITS_MASK (((1U << OBJ_NUM_KVMETA_BITS) - 1) << OBJ_METABITS_SHIFT)  /* 0xFF000000 */
+
+/* Refcount operations on flags_refcount value */
+#define OBJ_GET_REFCOUNT(atomic_val) ((atomic_val) & OBJ_REFCOUNT_MASK)
+#define OBJ_SET_REFCOUNT(atomic_val, rc) \
+    (((atomic_val) & ~OBJ_REFCOUNT_MASK) | ((rc) & OBJ_REFCOUNT_MASK))
+#define OBJ_INCR_REFCOUNT(atomic_val) \
+    (((atomic_val) & ~OBJ_REFCOUNT_MASK) | ((OBJ_GET_REFCOUNT(atomic_val) + 1) & OBJ_REFCOUNT_MASK))
+#define OBJ_DECR_REFCOUNT(atomic_val) \
+    (((atomic_val) & ~OBJ_REFCOUNT_MASK) | ((OBJ_GET_REFCOUNT(atomic_val) - 1) & OBJ_REFCOUNT_MASK))
+
+#define OBJ_GET_ISKVOBJ(atomic_val) (((atomic_val) & OBJ_ISKVOBJ_MASK) >> OBJ_ISKVOBJ_SHIFT)
+#define OBJ_GET_METABITS(atomic_val) (((atomic_val) & OBJ_METABITS_MASK) >> OBJ_METABITS_SHIFT)
+
+/* Build flags_refcount value from components */
+#define OBJ_BUILD_FLAGS_REFCOUNT(rc, iskvobj, mb) \
+    (((rc) & OBJ_REFCOUNT_MASK) | \
+     ((iskvobj) ? OBJ_ISKVOBJ_MASK : 0) | \
+     (((mb) << OBJ_METABITS_SHIFT) & OBJ_METABITS_MASK))
+
+/* Convenience macros to set fields on robj pointer (write) */
+#define robj_set_refcount(o, rc) do { \
+    (o)->flags_refcount = OBJ_SET_REFCOUNT((o)->flags_refcount, (rc)); \
+} while(0)
+#define robj_incr_refcount(o) do { \
+    (o)->flags_refcount = OBJ_INCR_REFCOUNT((o)->flags_refcount); \
+} while(0)
+#define robj_decr_refcount(o) do { \
+    (o)->flags_refcount = OBJ_DECR_REFCOUNT((o)->flags_refcount); \
+} while(0)
+
 struct redisObject {
     unsigned type:4;
     unsigned encoding:4;
-    unsigned refcount : OBJ_REFCOUNT_BITS;
-    unsigned iskvobj : 1;   /* 1 if this struct serves as a kvobj base */
-    
-    /* metabits and lru are Relevant only when iskvobj is set: */     
-    unsigned metabits :8;  /* Bitmap of metadata (+expiry) attached to this kvobj */
     unsigned lru:LRU_BITS; /* LRU time (relative to global lru_clock) or
                             * LFU data (least significant 8 bits frequency
                             * and most significant 16 bits access time). */
+    redisAtomic uint32_t flags_refcount;
     void *ptr;
 };
 
@@ -115,6 +153,24 @@ typedef struct redisObject robj;
 
 /* kvobj: see header comment above for definition and memory layout. */
 typedef struct redisObject kvobj;
+
+/* Inline functions to access fields directly from robj pointer (read).
+ * These use atomic read for thread-safety. */
+static inline uint32_t robj_get_refcount(const robj *o) {
+    uint32_t tmp;
+    atomicGet((o)->flags_refcount, tmp);
+    return OBJ_GET_REFCOUNT(tmp);
+}
+static inline uint32_t robj_get_iskvobj(const robj *o) {
+    uint32_t tmp;
+    atomicGet((o)->flags_refcount, tmp);
+    return OBJ_GET_ISKVOBJ(tmp);
+}
+static inline uint32_t robj_get_metabits(const robj *o) {
+    uint32_t tmp;
+    atomicGet((o)->flags_refcount, tmp);
+    return OBJ_GET_METABITS(tmp);
+}
 
 kvobj *kvobjCreate(int type, const sds key, void *ptr, uint32_t keyMetaBits);
 kvobj *kvobjSet(sds key, robj *val, uint32_t keyMetaBits);
@@ -187,7 +243,7 @@ void memoryCommand(struct client *c);
 
 static inline void *kvobjGetAllocPtr(const kvobj *kv) {
     /* Return the base allocation pointer (start of the metadata prefix). */
-    uint32_t numMetaBytes = __builtin_popcount(kv->metabits) * sizeof(uint64_t);
+    uint32_t numMetaBytes = __builtin_popcount(robj_get_metabits(kv)) * sizeof(uint64_t);
     return (char *)kv - numMetaBytes;
 }
 

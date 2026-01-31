@@ -176,9 +176,6 @@ client *createClient(connection *conn) {
     c->original_argv = NULL;
     c->deferred_objects = NULL;
     c->deferred_objects_num = 0;
-    c->io_deferred_objects = NULL;
-    c->io_deferred_objects_num = 0;
-    c->io_deferred_objects_size = 0;
     c->cmd = c->lastcmd = c->realcmd = c->lookedcmd = NULL;
     c->cur_script = NULL;
     c->multibulklen = 0;
@@ -519,15 +516,6 @@ void _addReplyToBufferOrList(client *c, const char *s, size_t len) {
         _addReplyPayloadToList(c, c->reply, s + reply_len, len - reply_len, PLAIN_REPLY);
 }
 
-/* Check if the client's pending_ref_reply_node is currently linked in the list.
- * A node is considered linked if it has neighbors (prev/next), or if it's the
- * only node in the list (head points to it). */
-static inline int clientIsInPendingRefReplyList(client *c) {
-    return listNextNode(&c->pending_ref_reply_node) != NULL ||
-           listPrevNode(&c->pending_ref_reply_node) != NULL ||
-           listFirst(server.clients_with_pending_ref_reply) == &c->pending_ref_reply_node;
-}
-
 /* Increment reference to object and add pointer to object and
  * pointer to string itself to current reply buffer */
 static void _addBulkStrRefToBufferOrList(client *c, robj *obj, size_t len) {
@@ -555,11 +543,6 @@ static void _addBulkStrRefToBufferOrList(client *c, robj *obj, size_t len) {
 
     if (!_addBulkStrRefToBuffer(c, (void *)&str_ref, sizeof(str_ref))) {
         _addReplyPayloadToList(c, c->reply, (void *)&str_ref, sizeof(str_ref), BULK_STR_REF);
-    }
-
-    /* Track clients with pending referenced reply objects for async flushdb protection. */
-    if (!clientIsInPendingRefReplyList(c)) {
-        listLinkNodeTail(server.clients_with_pending_ref_reply, &c->pending_ref_reply_node);
     }
 }
 
@@ -1240,7 +1223,7 @@ static int isCopyAvoidPreferred(client *c, robj *obj, size_t len) {
      * to server.pending_push_messages when CLIENT_PUSHING is set. */
     if (c->flags & CLIENT_PUSHING) return 0;
 
-    if (obj->encoding != OBJ_ENCODING_RAW || obj->refcount >= OBJ_FIRST_SPECIAL_REFCOUNT) return 0;
+    if (obj->encoding != OBJ_ENCODING_RAW || robj_get_refcount(obj) >= OBJ_FIRST_SPECIAL_REFCOUNT) return 0;
 
     /* Copy avoidance is preferred for any string size starting certain number of I/O threads  */
     if (server.io_threads_num >= COPY_AVOID_MIN_IO_THREADS) return 1;
@@ -1711,48 +1694,6 @@ void freeClientDeferredObjects(client *c, int free_array) {
     }
 }
 
-/* Queue an robj to be freed by the main thread when client returns from IO thread.
- * This is used in IO thread write path to avoid refcount race conditions. */
-#define IO_DEFERRED_OBJECTS_INIT_SIZE 8
-void ioDeferFreeRobj(client *c, robj *obj) {
-    if (c->io_deferred_objects_num >= c->io_deferred_objects_size) {
-        int new_size = !c->io_deferred_objects_size ?
-            IO_DEFERRED_OBJECTS_INIT_SIZE : c->io_deferred_objects_size * 2;
-        c->io_deferred_objects = zrealloc(c->io_deferred_objects, new_size * sizeof(robj *));
-        c->io_deferred_objects_size = new_size;
-    }
-    c->io_deferred_objects[c->io_deferred_objects_num++] = obj;
-}
-
-/* Free all objects queued by IO thread for deferred freeing.
- * Called by main thread when client returns from IO thread.
- * If free_array is true then free the array itself as well. */
-void freeClientIODeferredObjects(client *c, int free_array) {
-    if (!c->conn) return;
-
-    for (int i = 0; i < c->io_deferred_objects_num; i++) {
-        robj *obj = c->io_deferred_objects[i];
-        decrRefCount(obj);
-    }
-
-    if (!free_array) {
-        /* If the utilization rate is less than 1/4, reduce the size to 1/2 to avoid thrashing */
-        if (c->io_deferred_objects_size > IO_DEFERRED_OBJECTS_INIT_SIZE &&
-            c->io_deferred_objects_num * 4 < c->io_deferred_objects_size)
-        {
-            int new_size = c->io_deferred_objects_size / 2;
-            c->io_deferred_objects = zrealloc(c->io_deferred_objects, new_size * sizeof(robj *));
-            c->io_deferred_objects_size = new_size;
-        }
-        c->io_deferred_objects_num = 0;
-    } else {
-        zfree(c->io_deferred_objects);
-        c->io_deferred_objects = NULL;
-        c->io_deferred_objects_num = 0;
-        c->io_deferred_objects_size = 0;
-    }
-}
-
 void freeClientOriginalArgv(client *c) {
     /* We didn't rewrite this client */
     if (!c->original_argv) return;
@@ -1903,19 +1844,6 @@ void unlinkClient(client *c) {
     if (c->flags & CLIENT_TRACKING) disableTracking(c);
 }
 
-/* Remove client from the list of clients with pending referenced replies.
- * This is called when the client has finished sending all pending replies,
- * or when the client is being freed.
- *
- * If 'force' is true, the client is removed unconditionally.
- * This should only be used when we are certain that the replies no longer
- * contain any referenced robj. */
-void tryUnlinkClientFromPendingRefReply(client *c, int force) {
-    if (clientIsInPendingRefReplyList(c) && (force || !clientHasPendingReplies(c))) {
-        listUnlinkNode(server.clients_with_pending_ref_reply, &c->pending_ref_reply_node);
-    }
-}
-
 /* Clear the client state to resemble a newly connected client. */
 void clearClientConnectionState(client *c) {
     listNode *ln;
@@ -1999,8 +1927,7 @@ static void resetReusableQueryBuf(client *c) {
 
 /* Release references to string objects inside an encoded buffer.
  * If running in IO thread, defer the free to main thread via io_deferred_objects. */
-static void releaseBufReferences(client *c, char *buf, size_t bufpos) {
-    int in_io_thread = (c && c->running_tid != IOTHREAD_MAIN_THREAD_ID);
+static void releaseBufReferences(char *buf, size_t bufpos) {
     char *ptr = buf;
     while (ptr < buf + bufpos) {
         payloadHeader *header = (payloadHeader *)ptr;
@@ -2010,10 +1937,7 @@ static void releaseBufReferences(client *c, char *buf, size_t bufpos) {
             bulkStrRef *str_ref = (bulkStrRef *)ptr;
             /* Only release if not already released. */
             if (str_ref->obj != NULL) {
-                if (in_io_thread)
-                    ioDeferFreeRobj(c, str_ref->obj);
-                else
-                    decrRefCount(str_ref->obj);
+                decrRefCount(str_ref->obj);
                 str_ref->obj = NULL;
             }
         } else {
@@ -2027,7 +1951,7 @@ static void releaseBufReferences(client *c, char *buf, size_t bufpos) {
 /* Release all references to string objects in all encoded buffers */
 static void releaseAllBufReferences(client *c) {
     if (c->buf_encoded) {
-        releaseBufReferences(c, c->buf, c->bufpos);
+        releaseBufReferences(c->buf, c->bufpos);
     }
 
     listIter iter;
@@ -2036,7 +1960,7 @@ static void releaseAllBufReferences(client *c) {
     while ((next = listNext(&iter))) {
         clientReplyBlock *o = (clientReplyBlock *)listNodeValue(next);
         if (o && o->buf_encoded) {
-            releaseBufReferences(c, o->buf, o->used);
+            releaseBufReferences(o->buf, o->used);
         }
     }
 }
@@ -2143,8 +2067,6 @@ void freeClient(client *c) {
     freeReplicaReferencedReplBuffer(c);
     freeClientOriginalArgv(c);
     freeClientDeferredObjects(c, 1);
-    freeClientIODeferredObjects(c, 1);
-    tryUnlinkClientFromPendingRefReply(c, 1);
     if (c->deferred_reply_errors)
         listRelease(c->deferred_reply_errors);
 #ifdef LOG_REQ_RES
@@ -2399,10 +2321,9 @@ static void processEncodedBufferForWrite(ReplyIOV *reply_iov, char *start_ptr, c
 /* Process sent data in the encoded buffer.
  * Returns pointer to the current payload header being processed, or NULL if all data is processed.
  * If running in IO thread, defer the free to main thread via io_deferred_objects. */
-static payloadHeader *processSentDataInEncodedBuffer(client *c, char *start_ptr, char *end_ptr,
+static payloadHeader *processSentDataInEncodedBuffer(char *start_ptr, char *end_ptr,
                                                      size_t *sentlen, ssize_t *remaining)
 {
-    int in_io_thread = (c && c->running_tid != IOTHREAD_MAIN_THREAD_ID);
     char *ptr = start_ptr;
     while (ptr < end_ptr && *remaining > 0) {
         payloadHeader *head = (payloadHeader *)ptr;
@@ -2426,11 +2347,7 @@ static payloadHeader *processSentDataInEncodedBuffer(client *c, char *start_ptr,
                 return head;
             }
             *remaining -= (writen_len - *sentlen);
-            if (in_io_thread) {
-                ioDeferFreeRobj(c, str_ref->obj);
-            } else {
-                decrRefCount(str_ref->obj);
-            }
+            decrRefCount(str_ref->obj);
             str_ref->obj = NULL; /* Mark as released to prevent double free */
             *sentlen = 0;
         }
@@ -2523,7 +2440,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
         } else {
             /* For encoded buffers */
             char *start_ptr = c->last_header ? (char *)c->last_header : c->buf;
-            c->last_header = processSentDataInEncodedBuffer(c, start_ptr, c->buf + c->bufpos, &c->sentlen, &remaining);
+            c->last_header = processSentDataInEncodedBuffer(start_ptr, c->buf + c->bufpos, &c->sentlen, &remaining);
             if (!c->last_header) { /* reach end */
                 c->bufpos = 0;
                 c->buf_encoded = 0;
@@ -2552,7 +2469,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
         } else {
             /* Encoded reply block */
             char *start_ptr = c->last_header ? (char *)c->last_header : o->buf;
-            c->last_header = processSentDataInEncodedBuffer(c, start_ptr, o->buf + o->used, &c->sentlen, &remaining);
+            c->last_header = processSentDataInEncodedBuffer(start_ptr, o->buf + o->used, &c->sentlen, &remaining);
             if (!c->last_header) { /* reach end */
                 /* Block fully consumed, remove it */
                 c->reply_bytes -= o->size;
@@ -2743,10 +2660,6 @@ int writeToClient(client *c, int handler_installed) {
             freeClientAsync(c);
             return C_ERR;
         }
-
-        /* Remove client from pending referenced reply clients list. */
-        if (c->running_tid == IOTHREAD_MAIN_THREAD_ID)
-            tryUnlinkClientFromPendingRefReply(c, 1);
 
         /* If replica client has sent all the replication data it knows about
          * we send it to main thread so it can pick up new repl data ASAP.
@@ -5604,7 +5517,7 @@ static void reclaimPendingCommand(client *c, pendingCommand *pcmd) {
              * decrease the reference count to release our reference to it. */
             for (int j = 0; j < pcmd->argc; j++) {
                 robj *o = pcmd->argv[j];
-                if (o && o->refcount > 1) {
+                if (o && robj_get_refcount(o) > 1) {
                     decrRefCount(o);
                     pcmd->argv[j] = NULL;
                 }

@@ -59,7 +59,7 @@ void updateLFU(robj *val) {
 
 /* Update LRM when an object is modified. */
 void updateLRM(robj *o) {
-    if (o->refcount == OBJ_SHARED_REFCOUNT)
+    if (robj_get_refcount(o) == OBJ_SHARED_REFCOUNT)
         return;
     if (server.maxmemory_policy & MAXMEMORY_FLAG_LRM) {
         o->lru = LRU_CLOCK();
@@ -591,10 +591,10 @@ static void dbSetValue(redisDb *db, robj *key, robj **valref, dictEntryLink link
     long long oldExpire = getExpire(db, key->ptr, old);
 
     /* All metadata will be kept if not `overwrite` for the new object  */
-    uint32_t newKeyMetaBits = old->metabits;
+    uint32_t newKeyMetaBits = robj_get_metabits(old);
     /* clear expire if not keepTTL or no old expire */
     if ((!keepTTL) || (oldExpire == -1))
-        newKeyMetaBits &= ~KEY_META_MASK_EXPIRE; 
+        newKeyMetaBits &= ~KEY_META_MASK_EXPIRE;
 
     if (overwrite) {
         /* On overwrite, discard module metadata excluding expire if set */
@@ -604,7 +604,7 @@ static void dbSetValue(redisDb *db, robj *key, robj **valref, dictEntryLink link
         incrRefCount(old);
 
         /* Free related metadata. Ignore builtin metadata (currently only expire) */
-        if (getModuleMetaBits(old->metabits)) {
+        if (getModuleMetaBits(robj_get_metabits(old))) {
             keyMetaOnUnlink(db, key, old);
             freeModuleMeta = 1;
         }
@@ -622,8 +622,8 @@ static void dbSetValue(redisDb *db, robj *key, robj **valref, dictEntryLink link
     if (server.memory_tracking_enabled)
         oldsize = kvobjAllocSize(old);
 
-    if ((old->refcount == 1 && old->encoding != OBJ_ENCODING_EMBSTR) &&
-        (val->refcount == 1 && val->encoding != OBJ_ENCODING_EMBSTR) && (!freeModuleMeta))
+    if ((robj_get_refcount(old) == 1 && old->encoding != OBJ_ENCODING_EMBSTR) &&
+        (robj_get_refcount(val) == 1 && val->encoding != OBJ_ENCODING_EMBSTR) && (!freeModuleMeta))
     {
         /* Keep old object in the database. Just swap it's ptr, type and
          * encoding with the content of val. */
@@ -687,7 +687,7 @@ static void dbSetValue(redisDb *db, robj *key, robj **valref, dictEntryLink link
         }
     }
 
-    if (server.io_threads_num > 1 && old->encoding == OBJ_ENCODING_RAW && old->refcount == 1) {
+    if (server.io_threads_num > 1 && old->encoding == OBJ_ENCODING_RAW && robj_get_refcount(old) == 1) {
         /* In multi-threaded mode, the OBJ_ENCODING_RAW string object usually is
          * allocated in the IO thread, so we defer the free to the IO thread.
          * Besides, we never free a string object in BIO threads, so, even with
@@ -853,7 +853,7 @@ int dbGenericDelete(redisDb *db, robj *key, int async, int flags) {
          * need to incr to retain kv */
         incrRefCount(kv); /* refcnt=1->2 */
         /* Metadata hook: notify unlink for key metadata cleanup. */
-        if (getModuleMetaBits(kv->metabits)) keyMetaOnUnlink(db, key, kv);
+        if (getModuleMetaBits(robj_get_metabits(kv))) keyMetaOnUnlink(db, key, kv);
         /* Tells the module that the key has been unlinked from the database. */
         moduleNotifyKeyUnlink(key, kv, db->id, flags);
         /* We want to try to unblock any module clients or clients using a blocking XREADGROUP */
@@ -950,7 +950,7 @@ kvobj *dbUnshareStringValue(redisDb *db, robj *key, kvobj *kv) {
  * which can be used if we already have one, thus saving the dbFind call. */
 kvobj *dbUnshareStringValueByLink(redisDb *db, robj *key, kvobj *o, dictEntryLink link) {
     serverAssert(o->type == OBJ_STRING);
-    if (o->refcount != 1 || o->encoding != OBJ_ENCODING_RAW) {
+    if (robj_get_refcount(o) != 1 || o->encoding != OBJ_ENCODING_RAW) {
         robj *decoded = getDecodedObject(o);
         o = createRawStringObject(decoded->ptr, sdslen(decoded->ptr));
         decrRefCount(decoded);
@@ -2166,7 +2166,7 @@ void renameGenericCommand(client *c, int nx) {
     /* Prepare metadata for the renamed key */
     KeyMetaSpec keymeta;
     keyMetaSpecInit(&keymeta);
-    if (o->metabits) keyMetaOnRename(c->db, o, c->argv[1], c->argv[2], &keymeta);
+    if (robj_get_metabits(o)) keyMetaOnRename(c->db, o, c->argv[1], c->argv[2], &keymeta);
 
     dbDelete(c->db,c->argv[1]);
     
@@ -2381,7 +2381,7 @@ void copyCommand(client *c) {
     /* Prepare metadata for the new key */
     KeyMetaSpec keymeta;
     keyMetaSpecInit(&keymeta);
-    if (o->metabits) keyMetaOnCopy(o, key, newkey, c->db->id, dst->id, &keymeta);
+    if (robj_get_metabits(o)) keyMetaOnCopy(o, key, newkey, c->db->id, dst->id, &keymeta);
 
     kvobj *kvCopy = dbAddInternal(dst, newkey, &newobj, NULL, &keymeta);
 
@@ -2696,7 +2696,7 @@ static void deleteKeyAndPropagate(redisDb *db, robj *keyobj, int notify_type, lo
     char *notify_name = notify_type == NOTIFY_EXPIRED ? "expired" : "evicted";
 
     /* The key needs to be converted from static to heap before deleted */
-    int static_key = keyobj->refcount == OBJ_STATIC_REFCOUNT;
+    int static_key = robj_get_refcount(keyobj) == OBJ_STATIC_REFCOUNT;
     if (static_key) {
         keyobj = createStringObject(keyobj->ptr, sdslen(keyobj->ptr));
     }

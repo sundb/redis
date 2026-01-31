@@ -1408,7 +1408,7 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val, long long expiretime, in
     }
 
     /* if needed save key metadata  */
-    if (getModuleMetaBits(val->metabits)) {
+    if (getModuleMetaBits(robj_get_metabits(val))) {
         if (rdbSaveKeyMetadata(rdb, key, val, dbid) == -1)
             return -1;
     }

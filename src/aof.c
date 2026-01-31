@@ -2423,7 +2423,7 @@ int rewriteObject(rio *r, robj *key, robj *o, int dbid, long long expiretime) {
     }
 
     /* If modules metadata is available */
-    if ((getModuleMetaBits(o->metabits)) && (keyMetaOnAof(r, key, o, dbid) == 0))
+    if ((getModuleMetaBits(robj_get_metabits(o))) && (keyMetaOnAof(r, key, o, dbid) == 0))
         return C_ERR;
 
     return C_OK;

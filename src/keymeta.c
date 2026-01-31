@@ -178,13 +178,14 @@ void keyMetaOnCopy(kvobj *kv, robj *srcKey, robj *dstKey, int srcDbId, int dstDb
                    KeyMetaSpec *keymeta)
 {
     uint64_t *pMeta = ((uint64_t *)kv) - 1;
-    if (kv->metabits & KEY_META_MASK_EXPIRE) {
+    uint32_t kv_metabits = robj_get_metabits(kv);
+    if (kv_metabits & KEY_META_MASK_EXPIRE) {
         if (*pMeta != KM_EXPIRE_RESET_VALUE)
             keyMetaSpecAdd(keymeta, KEY_META_ID_EXPIRE, *pMeta);
         pMeta--;
     }
 
-    uint32_t mbits = kv->metabits >> KEY_META_ID_MODULE_FIRST;
+    uint32_t mbits = kv_metabits >> KEY_META_ID_MODULE_FIRST;
     if (likely(mbits == 0)) return;
 
     int keyMetaId = KEY_META_ID_MODULE_FIRST;
@@ -207,17 +208,18 @@ void keyMetaOnCopy(kvobj *kv, robj *srcKey, robj *dstKey, int srcDbId, int dstDb
 /* Prepare metadata spec for rename of `kv` */
 void keyMetaOnRename(struct redisDb *db,  kvobj *kv, robj *oldKey, robj *newKey, KeyMetaSpec *kms) {
     uint64_t *pMeta = ((uint64_t *)kv) - 1;
+    uint32_t kv_metabits = robj_get_metabits(kv);
 
     /* Handle builtin expire: add only if set and value != -1, but always advance
      * the pointer when the expire bit is set since the slot exists either way. */
-    if (kv->metabits & KEY_META_MASK_EXPIRE) {
+    if (kv_metabits & KEY_META_MASK_EXPIRE) {
         if (*pMeta != KM_EXPIRE_RESET_VALUE)
             keyMetaSpecAdd(kms, KEY_META_ID_EXPIRE, *pMeta);
         pMeta--; /* skip expire slot */
     }
 
     /* Process module metadata. Default on rename: keep if no callback. */
-    uint32_t mbits = kv->metabits >> KEY_META_ID_MODULE_FIRST;
+    uint32_t mbits = kv_metabits >> KEY_META_ID_MODULE_FIRST;
     if (likely(mbits == 0)) return;
 
     int keyMetaId = KEY_META_ID_MODULE_FIRST;
@@ -244,17 +246,18 @@ void keyMetaOnRename(struct redisDb *db,  kvobj *kv, robj *oldKey, robj *newKey,
 /* Prepare metadata spec for move of `kv` from srcDbId to dstDbId */
 void keyMetaOnMove(kvobj *kv, robj *key, int srcDbId, int dstDbId, KeyMetaSpec *kms) {
     uint64_t *pMeta = ((uint64_t *)kv) - 1;
+    uint32_t kv_metabits = robj_get_metabits(kv);
 
     /* Handle builtin expire: add only if set and value != -1, but always advance
      * the pointer when the expire bit is set since the slot exists either way. */
-    if (kv->metabits & KEY_META_MASK_EXPIRE) {
+    if (kv_metabits & KEY_META_MASK_EXPIRE) {
         if (*pMeta != KM_EXPIRE_RESET_VALUE)
             keyMetaSpecAdd(kms, KEY_META_ID_EXPIRE, *pMeta);
         pMeta--; /* skip expire slot */
     }
 
     /* Process module metadata. Default on move: keep if no callback. */
-    uint32_t mbits = kv->metabits >> KEY_META_ID_MODULE_FIRST;
+    uint32_t mbits = kv_metabits >> KEY_META_ID_MODULE_FIRST;
     if (likely(mbits == 0)) return;
 
     int keyMetaId = KEY_META_ID_MODULE_FIRST;
@@ -292,11 +295,12 @@ void keyMetaOnMove(kvobj *kv, robj *key, int srcDbId, int dstDbId, KeyMetaSpec *
 void keyMetaOnUnlink(redisDb *db, robj *key, kvobj *kv) {
     /* Skip builtin expire slot if present; no action for expire itself here. */
     uint64_t *pMeta = ((uint64_t *)kv) - 1;
-    if (kv->metabits & KEY_META_MASK_EXPIRE)
+    uint32_t kv_metabits = robj_get_metabits(kv);
+    if (kv_metabits & KEY_META_MASK_EXPIRE)
         pMeta--;
 
     /* Iterate module metadata and invoke per-class unlink if provided. */
-    uint32_t mbits = kv->metabits >> KEY_META_ID_MODULE_FIRST;
+    uint32_t mbits = kv_metabits >> KEY_META_ID_MODULE_FIRST;
     if (likely(mbits == 0)) return;
 
     /* Build operation context for modules: from_key = key name, to_key = NULL. */
@@ -333,11 +337,12 @@ void keyMetaOnUnlink(redisDb *db, robj *key, kvobj *kv) {
 void keyMetaOnFree(kvobj *kv) {
     /* Skip builtin expire slot if present; no action needed for expire itself. */
     uint64_t *pMeta = ((uint64_t *)kv) - 1;
-    if (kv->metabits & KEY_META_MASK_EXPIRE)
+    uint32_t kv_metabits = robj_get_metabits(kv);
+    if (kv_metabits & KEY_META_MASK_EXPIRE)
         pMeta--;
 
     /* Iterate module metadata and invoke per-class free if provided. */
-    uint32_t mbits = kv->metabits >> KEY_META_ID_MODULE_FIRST;
+    uint32_t mbits = kv_metabits >> KEY_META_ID_MODULE_FIRST;
     if (likely(mbits == 0)) return;
 
     int keyMetaId = KEY_META_ID_MODULE_FIRST;
@@ -558,14 +563,15 @@ error:
   * Returns -1 on error, 0 on success.
  */
 int rdbSaveKeyMetadata(rio *rdb, robj *key, kvobj *kv, int dbid) {
+    uint32_t kv_metabits = robj_get_metabits(kv);
 
     /* Check if there are any module metadata bits set */
-    uint32_t mbits = kv->metabits >> KEY_META_ID_MODULE_FIRST;
+    uint32_t mbits = kv_metabits >> KEY_META_ID_MODULE_FIRST;
     if (likely(mbits == 0)) return 0; /* No module metadata */
 
     /* Skip builtin expire slot if present */
     uint64_t *pMeta = ((uint64_t *)kv) - 1;
-    if (kv->metabits & KEY_META_MASK_EXPIRE)
+    if (kv_metabits & KEY_META_MASK_EXPIRE)
         pMeta--;
 
     /* Create temporary buffer for payload (class data only, no headers) */
@@ -650,11 +656,12 @@ error:
 int keyMetaOnAof(rio *r, robj *key, kvobj *kv, int dbid) {
     /* Skip builtin expire slot if present; no action needed for expire itself. */
     uint64_t *pMeta = ((uint64_t *)kv) - 1;
-    if (kv->metabits & KEY_META_MASK_EXPIRE)
+    uint32_t kv_metabits = robj_get_metabits(kv);
+    if (kv_metabits & KEY_META_MASK_EXPIRE)
         pMeta--;
 
     /* Iterate module metadata and invoke per-class aof_rewrite if provided */
-    uint32_t mbits = kv->metabits >> KEY_META_ID_MODULE_FIRST;
+    uint32_t mbits = kv_metabits >> KEY_META_ID_MODULE_FIRST;
     if (likely(mbits == 0)) return 1;
 
     int keyMetaId = KEY_META_ID_MODULE_FIRST;
@@ -686,17 +693,19 @@ int keyMetaOnAof(rio *r, robj *key, kvobj *kv, int dbid) {
 
 /* Move entire metadata from old to new kvobj as is */
 void keyMetaTransition(kvobj *kvOld, kvobj *kvNew) {
+    uint32_t kvOld_metabits = robj_get_metabits(kvOld);
+    uint32_t kvNew_metabits = robj_get_metabits(kvNew);
     /* Precondition: */
-    debugServerAssert(kvOld->metabits>>KEY_META_ID_MODULE_FIRST);
-    
+    debugServerAssert(kvOld_metabits>>KEY_META_ID_MODULE_FIRST);
+
     /* Skip builtin expire slot if present; no action needed for expire itself. */
     uint64_t *pMetaOld = ((uint64_t *)kvOld) - 1;
-    if (kvOld->metabits & KEY_META_MASK_EXPIRE) pMetaOld--;
+    if (kvOld_metabits & KEY_META_MASK_EXPIRE) pMetaOld--;
     uint64_t *pMetaNew = ((uint64_t *)kvNew) - 1;
-    if (kvNew->metabits & KEY_META_MASK_EXPIRE) pMetaNew--;
-    
-    uint32_t mbitsOld = kvOld->metabits >> KEY_META_ID_MODULE_FIRST;
-    uint32_t mbitsNew = kvNew->metabits >> KEY_META_ID_MODULE_FIRST;
+    if (kvNew_metabits & KEY_META_MASK_EXPIRE) pMetaNew--;
+
+    uint32_t mbitsOld = kvOld_metabits >> KEY_META_ID_MODULE_FIRST;
+    uint32_t mbitsNew = kvNew_metabits >> KEY_META_ID_MODULE_FIRST;
     if (likely(mbitsOld == 0)) return;
     int keyMetaId = KEY_META_ID_MODULE_FIRST;
     do {
@@ -799,7 +808,7 @@ kvobj *keyMetaSetMetadata(redisDb *db, kvobj *kv, KeyMetaClassId id, uint64_t me
         return NULL;
 
     /* If metadata already attached, just update it in place. */
-    if (kv->metabits & (1u << id)) {
+    if (robj_get_metabits(kv) & (1u << id)) {
         *kvobjMetaRef(kv, id) = metadata;
         return kv;
     }
@@ -838,7 +847,7 @@ kvobj *keyMetaSetMetadata(redisDb *db, kvobj *kv, KeyMetaClassId id, uint64_t me
     size_t oldsize = 0;
     if (server.memory_tracking_enabled)
         oldsize = kvobjAllocSize(kv);
-    kv = kvobjSet(key, kv, kv->metabits | (1u << id));
+    kv = kvobjSet(key, kv, robj_get_metabits(kv) | (1u << id));
     kvstoreDictSetAtLink(db->keys, slot, kv, &keyLink, 0);
     if (server.memory_tracking_enabled)
         updateSlotAllocSize(db, slot, kv, oldsize, kvobjAllocSize(kv));
@@ -866,7 +875,7 @@ int keyMetaGetMetadata(KeyMetaClassId kmcId, kvobj *kv, uint64_t *metadata) {
     if (keyMetaClass[kmcId].state != CLASS_STATE_INUSE) 
         return 0;
     
-    if (!(kv->metabits & (1u << kmcId))) 
+    if (!(robj_get_metabits(kv) & (1u << kmcId)))
         return 0; /* metadata not attached */
 
     *metadata = *kvobjMetaRef(kv, kmcId);
@@ -919,16 +928,17 @@ static void keyMetaSpecAddUnordered(KeyMetaSpec *keymeta, int metaid, uint64_t m
 
 /* Blindly reset modules metadata values to reset_value */
 void keyMetaResetModuleValues(kvobj *kv) {
+    uint32_t kv_metabits = robj_get_metabits(kv);
     /* Precondition: only called for module metadata (bits 1-7) */
-    debugServerAssert(kv->metabits & KEY_META_MASK_MODULES);
+    debugServerAssert(kv_metabits & KEY_META_MASK_MODULES);
 
     /* Skip expire slot (bit 0) if present, start directly at module metadata */
     uint64_t *pMeta = ((uint64_t *)kv) - 1;
-    if (kv->metabits & KEY_META_MASK_EXPIRE)
+    if (kv_metabits & KEY_META_MASK_EXPIRE)
         pMeta--;
 
     /* Process only module metadata bits (1-7) */
-    uint32_t mbits = kv->metabits >> KEY_META_ID_MODULE_FIRST;
+    uint32_t mbits = kv_metabits >> KEY_META_ID_MODULE_FIRST;
     int keyMetaId = KEY_META_ID_MODULE_FIRST;
     do {
         if (mbits & 1)
