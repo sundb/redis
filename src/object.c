@@ -591,8 +591,7 @@ void incrRefCount(robj *o) {
     uint32_t old_val = 0, new_val;
 
     atomicGet(o->flags_refcount, old_val);
-    struct robjFlags *flags = (struct robjFlags*)&old_val;
-    unsigned int refcount = flags->refcount;
+    unsigned int refcount = ((struct robjFlags*)&old_val)->refcount;
 
     if (refcount < OBJ_FIRST_SPECIAL_REFCOUNT - 1) {
         if (likely(refcount == 1)) {
@@ -601,8 +600,7 @@ void incrRefCount(robj *o) {
         } else {
             do {
                 new_val = old_val;
-                flags = (struct robjFlags*)&new_val;
-                flags->refcount++;
+                ((struct robjFlags*)&new_val)->refcount++;
             } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_val, new_val));
         }
     } else {
@@ -620,8 +618,7 @@ void decrRefCount(robj *o) {
     uint32_t old_val, new_val;
 
     atomicGet(o->flags_refcount, old_val);
-    struct robjFlags *flags = (struct robjFlags*)&old_val;
-    unsigned int refcount = flags->refcount;
+    unsigned int refcount = ((struct robjFlags*)&old_val)->refcount;
 
     if (refcount == OBJ_SHARED_REFCOUNT)
         return; /* Nothing to do: this refcount is immutable. */
@@ -636,10 +633,9 @@ void decrRefCount(robj *o) {
     } else {
         do {
             new_val = old_val;
-            flags = (struct robjFlags*)&new_val;
-            flags->refcount--;
+            ((struct robjFlags*)&new_val)->refcount--;
         } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_val, new_val));
-        refcount = flags->refcount;
+        refcount = ((struct robjFlags*)&new_val)->refcount;
     }
 
     /* old_val now contains the value before decrement (CAS updates it on failure) */
