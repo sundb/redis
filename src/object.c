@@ -588,27 +588,27 @@ void freeStreamObject(robj *o) {
 }
 
 void incrRefCount(robj *o) {
-    uint32_t old_val = 0, new_val;
+    union {
+        uint32_t val;
+        struct robjFlags flags;
+    } old_u, new_u;
 
-    atomicGet(o->flags_refcount, old_val);
-    unsigned int refcount = ((struct robjFlags*)&old_val)->refcount;
+    atomicGet(o->flags_refcount, old_u.val);
 
-    if (refcount < OBJ_FIRST_SPECIAL_REFCOUNT - 1) {
-        if (likely(refcount == 1)) {
+    if (old_u.flags.refcount < OBJ_FIRST_SPECIAL_REFCOUNT - 1) {
+        if (likely(old_u.flags.refcount == 1)) {
             /* Fast path, only hold by itself. */
             o->flags.refcount++;
         } else {
             do {
-                new_val = old_val;
-                ((struct robjFlags*)&new_val)->refcount++;
-            } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_val, new_val));
+                new_u.val = old_u.val;
+                new_u.flags.refcount++;
+            } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_u.val, new_u.val));
         }
-
-        // o->flags.refcount++;
     } else {
-        if (refcount == OBJ_SHARED_REFCOUNT) {
+        if (old_u.flags.refcount == OBJ_SHARED_REFCOUNT) {
             /* Nothing to do: this refcount is immutable. */
-        } else if (refcount == OBJ_STATIC_REFCOUNT) {
+        } else if (old_u.flags.refcount == OBJ_STATIC_REFCOUNT) {
             serverPanic("You tried to retain an object allocated in the stack");
         } else {
             serverPanic("You tried to retain an object with maximum refcount");
@@ -617,34 +617,31 @@ void incrRefCount(robj *o) {
 }
 
 void decrRefCount(robj *o) {
-    uint32_t old_val, new_val;
+    union {
+        uint32_t val;
+        struct robjFlags flags;
+    } old_u, new_u;
 
-    atomicGet(o->flags_refcount, old_val);
-    unsigned int refcount = ((struct robjFlags*)&old_val)->refcount;
+    atomicGet(o->flags_refcount, old_u.val);
 
-    if (refcount == OBJ_SHARED_REFCOUNT)
+    if (old_u.flags.refcount == OBJ_SHARED_REFCOUNT)
         return; /* Nothing to do: this refcount is immutable. */
-    if (unlikely(refcount <= 0)) {
+    if (unlikely(old_u.flags.refcount <= 0)) {
         serverPanic("illegal decrRefCount for object with: type %u, encoding %u, refcount %d",
-            o->type, o->encoding, refcount);
+            o->type, o->encoding, old_u.flags.refcount);
     }
 
-    if (likely(refcount == 1)) {
+    if (likely(old_u.flags.refcount == 1)) {
         /* Fast path, only hold by itself. */
-        o->flags.refcount = refcount = 0;
+        new_u.flags.refcount = 0;
     } else {
         do {
-            new_val = old_val;
-            ((struct robjFlags*)&new_val)->refcount--;
-        } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_val, new_val));
-        refcount = ((struct robjFlags*)&new_val)->refcount;
+            new_u.val = old_u.val;
+            new_u.flags.refcount--;
+        } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_u.val, new_u.val));
     }
 
-    // o->flags.refcount--;
-    // refcount = o->flags.refcount;
-
-    /* old_val now contains the value before decrement (CAS updates it on failure) */
-    if (refcount == 0) {
+    if (new_u.flags.refcount == 0) {
         void *alloc = o;
 
         if (o->flags.iskvobj) {
