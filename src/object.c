@@ -594,15 +594,17 @@ void incrRefCount(robj *o) {
     unsigned int refcount = ((struct robjFlags*)&old_val)->refcount;
 
     if (refcount < OBJ_FIRST_SPECIAL_REFCOUNT - 1) {
-        if (likely(refcount == 1)) {
-            /* Fast path, only hold by itself. */
-            o->flags.refcount++;
-        } else {
-            do {
-                new_val = old_val;
-                ((struct robjFlags*)&new_val)->refcount++;
-            } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_val, new_val));
-        }
+        // if (likely(refcount == 1)) {
+        //     /* Fast path, only hold by itself. */
+        //     o->flags.refcount++;
+        // } else {
+        //     do {
+        //         new_val = old_val;
+        //         ((struct robjFlags*)&new_val)->refcount++;
+        //     } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_val, new_val));
+        // }
+
+        o->flags.refcount++;
     } else {
         if (refcount == OBJ_SHARED_REFCOUNT) {
             /* Nothing to do: this refcount is immutable. */
@@ -627,16 +629,19 @@ void decrRefCount(robj *o) {
             o->type, o->encoding, refcount);
     }
 
-    if (likely(refcount == 1)) {
-        /* Fast path, only hold by itself. */
-        o->flags.refcount = refcount = 0;
-    } else {
-        do {
-            new_val = old_val;
-            ((struct robjFlags*)&new_val)->refcount--;
-        } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_val, new_val));
-        refcount = ((struct robjFlags*)&new_val)->refcount;
-    }
+    // if (likely(refcount == 1)) {
+    //     /* Fast path, only hold by itself. */
+    //     o->flags.refcount = refcount = 0;
+    // } else {
+    //     do {
+    //         new_val = old_val;
+    //         ((struct robjFlags*)&new_val)->refcount--;
+    //     } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_val, new_val));
+    //     refcount = ((struct robjFlags*)&new_val)->refcount;
+    // }
+
+    o->flags.refcount--;
+    refcount = o->flags.refcount;
 
     /* old_val now contains the value before decrement (CAS updates it on failure) */
     if (refcount == 0) {
