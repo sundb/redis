@@ -295,7 +295,7 @@ void *activeDefragHfieldAndUpdateRef(void *ptr, void *privdata) {
  * Note that the caller is responsible for updating any other references to the robj. */
 robj *activeDefragStringObEx(robj* ob, unsigned int expected_refcount) {
     robj *ret = NULL;
-    if (robj_get_refcount(ob)!=expected_refcount)
+    if (ob->flags.refcount!=expected_refcount)
         return NULL;
 
     /* try to defrag robj (only if not an EMBSTR type (handled below). */
@@ -1059,7 +1059,7 @@ robj *activeDefragKvobj(kvobj* kv, int without_free) {
     long offsetEmbstr = LONG_MIN;
 
     /* Don't defrag kvobj's with multiple references (refcount > 1) */
-    if (robj_get_refcount(kv) != 1)
+    if (kv->flags.refcount != 1)
         return NULL;
 
     /* Calculate offset for EMBSTR strings */
@@ -1131,7 +1131,7 @@ void defragKey(defragKeysCtx *ctx, dictEntry *de, dictEntryLink link) {
         /* Only defrag strings with refcount==1 (String might be shared as dict 
          * keys, e.g. pub/sub channels, and may be accessed by IO threads. Other 
          * types are never used as dict keys) */
-        if ((robj_get_refcount(ob)==1) && (ob->encoding == OBJ_ENCODING_RAW)) {
+        if ((ob->flags.refcount==1) && (ob->encoding == OBJ_ENCODING_RAW)) {
             /* For RAW strings, defrag the separate SDS allocation */
             sds newsds = activeDefragSds((sds)ob->ptr);
             if (newsds) ob->ptr = newsds;
@@ -1254,7 +1254,7 @@ void defragPubsubScanCallback(void *privdata, const dictEntry *de, dictEntryLink
     dict *newclients, *clients = dictGetVal(de);
 
     /* Try to defrag the channel name. */
-    serverAssert(robj_get_refcount(channel) == dictSize(clients) + 1);
+    serverAssert(channel->flags.refcount == dictSize(clients) + 1);
     newchannel = activeDefragStringObEx(channel, dictSize(clients) + 1);
     if (newchannel) {
         kvstoreDictSetKey(pubsub_channels, ctx->kvstate.slot, (dictEntry*)de, newchannel);

@@ -122,16 +122,6 @@ typedef struct redisObject robj;
 /* kvobj: see header comment above for definition and memory layout. */
 typedef struct redisObject kvobj;
 
-/* Inline functions to access fields directly from robj pointer (read).
- * These use atomic read for thread-safety. */
-static inline uint32_t robj_get_refcount(const robj *o) {
-    return o->flags.refcount;
-    // uint32_t tmp = 0;
-    // atomicGet(o->flags_refcount, tmp);
-    // struct robjFlags *flags = (struct robjFlags*)&tmp;
-    // return flags->refcount;
-}
-
 kvobj *kvobjCreate(int type, const sds key, void *ptr, uint32_t keyMetaBits);
 kvobj *kvobjSet(sds key, robj *val, uint32_t keyMetaBits);
 kvobj *kvobjSetExpire(kvobj *kv, long long expire);

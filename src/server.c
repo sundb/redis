@@ -475,8 +475,8 @@ int dictEncObjKeyCompare(dictCmpCache *cache, const void *key1, const void *key2
      * good reasons, because it would incrRefCount() the object, which
      * is invalid. So we check to make sure dictFind() works with static
      * objects as well. */
-    uint32_t refcount1 = robj_get_refcount(o1);
-    uint32_t refcount2 = robj_get_refcount(o2);
+    uint32_t refcount1 = o1->flags.refcount;
+    uint32_t refcount2 = o2->flags.refcount;
     if (refcount1 != OBJ_STATIC_REFCOUNT) o1 = getDecodedObject(o1);
     if (refcount2 != OBJ_STATIC_REFCOUNT) o2 = getDecodedObject(o2);
     cmp = dictSdsKeyCompare(cache,o1->ptr,o2->ptr);

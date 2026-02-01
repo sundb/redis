@@ -59,7 +59,7 @@ void updateLFU(robj *val) {
 
 /* Update LRM when an object is modified. */
 void updateLRM(robj *o) {
-    if (robj_get_refcount(o) == OBJ_SHARED_REFCOUNT)
+    if (o->flags.refcount == OBJ_SHARED_REFCOUNT)
         return;
     if (server.maxmemory_policy & MAXMEMORY_FLAG_LRM) {
         o->lru = LRU_CLOCK();
@@ -622,8 +622,8 @@ static void dbSetValue(redisDb *db, robj *key, robj **valref, dictEntryLink link
     if (server.memory_tracking_enabled)
         oldsize = kvobjAllocSize(old);
 
-    if ((robj_get_refcount(old) == 1 && old->encoding != OBJ_ENCODING_EMBSTR) &&
-        (robj_get_refcount(val) == 1 && val->encoding != OBJ_ENCODING_EMBSTR) && (!freeModuleMeta))
+    if ((old->flags.refcount == 1 && old->encoding != OBJ_ENCODING_EMBSTR) &&
+        (val->flags.refcount == 1 && val->encoding != OBJ_ENCODING_EMBSTR) && (!freeModuleMeta))
     {
         /* Keep old object in the database. Just swap it's ptr, type and
          * encoding with the content of val. */
@@ -687,7 +687,7 @@ static void dbSetValue(redisDb *db, robj *key, robj **valref, dictEntryLink link
         }
     }
 
-    if (server.io_threads_num > 1 && old->encoding == OBJ_ENCODING_RAW && robj_get_refcount(old) == 1) {
+    if (server.io_threads_num > 1 && old->encoding == OBJ_ENCODING_RAW && old->flags.refcount == 1) {
         /* In multi-threaded mode, the OBJ_ENCODING_RAW string object usually is
          * allocated in the IO thread, so we defer the free to the IO thread.
          * Besides, we never free a string object in BIO threads, so, even with
@@ -950,7 +950,7 @@ kvobj *dbUnshareStringValue(redisDb *db, robj *key, kvobj *kv) {
  * which can be used if we already have one, thus saving the dbFind call. */
 kvobj *dbUnshareStringValueByLink(redisDb *db, robj *key, kvobj *o, dictEntryLink link) {
     serverAssert(o->type == OBJ_STRING);
-    if (robj_get_refcount(o) != 1 || o->encoding != OBJ_ENCODING_RAW) {
+    if (o->flags.refcount != 1 || o->encoding != OBJ_ENCODING_RAW) {
         robj *decoded = getDecodedObject(o);
         o = createRawStringObject(decoded->ptr, sdslen(decoded->ptr));
         decrRefCount(decoded);
@@ -2696,7 +2696,7 @@ static void deleteKeyAndPropagate(redisDb *db, robj *keyobj, int notify_type, lo
     char *notify_name = notify_type == NOTIFY_EXPIRED ? "expired" : "evicted";
 
     /* The key needs to be converted from static to heap before deleted */
-    int static_key = robj_get_refcount(keyobj) == OBJ_STATIC_REFCOUNT;
+    int static_key = keyobj->flags.refcount == OBJ_STATIC_REFCOUNT;
     if (static_key) {
         keyobj = createStringObject(keyobj->ptr, sdslen(keyobj->ptr));
     }

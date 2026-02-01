@@ -117,7 +117,7 @@ robj *createObject(int type, void *ptr) {
 }
 
 void initObjectLRUOrLFU(robj *o) {
-    if (robj_get_refcount(o) == OBJ_SHARED_REFCOUNT)
+    if (o->flags.refcount == OBJ_SHARED_REFCOUNT)
         return;
     /* Set the LRU to the current lruclock (seconds resolution), or
      * alternatively the LFU counter. */
@@ -141,7 +141,7 @@ void initObjectLRUOrLFU(robj *o) {
  *
  */
 robj *makeObjectShared(robj *o) {
-    serverAssert(robj_get_refcount(o) == 1);
+    serverAssert(o->flags.refcount == 1);
     o->flags.refcount = OBJ_SHARED_REFCOUNT;
     return o;
 }
@@ -298,7 +298,7 @@ kvobj *kvobjSet(sds key, robj *val, uint32_t keyMetaBits) {
     } else {
         /* Create a new object with embedded key. Reuse ptr if possible. */
         void *valptr;
-        if (robj_get_refcount(val) == 1) {
+        if (val->flags.refcount == 1) {
             /* Reuse the ptr. There are no other references to val. */
             valptr = val->ptr;
             val->ptr = NULL;
@@ -835,7 +835,7 @@ void dismissObject(robj *o, size_t size_hint) {
     /* Currently we use zmadvise_dontneed only when we use jemalloc with Linux.
      * so we avoid these pointless loops when they're not going to do anything. */
 #if defined(USE_JEMALLOC) && defined(__linux__)
-    if (robj_get_refcount(o) != 1) return;
+    if (o->flags.refcount != 1) return;
     switch(o->type) {
         case OBJ_STRING: dismissStringObject(o); break;
         case OBJ_LIST: dismissListObject(o, size_hint); break;
@@ -911,7 +911,7 @@ robj *tryObjectEncodingEx(robj *o, int try_trim) {
     /* It's not safe to encode shared objects: shared objects can be shared
      * everywhere in the "object space" of Redis and may end in places where
      * they are not handled. We handle them only as values in the keyspace. */
-     if (robj_get_refcount(o) > 1) return o;
+     if (o->flags.refcount > 1) return o;
 
     /* Check if we can represent this string as a long integer.
      * Note that we are sure that a string larger than 20 chars is not
@@ -1637,7 +1637,7 @@ NULL
     } else if (!strcasecmp(c->argv[1]->ptr,"refcount") && c->argc == 3) {
         if ((kv = kvobjCommandLookupOrReply(c, c->argv[2], shared.null[c->resp]))
                 == NULL) return;
-        addReplyLongLong(c, robj_get_refcount(kv));
+        addReplyLongLong(c, kv->flags.refcount);
     } else if (!strcasecmp(c->argv[1]->ptr,"encoding") && c->argc == 3) {
         if ((kv = kvobjCommandLookupOrReply(c, c->argv[2], shared.null[c->resp]))
                 == NULL) return;

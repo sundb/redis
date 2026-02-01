@@ -815,7 +815,7 @@ void incrDecrCommand(client *c, long long incr) {
     }
     value += incr;
 
-    if (o && robj_get_refcount(o) == 1 && o->encoding == OBJ_ENCODING_INT &&
+    if (o && o->flags.refcount == 1 && o->encoding == OBJ_ENCODING_INT &&
         value >= LONG_MIN && value <= LONG_MAX)
     {
         new = o;

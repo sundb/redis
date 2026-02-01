@@ -1223,7 +1223,7 @@ static int isCopyAvoidPreferred(client *c, robj *obj, size_t len) {
      * to server.pending_push_messages when CLIENT_PUSHING is set. */
     if (c->flags & CLIENT_PUSHING) return 0;
 
-    if (obj->encoding != OBJ_ENCODING_RAW || robj_get_refcount(obj) >= OBJ_FIRST_SPECIAL_REFCOUNT) return 0;
+    if (obj->encoding != OBJ_ENCODING_RAW || obj->flags.refcount >= OBJ_FIRST_SPECIAL_REFCOUNT) return 0;
 
     /* Copy avoidance is preferred for any string size starting certain number of I/O threads  */
     if (server.io_threads_num >= COPY_AVOID_MIN_IO_THREADS) return 1;
@@ -5517,7 +5517,7 @@ static void reclaimPendingCommand(client *c, pendingCommand *pcmd) {
              * decrease the reference count to release our reference to it. */
             for (int j = 0; j < pcmd->argc; j++) {
                 robj *o = pcmd->argv[j];
-                if (o && robj_get_refcount(o) > 1) {
+                if (o && o->flags.refcount > 1) {
                     decrRefCount(o);
                     pcmd->argv[j] = NULL;
                 }
