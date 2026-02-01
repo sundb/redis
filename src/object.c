@@ -596,9 +596,10 @@ void incrRefCount(robj *o) {
     atomicGet(o->flags_refcount, old_u.val);
 
     if (old_u.flags.refcount < OBJ_FIRST_SPECIAL_REFCOUNT - 1) {
-        if (likely(old_u.flags.refcount == 1)) {
+        if (old_u.flags.refcount == 1) {
             /* Fast path, only hold by itself. */
-            o->flags.refcount++;
+            old_u.flags.refcount++;
+            atomicSet(o->flags_refcount, old_u.val);
         } else {
             do {
                 new_u.val = old_u.val;
@@ -621,7 +622,6 @@ void decrRefCount(robj *o) {
         uint32_t val;
         struct robjFlags flags;
     } old_u, new_u;
-
     atomicGet(o->flags_refcount, old_u.val);
 
     if (old_u.flags.refcount == OBJ_SHARED_REFCOUNT)
@@ -631,15 +631,10 @@ void decrRefCount(robj *o) {
             o->type, o->encoding, old_u.flags.refcount);
     }
 
-    if (likely(old_u.flags.refcount == 1)) {
-        /* Fast path, only hold by itself. */
-        new_u.flags.refcount = 0;
-    } else {
-        do {
-            new_u.val = old_u.val;
-            new_u.flags.refcount--;
-        } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_u.val, new_u.val));
-    }
+    do {
+        new_u.val = old_u.val;
+        new_u.flags.refcount--;
+    } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_u.val, new_u.val));
 
     if (new_u.flags.refcount == 0) {
         void *alloc = o;
