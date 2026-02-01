@@ -591,7 +591,7 @@ static void dbSetValue(redisDb *db, robj *key, robj **valref, dictEntryLink link
     long long oldExpire = getExpire(db, key->ptr, old);
 
     /* All metadata will be kept if not `overwrite` for the new object  */
-    uint32_t newKeyMetaBits = robj_get_metabits(old);
+    uint32_t newKeyMetaBits = old->flags.metabits;
     /* clear expire if not keepTTL or no old expire */
     if ((!keepTTL) || (oldExpire == -1))
         newKeyMetaBits &= ~KEY_META_MASK_EXPIRE;
@@ -604,7 +604,7 @@ static void dbSetValue(redisDb *db, robj *key, robj **valref, dictEntryLink link
         incrRefCount(old);
 
         /* Free related metadata. Ignore builtin metadata (currently only expire) */
-        if (getModuleMetaBits(robj_get_metabits(old))) {
+        if (getModuleMetaBits(old->flags.metabits)) {
             keyMetaOnUnlink(db, key, old);
             freeModuleMeta = 1;
         }
@@ -853,7 +853,7 @@ int dbGenericDelete(redisDb *db, robj *key, int async, int flags) {
          * need to incr to retain kv */
         incrRefCount(kv); /* refcnt=1->2 */
         /* Metadata hook: notify unlink for key metadata cleanup. */
-        if (getModuleMetaBits(robj_get_metabits(kv))) keyMetaOnUnlink(db, key, kv);
+        if (getModuleMetaBits(kv->flags.metabits)) keyMetaOnUnlink(db, key, kv);
         /* Tells the module that the key has been unlinked from the database. */
         moduleNotifyKeyUnlink(key, kv, db->id, flags);
         /* We want to try to unblock any module clients or clients using a blocking XREADGROUP */
@@ -2166,7 +2166,7 @@ void renameGenericCommand(client *c, int nx) {
     /* Prepare metadata for the renamed key */
     KeyMetaSpec keymeta;
     keyMetaSpecInit(&keymeta);
-    if (robj_get_metabits(o)) keyMetaOnRename(c->db, o, c->argv[1], c->argv[2], &keymeta);
+    if (o->flags.metabits) keyMetaOnRename(c->db, o, c->argv[1], c->argv[2], &keymeta);
 
     dbDelete(c->db,c->argv[1]);
     
@@ -2381,7 +2381,7 @@ void copyCommand(client *c) {
     /* Prepare metadata for the new key */
     KeyMetaSpec keymeta;
     keyMetaSpecInit(&keymeta);
-    if (robj_get_metabits(o)) keyMetaOnCopy(o, key, newkey, c->db->id, dst->id, &keymeta);
+    if (o->flags.metabits) keyMetaOnCopy(o, key, newkey, c->db->id, dst->id, &keymeta);
 
     kvobj *kvCopy = dbAddInternal(dst, newkey, &newobj, NULL, &keymeta);
 

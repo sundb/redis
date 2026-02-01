@@ -149,7 +149,7 @@ static inline uint32_t getModuleMetaBits(uint16_t metabits);
 /********** Inline functions **********/
 
 static inline void keyMetaResetValues(kvobj *kv) {
-    uint32_t metabits = robj_get_metabits(kv);
+    uint32_t metabits = kv->flags.metabits;
     if (unlikely(metabits & KEY_META_MASK_MODULES))
         keyMetaResetModuleValues(kv);
     /* Must be first meta (optimized) */

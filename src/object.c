@@ -25,7 +25,7 @@
 /* Map a metadata ID (bit index) to its compacted slot number among set bits,
  * then return a pointer to that slot. Caller must ensure the ID bit is set. */
 uint64_t *kvobjMetaRef(kvobj *kv, int metaId) {
-    uint32_t bits = robj_get_metabits(kv);
+    uint32_t bits = kv->flags.metabits;
 
     /* Expiry is always the first metadata */
     if (likely(metaId == 0)) return ((uint64_t *)kv) - 1;
@@ -87,7 +87,9 @@ kvobj *kvobjCreate(int type, const sds key, void *ptr, uint32_t keyMetaBits) {
     kv->encoding = OBJ_ENCODING_RAW;
     kv->ptr = ptr;
     kv->lru = 0;
-    kv->flags_refcount = OBJ_BUILD_FLAGS_REFCOUNT(1, 1, keyMetaBits);
+    kv->flags.iskvobj = 1;
+    kv->flags.metabits = keyMetaBits;
+    kv->flags.refcount = 1;
 
     /* The memory after the struct where we embedded data. */
     char *data = (void *)(kv + 1);
@@ -108,7 +110,9 @@ robj *createObject(int type, void *ptr) {
     o->encoding = OBJ_ENCODING_RAW;
     o->ptr = ptr;
     o->lru = 0;
-    o->flags_refcount = OBJ_BUILD_FLAGS_REFCOUNT(1, 0, 0);
+    o->flags.iskvobj = 0;
+    o->flags.metabits = 0;
+    o->flags.refcount = 1;
     return o;
 }
 
@@ -138,7 +142,7 @@ void initObjectLRUOrLFU(robj *o) {
  */
 robj *makeObjectShared(robj *o) {
     serverAssert(robj_get_refcount(o) == 1);
-    robj_set_refcount(o, OBJ_SHARED_REFCOUNT);
+    o->flags.refcount = OBJ_SHARED_REFCOUNT;
     return o;
 }
 
@@ -184,7 +188,9 @@ static kvobj *kvobjCreateEmbedString(const char *val_ptr, size_t val_len,
     o->type = OBJ_STRING;
     o->encoding = OBJ_ENCODING_EMBSTR;
     o->lru = 0;
-    o->flags_refcount = OBJ_BUILD_FLAGS_REFCOUNT(1, 1, keyMetaBits);
+    o->flags.refcount = 1;
+    o->flags.iskvobj = 1;
+    o->flags.metabits = keyMetaBits;
 
     /* The memory after the struct where we embedded data. */
     char *data = (char *)(o + 1);
@@ -222,7 +228,9 @@ robj *createEmbeddedStringObject(const char *val_ptr, size_t val_len) {
     o->type = OBJ_STRING;
     o->encoding = OBJ_ENCODING_EMBSTR;
     o->lru = 0;
-    o->flags_refcount = OBJ_BUILD_FLAGS_REFCOUNT(1, 0, 0);
+    o->flags.iskvobj = 0;
+    o->flags.metabits = 0;
+    o->flags.refcount = 1;
 
     /* The memory after the struct where we embedded data. */
     char *data = (char *)(o + 1);
@@ -236,14 +244,14 @@ robj *createEmbeddedStringObject(const char *val_ptr, size_t val_len) {
 
 sds kvobjGetKey(const kvobj *kv) {
     unsigned char *data = (void *)(kv + 1);
-    debugServerAssert(robj_get_iskvobj(kv));
+    debugServerAssert(kv->flags.iskvobj);
     uint8_t hdr_size = *(uint8_t *)data;
     data += 1 + hdr_size;
     return (sds)data;
 }
 
 long long kvobjGetExpire(const kvobj *kv) {
-    if (robj_get_metabits(kv) & KEY_META_MASK_EXPIRE) {
+    if (kv->flags.metabits & KEY_META_MASK_EXPIRE) {
         return (long long) (*kvobjMetaRef((kvobj *)kv, KEY_META_ID_EXPIRE));
     } else {
         return -1;
@@ -255,7 +263,7 @@ long long kvobjGetExpire(const kvobj *kv) {
  * returned object instead of 'val' after calling this function. */
 kvobj *kvobjSetExpire(kvobj *kv, long long expire) {
     /* If kv not expirable, then we need to realloc to add expire metadata */
-    uint32_t metabits = robj_get_metabits(kv);
+    uint32_t metabits = kv->flags.metabits;
     if (!(metabits & KEY_META_MASK_EXPIRE)) {
         /* Nothing to do if kv not expirable and expire is -1 */
         if (expire == -1)
@@ -314,7 +322,7 @@ kvobj *kvobjSet(sds key, robj *val, uint32_t keyMetaBits) {
     kv->lru = val->lru;
 
     /* Transfer module metadata from `val` to new `kv` (if `val` of type kvobj with metadata). */
-    if (robj_get_metabits(val) & KEY_META_MASK_MODULES)
+    if (val->flags.metabits & KEY_META_MASK_MODULES)
         keyMetaTransition((kvobj *) val, kv);
     
     decrRefCount(val);
@@ -580,17 +588,21 @@ void freeStreamObject(robj *o) {
 }
 
 void incrRefCount(robj *o) {
-    uint32_t old_val, new_val;
+    uint32_t old_val = 0, new_val;
+
     atomicGet(o->flags_refcount, old_val);
-    unsigned int refcount = OBJ_GET_REFCOUNT(old_val);
+    struct robjFlags *flags = (struct robjFlags*)&old_val;
+    unsigned int refcount = flags->refcount;
 
     if (refcount < OBJ_FIRST_SPECIAL_REFCOUNT - 1) {
         if (likely(refcount == 1)) {
             /* Fast path, only hold by itself. */
-            robj_incr_refcount(o);
+            o->flags.refcount++;
         } else {
             do {
-                new_val = OBJ_INCR_REFCOUNT(old_val);
+                new_val = old_val;
+                flags = (struct robjFlags*)&new_val;
+                flags->refcount++;
             } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_val, new_val));
         }
     } else {
@@ -608,7 +620,8 @@ void decrRefCount(robj *o) {
     uint32_t old_val, new_val;
 
     atomicGet(o->flags_refcount, old_val);
-    unsigned int refcount = OBJ_GET_REFCOUNT(old_val);
+    struct robjFlags *flags = (struct robjFlags*)&old_val;
+    unsigned int refcount = flags->refcount;
 
     if (refcount == OBJ_SHARED_REFCOUNT)
         return; /* Nothing to do: this refcount is immutable. */
@@ -619,24 +632,25 @@ void decrRefCount(robj *o) {
 
     if (likely(refcount == 1)) {
         /* Fast path, only hold by itself. */
-        robj_set_refcount(o, 0);
-        refcount = 0;
+        o->flags.refcount = refcount = 0;
     } else {
         do {
-            new_val = OBJ_DECR_REFCOUNT(old_val);
+            new_val = old_val;
+            flags = (struct robjFlags*)&new_val;
+            flags->refcount--;
         } while (!atomicCompareExchange(uint32_t, o->flags_refcount, old_val, new_val));
-        refcount = OBJ_GET_REFCOUNT(new_val);
+        refcount = flags->refcount;
     }
 
     /* old_val now contains the value before decrement (CAS updates it on failure) */
     if (refcount == 0) {
         void *alloc = o;
 
-        if (robj_get_iskvobj(o)) {
+        if (o->flags.iskvobj) {
             /* eval real allocation pointer */
             alloc = kvobjGetAllocPtr(o);
             /* if kvobj has metadata attached. */
-            if (getModuleMetaBits(robj_get_metabits(o)))
+            if (getModuleMetaBits(o->flags.metabits))
                 keyMetaOnFree((kvobj *)o);
         }
         

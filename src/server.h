@@ -1068,7 +1068,7 @@ char *getObjectTypeName(robj*);
     _var.type = OBJ_STRING; \
     _var.encoding = OBJ_ENCODING_RAW; \
     _var.lru = 0; \
-    _var.flags_refcount = OBJ_BUILD_FLAGS_REFCOUNT(OBJ_STATIC_REFCOUNT, 0, 0); \
+    _var.flags_refcount = OBJ_STATIC_REFCOUNT; \
     _var.ptr = _ptr; \
 } while(0)
 

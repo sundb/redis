@@ -94,7 +94,7 @@ void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int skip_chec
     rioInitWithBuffer(payload,sdsempty());
 
     /* Save key metadata if present without (handles TTL separately via command args) */
-    if (getModuleMetaBits(robj_get_metabits(o)))
+    if (getModuleMetaBits(o->flags.metabits))
         serverAssert(rdbSaveKeyMetadata(payload, key, o, dbid) != -1);
     serverAssert(rdbSaveObjectType(payload,o));
     serverAssert(rdbSaveObject(payload,o,key,dbid));
