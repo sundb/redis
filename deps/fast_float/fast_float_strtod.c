@@ -176,8 +176,8 @@ static inline parsed_number_t parse_number_string(const char *p, const char *pen
 
     const char *end_of_integer = p;
     int64_t digit_count = p - start_digits;
-    char *fraction_part_start;
-    size_t fraction_part_len;
+    char *fraction_part_start = NULL;
+    size_t fraction_part_len = 0;
 
     /* Parse decimal point and fractional part */
     int64_t exponent = 0;
@@ -247,7 +247,6 @@ static inline parsed_number_t parse_number_string(const char *p, const char *pen
             /* Reparse, keeping only first 19 significant digits */
             mantissa = 0;
             s = start_digits;
-            int count = 0;
 
             /* Parse integer part */
             uint64_t const minimal_nineteen_digit_integer = 1000000000000000000;
