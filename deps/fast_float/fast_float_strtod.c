@@ -36,8 +36,17 @@
 #include <errno.h>
 #include <math.h>
 #include <float.h>
+#include <stdio.h>
 
 #include "fast_float_strtod.h"
+
+#if __GNUC__ >= 3
+#define likely(x) __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
+#else
+#define likely(x) (x)
+#define unlikely(x) (x)
+#endif
 
 /* Powers of 10 from 10^0 to 10^22 (exact in double precision).
  * These are the only powers of 10 that can be exactly represented as doubles. */
@@ -57,7 +66,7 @@ static const double powers_of_ten[] = {
 #define MAX_DIGITS 19
 
 /* Case-insensitive comparison for first n characters */
-static int strncasecmp_local(const char *s1, const char *s2, size_t n) {
+static inline int strncasecmp_local(const char *s1, const char *s2, size_t n) {
     for (size_t i = 0; i < n; i++) {
         char c1 = s1[i];
         char c2 = s2[i];
@@ -72,8 +81,10 @@ static int strncasecmp_local(const char *s1, const char *s2, size_t n) {
 /* Parse inf/nan special values.
  * Returns 1 if parsed successfully, 0 otherwise.
  * On success, *endptr points past the parsed value. */
-static int parse_infnan(const char *p, const char *pend, double *result, char **endptr, int negative) {
+static inline int parse_infnan(const char *p, const char *pend, double *result, char **endptr) {
     size_t remaining = pend - p;
+    int negative = (*p == '-');
+    if (*p == '-' || *p == '+') p++;
 
     if (remaining >= 3) {
         if (strncasecmp_local(p, "nan", 3) == 0) {
@@ -119,6 +130,11 @@ static int parse_infnan(const char *p, const char *pend, double *result, char **
     return 0;
 }
 
+static inline int is_integer(char c) {
+  // can be micro-optimized, but compilers are entirely able to optimize it well
+  return (unsigned)(c - '0') <= 9u;
+}
+
 /* Parsed number structure */
 typedef struct {
     uint64_t mantissa;      /* Mantissa digits as uint64 */
@@ -131,7 +147,7 @@ typedef struct {
 
 /* Parse a decimal number string into components.
  * This follows the fast_float algorithm closely. */
-static parsed_number_t parse_number_string(const char *p, const char *pend) {
+static inline parsed_number_t parse_number_string(const char *p, const char *pend) {
     parsed_number_t result;
     result.mantissa = 0;
     result.exponent = 0;
@@ -153,13 +169,15 @@ static parsed_number_t parse_number_string(const char *p, const char *pend) {
 
     /* Parse integer part */
     uint64_t mantissa = 0;
-    while (p != pend && *p >= '0' && *p <= '9') {
+    while (p != pend && is_integer(*p)) {
         mantissa = mantissa * 10 + (*p - '0');
         p++;
     }
 
     const char *end_of_integer = p;
     int64_t digit_count = p - start_digits;
+    char *fraction_part_start;
+    size_t fraction_part_len;
 
     /* Parse decimal point and fractional part */
     int64_t exponent = 0;
@@ -168,12 +186,15 @@ static parsed_number_t parse_number_string(const char *p, const char *pend) {
     if (has_decimal) {
         p++;
         const char *before = p;
-        while (p != pend && *p >= '0' && *p <= '9') {
-            mantissa = mantissa * 10 + (*p - '0');
+        while (p != pend && is_integer(*p)) {
+            uint8_t digit = (uint8_t)(*p - (char)('0'));
             p++;
+            mantissa = mantissa * 10 + digit;
         }
         exponent = before - p;  /* Negative: number of fractional digits */
         digit_count += (p - before);
+        fraction_part_start = (char*)before;
+        fraction_part_len = (size_t)(p - before);
     }
 
     /* Must have at least one digit */
@@ -193,11 +214,11 @@ static parsed_number_t parse_number_string(const char *p, const char *pend) {
             p++;
         }
 
-        if (p == pend || *p < '0' || *p > '9') {
+        if (p == pend || is_integer(*p)) {
             /* No digits after e/E, revert to position before 'e' */
             p = exp_start;
         } else {
-            while (p != pend && *p >= '0' && *p <= '9') {
+            while (p != pend && is_integer(*p)) {
                 if (exp_number < 0x10000000) {
                     exp_number = exp_number * 10 + (*p - '0');
                 }
@@ -229,29 +250,24 @@ static parsed_number_t parse_number_string(const char *p, const char *pend) {
             int count = 0;
 
             /* Parse integer part */
-            while (s != end_of_integer && count < MAX_DIGITS) {
+            uint64_t const minimal_nineteen_digit_integer = 1000000000000000000;
+            // while (s != end_of_integer && count < MAX_DIGITS) {
+            while (s != end_of_integer && mantissa < minimal_nineteen_digit_integer) {
                 mantissa = mantissa * 10 + (*s - '0');
                 s++;
-                count++;
             }
 
-            /* Calculate how many integer digits we skipped */
-            int64_t int_digits_skipped = end_of_integer - s;
-
-            if (has_decimal && count < MAX_DIGITS) {
-                /* Parse fractional part */
-                const char *frac_start = end_of_integer + 1;  /* Skip '.' */
-                const char *frac_pos = frac_start;
-                while (frac_pos != p - (exp_number != 0 ? (p - result.lastmatch) : 0) && count < MAX_DIGITS) {
-                    if (*frac_pos >= '0' && *frac_pos <= '9') {
-                        mantissa = mantissa * 10 + (*frac_pos - '0');
-                        count++;
-                    }
-                    frac_pos++;
+            if (mantissa >= minimal_nineteen_digit_integer) { // We have a big integer
+                exponent = end_of_integer - p + exp_number;
+            } else { // We have a value with a fractional component.
+                p = fraction_part_start;
+                char const *frac_end = p + fraction_part_len;
+                while ((mantissa < minimal_nineteen_digit_integer) && (p != frac_end)) {
+                    mantissa = mantissa * 10 + (uint64_t)(*p - '0');
+                    ++p;
                 }
+                exponent = fraction_part_start - p + exp_number;
             }
-
-            exponent = int_digits_skipped + exp_number;
         }
     }
 
@@ -262,7 +278,7 @@ static parsed_number_t parse_number_string(const char *p, const char *pend) {
 
 /* Convert parsed number to double using fast path.
  * Returns 1 if fast path succeeded, 0 if fallback needed. */
-static int compute_float_fast(parsed_number_t *pns, double *result) {
+static inline int compute_float_fast(parsed_number_t *pns, double *result) {
     /* Check if we're within fast path bounds */
     if (pns->too_many_digits) return 0;
     if (pns->exponent < MIN_EXPONENT_FAST_PATH) return 0;
@@ -299,10 +315,10 @@ static int compute_float_fast(parsed_number_t *pns, double *result) {
  * @return       The converted value as a double. If no valid conversion could
  *               be performed, returns 0.0.
  */
-double fast_float_strtod(const char *nptr, char **endptr) {
+double fast_float_strtod(const char *nptr, size_t len, char **endptr) {
     double result = 0.0;
     const char *p = nptr;
-    const char *pend = nptr + strlen(nptr);
+    const char *pend = nptr + len;
 
     if (p == pend) {
         errno = EINVAL;
@@ -310,25 +326,17 @@ double fast_float_strtod(const char *nptr, char **endptr) {
         return 0.0;
     }
 
-    /* Check for sign first (for inf/nan handling) */
-    int negative = (*p == '-');
-    const char *after_sign = p;
-    if (*p == '-' || *p == '+') {
-        after_sign = p + 1;
-    }
-
-    /* Try parsing inf/nan */
-    if (after_sign < pend && parse_infnan(after_sign, pend, &result, endptr, negative)) {
-        return result;
-    }
-
     /* Parse the number string */
     parsed_number_t pns = parse_number_string(p, pend);
 
     if (!pns.valid) {
-        errno = EINVAL;
-        if (endptr) *endptr = (char *)nptr;
-        return 0.0;
+        if (parse_infnan(nptr, pend, &result, endptr)) {
+            return result; 
+        } else {
+            errno = EINVAL;
+            if (endptr) *endptr = (char *)nptr;
+            return 0.0;
+        }
     }
 
     /* Try fast path first */
