@@ -284,6 +284,8 @@ void restoreCommand(client *c) {
             notifyKeyspaceEvent(NOTIFY_GENERIC,"del",key,c->db->id);
             server.dirty++;
         }
+        /* Update the stats, see setGenericCommand for details. */
+        server.stat_expiredkeys++;
         keyMetaSpecCleanup(&keymeta);
         decrRefCount(obj);
         addReply(c, shared.ok);
@@ -2118,12 +2120,13 @@ slotRangeArray *clusterGetLocalSlotRanges(void) {
  *
  * Usage: SFLUSH <start-slot> <end slot> [<start-slot> <end slot>]* [SYNC|ASYNC]
  *
- * This is an initial implementation of SFLUSH (slots flush) which is limited to
- * flushing a single shard as a whole, but in the future the same command may be
- * used to partially flush a shard based on hash slots. Currently only if provided
- * slots cover entirely the slots of a node, the node will be flushed and the
- * return value will be pairs of slot ranges. Otherwise, a single empty set will 
- * be returned. If possible, SFLUSH SYNC will be run as blocking ASYNC as an 
+ * Redis will flush the slots that belong to this node and reply with the flushed 
+ * slot ranges. If no slot is flushed, an empty array will be returned.
+ * 
+ * e.g. Node owns slot 100-200, user issues SFLUSH 50 150
+ * Redis will flush slot 100-150 and reply with [100,150]
+ * 
+ * If possible, SFLUSH SYNC will be run as blocking ASYNC as an 
  * optimization.
  */
 void sflushCommand(client *c) {
@@ -2156,8 +2159,7 @@ void sflushCommand(client *c) {
     slotRangeArray *slots = parseSlotRangesOrReply(c, argc, 1);
     if (!slots) return;
 
-    /* If client is AOF or master, we must obey the slot ranges.
-     * NOTE: we should exclude CLIENT_PSEUDO_MASTER when merging into fork. */
+    /* If client is AOF or master, we must obey the slot ranges. */
     int must_obey = mustObeyClient(c);
 
     /* Iterate and find the slot ranges that belong to this node. Save them in
@@ -2180,6 +2182,19 @@ void sflushCommand(client *c) {
         return;
     }
     slotRangeArrayFree(slots);
+
+    /* If the selected slots are exactly the same as the local slots, we can
+     * simply flush the entire DB by flushCommandCommon. */
+    slotRangeArray *local_slots = clusterGetLocalSlotRanges();
+    int all_slots_covered = slotRangeArrayIsEqual(myslots, local_slots);
+    slotRangeArrayFree(local_slots);
+    if (all_slots_covered) {
+        /* If not flush as blocking async, then reply immediately */
+        if (flushCommandCommon(c, FLUSH_TYPE_SLOTS, flags, myslots) == 0) {
+            replySlotsFlushAndFree(c, myslots);
+        }
+        return;
+    }
 
     /* Cancel all ASM tasks that overlap with the given slot ranges. */
     clusterAsmCancelBySlotRangeArray(myslots, c->argv[0]->ptr);
