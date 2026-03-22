@@ -84,6 +84,8 @@
 /* Test for polling API */
 #ifdef __linux__
 #define HAVE_EPOLL 1
+/* HAVE_IO_URING is defined via Makefile when USE_IO_URING=yes.
+ * Requires Linux 5.6+ and liburing. */
 #endif
 
 /* Test for accept4() */

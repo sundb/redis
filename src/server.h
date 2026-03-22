@@ -22,6 +22,7 @@
 #include "atomicvar.h"
 #include "commands.h"
 #include "object.h"
+#include "io_uring_batch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1626,6 +1627,9 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     pthread_mutex_t pending_clients_mutex;      /* Mutex for pending write list */
     list *pending_clients_to_main_thread;       /* Clients that are waiting to be executed by the main thread. */
     list *clients;                              /* IO thread managed clients. */
+#ifdef HAVE_IO_URING
+    ioBatchState *io_uring_batch;              /* Per-thread batch I/O state */
+#endif
 } IOThread;
 
 /* Context for streaming replDataBuf to database */
@@ -2024,6 +2028,14 @@ struct redisServer {
     pendingCommandPool cmd_pool; /* Shared pool for reusing pendingCommand,
                                   * only when IO threads disabled */
     int prefetch_batch_max_size;/* Maximum number of keys to prefetch in a single batch */
+#ifdef HAVE_IO_URING
+    /* io_uring batch I/O state for the main thread */
+    ioBatchState *io_uring_batch;
+    int io_uring_enabled;       /* Master switch for io_uring */
+    int io_uring_batch_writes;  /* Enable batch writes via io_uring */
+    int io_uring_batch_reads;   /* Enable batch reads via io_uring */
+    int io_uring_sq_size;       /* Submission queue size */
+#endif
     long long events_processed_while_blocked; /* processEventsWhileBlocked() */
     int enable_protected_configs;    /* Enable the modification of protected configs, see PROTECTED_ACTION_ALLOWED_* */
     int enable_debug_cmd;            /* Enable DEBUG commands, see PROTECTED_ACTION_ALLOWED_* */
@@ -3247,6 +3259,15 @@ void assignClientToIOThread(client *c);
 void keepClientInMainThread(client *c);
 void fetchClientFromIOThread(client *c);
 int isClientMustHandledByMainThread(client *c);
+
+/* io_uring_batch.c - io_uring batch I/O */
+#ifdef HAVE_IO_URING
+void initIOUring(void);
+void freeIOUring(void);
+int handleClientsWithPendingWritesIOUring(void);
+int handleBatchReadsIOUring(int *fds, int nfds);
+void harvestIOUringCompletions(void);
+#endif
 
 /* logreqres.c - logging of requests and responses */
 void reqresReset(client *c, int free_buf);

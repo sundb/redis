@@ -2099,6 +2099,11 @@ void afterSleep(struct aeEventLoop *eventLoop) {
         server.el_cmd_cnt_start = server.stat_numcommands;
     }
 
+#ifdef HAVE_IO_URING
+    /* Harvest io_uring batch I/O completions after waking up from poll */
+    harvestIOUringCompletions();
+#endif
+
     /* Set running after waking up */
     if (server.io_threads_num > 1) atomicSetWithSync(server.running, 1);
 
@@ -2938,6 +2943,9 @@ void initServer(void) {
            sizeof(server.client_pause_per_purpose));
     server.postponed_clients = listCreate();
     server.events_processed_while_blocked = 0;
+#ifdef HAVE_IO_URING
+    server.io_uring_batch = NULL;
+#endif
     server.system_memory_size = zmalloc_get_memory_size();
     server.blocked_last_cron = 0;
     server.blocking_op_nesting = 0;
@@ -3209,6 +3217,9 @@ void initListeners(void) {
 void InitServerLast(void) {
     bioInit();
     initThreadedIO();
+#ifdef HAVE_IO_URING
+    initIOUring();
+#endif
     set_jemalloc_bg_thread(server.jemalloc_bg_thread);
     server.initial_memory_usage = zmalloc_used_memory();
 }
@@ -6308,6 +6319,16 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "config_file:%s\r\n", server.configfile ? server.configfile : "",
             "io_threads_active:%i\r\n", server.io_threads_active));
 
+#ifdef HAVE_IO_URING
+        info = sdscatfmt(info,
+            "io_uring_enabled:%i\r\n"
+            "io_uring_batch_writes:%i\r\n"
+            "io_uring_batch_reads:%i\r\n",
+            server.io_uring_enabled,
+            server.io_uring_batch_writes,
+            server.io_uring_batch_reads);
+#endif
+
         /* Conditional properties */
         if (isShutdownInitiated()) {
             info = sdscatfmt(info,
@@ -8134,6 +8155,9 @@ int main(int argc, char **argv) {
     setOOMScoreAdj(-1);
 
     aeMain(server.el);
+#ifdef HAVE_IO_URING
+    freeIOUring();
+#endif
     aeDeleteEventLoop(server.el);
     return 0;
 }

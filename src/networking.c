@@ -2789,6 +2789,11 @@ int handleClientsWithPendingWrites(void) {
     listNode *ln;
     int processed = listLength(server.clients_pending_write);
 
+#ifdef HAVE_IO_URING
+    int use_batch = server.io_uring_enabled && server.io_uring_batch_writes &&
+                    server.io_uring_batch != NULL;
+#endif
+
     listRewind(server.clients_pending_write,&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
@@ -2817,6 +2822,19 @@ int handleClientsWithPendingWrites(void) {
             continue;
         }
 
+#ifdef HAVE_IO_URING
+        /* When io_uring batch writes are enabled, queue writes for batch
+         * submission instead of writing synchronously. We only batch
+         * non-slave, non-encoded simple buffer + reply list writes. */
+        if (use_batch && !(c->flags & CLIENT_SLAVE) && !c->buf_encoded &&
+            c->conn && c->conn->fd >= 0)
+        {
+            if (ioBatchAddClientWrite(c, server.io_uring_batch) == 0)
+                continue;
+            /* Fall through to synchronous write if batching fails */
+        }
+#endif
+
         /* Try to write buffers to the client socket. */
         if (writeToClient(c,0) == C_ERR) continue;
 
@@ -2826,6 +2844,14 @@ int handleClientsWithPendingWrites(void) {
             installClientWriteHandler(c);
         }
     }
+
+#ifdef HAVE_IO_URING
+    /* Submit all queued batch writes in a single syscall */
+    if (use_batch && ioBatchPendingWrites(server.io_uring_batch) > 0) {
+        ioBatchSubmitWrites(server.io_uring_batch);
+    }
+#endif
+
     return processed;
 }
 

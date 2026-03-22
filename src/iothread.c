@@ -796,6 +796,14 @@ void IOThreadBeforeSleep(struct aeEventLoop *el) {
          * notification (write fd and wake up) is costly. */
         dont_sleep = 1;
     }
+
+#ifdef HAVE_IO_URING
+    /* Submit any pending batch writes for this IO thread's clients */
+    if (t->io_uring_batch && ioBatchPendingWrites(t->io_uring_batch) > 0) {
+        ioBatchSubmitWrites(t->io_uring_batch);
+    }
+#endif
+
     if (!dont_sleep) {
         atomicSetWithSync(t->running, 0); /* Not running if going to sleep. */
         /* Try to process clients from main thread again, since before we set
@@ -814,6 +822,14 @@ void IOThreadBeforeSleep(struct aeEventLoop *el) {
 
 void IOThreadAfterSleep(struct aeEventLoop *el) {
     IOThread *t = el->privdata[0];
+
+#ifdef HAVE_IO_URING
+    /* Harvest io_uring batch completions for this IO thread */
+    if (t->io_uring_batch && ioBatchInflight(t->io_uring_batch) > 0) {
+        ioBatchHarvestWrites(t->io_uring_batch);
+        ioBatchHarvestReads(t->io_uring_batch);
+    }
+#endif
 
     /* Set the IO thread to running state, so the main thread can deliver
      * clients to it without extra notifications. */
@@ -903,6 +919,18 @@ void initThreadedIO(void) {
         #endif
         pthread_mutex_init(&t->pending_clients_mutex, attr);
 
+#ifdef HAVE_IO_URING
+        if (server.io_uring_enabled) {
+            t->io_uring_batch = ioBatchCreate(server.io_uring_sq_size);
+            if (t->io_uring_batch) {
+                t->io_uring_batch->batch_writes_enabled = server.io_uring_batch_writes;
+                t->io_uring_batch->batch_reads_enabled = server.io_uring_batch_reads;
+            }
+        } else {
+            t->io_uring_batch = NULL;
+        }
+#endif
+
         t->pending_clients_notifier = createEventNotifier();
         if (aeCreateFileEvent(t->el, getReadEventFd(t->pending_clients_notifier),
                               AE_READABLE, handleClientsFromMainThread, t) != AE_OK)
@@ -946,6 +974,12 @@ void killIOThreads(void) {
 
     int err, j;
     for (j = 1; j < server.io_threads_num; j++) {
+#ifdef HAVE_IO_URING
+        if (IOThreads[j].io_uring_batch) {
+            ioBatchFree(IOThreads[j].io_uring_batch);
+            IOThreads[j].io_uring_batch = NULL;
+        }
+#endif
         if (IOThreads[j].tid == pthread_self()) continue;
         if (IOThreads[j].tid && pthread_cancel(IOThreads[j].tid) == 0) {
             if ((err = pthread_join(IOThreads[j].tid,NULL)) != 0) {
