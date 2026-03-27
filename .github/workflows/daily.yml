@@ -30,6 +30,10 @@ on:
       pr:
         description: 'pr id'
         default: ''
+      pr_title:
+        description: 'pr title'
+        default: ''
+
 
 jobs:
   echo_desc:
@@ -38,6 +42,7 @@ jobs:
       - name: Add note to logs
         run: |
           echo "This job was triggered by PR https://github.com/redis/redis/pull/${{github.event.inputs.pr}}"
+          echo "PR: ${{github.event.inputs.pr_title}}"
           nproc
 
   test-ubuntu-jemalloc:
