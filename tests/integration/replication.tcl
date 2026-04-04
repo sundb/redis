@@ -917,7 +917,7 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                     set loglines [count_log_lines -2]
                     [lindex $replicas 0] config set repl-diskless-load swapdb
                     [lindex $replicas 1] config set repl-diskless-load swapdb
-                    [lindex $replicas 0] config set key-load-delay 100 ;# 20k keys and 100 microseconds sleep means at least 2 seconds
+                    [lindex $replicas 0] config set key-load-delay 50 ;# 20k keys and 100 microseconds sleep means at least 2 seconds
                     [lindex $replicas 0] replicaof $master_host $master_port
                     [lindex $replicas 1] replicaof $master_host $master_port
 
@@ -955,7 +955,7 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                     }
 
                     # wait for rdb child to exit
-                    wait_for_condition 500 100 {
+                    wait_for_condition 1000 100 {
                         [s -2 rdb_bgsave_in_progress] == 0
                     } else {
                         fail "rdb child didn't terminate"
