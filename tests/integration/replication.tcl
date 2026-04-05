@@ -955,10 +955,18 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                     }
 
                     # wait for rdb child to exit
-                    wait_for_condition 1000 100 {
+                    wait_for_condition 500 100 {
                         [s -2 rdb_bgsave_in_progress] == 0
                     } else {
-                        fail "rdb child didn't terminate"
+                        if {$all_drop == "no"} {
+                            wait_for_condition 500 100 {
+                                [s -2 rdb_bgsave_in_progress] == 0
+                            } else {
+                                fail "rdb child didn't terminate"
+                            }
+                        } else {
+                            fail "rdb child didn't terminate"
+                        }
                     }
 
                     # make sure we got what we were aiming for, by looking for the message in the log file
