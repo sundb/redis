@@ -959,6 +959,7 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                         [s -2 rdb_bgsave_in_progress] == 0
                     } else {
                         if {$all_drop == "no"} {
+                            [lindex $replicas 0] config set key-load-delay 0
                             wait_for_condition 500 100 {
                                 [s -2 rdb_bgsave_in_progress] == 0
                             } else {
