@@ -891,9 +891,15 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
     set master_port [srv 0 port]
     set master_pid [srv 0 pid]
     # put enough data in the db that the rdb file will be bigger than the socket buffers
-    # and since we'll have key-load-delay of 100, 20000 keys will take at least 2 seconds
+    # (1000 keys * 100000 bytes ~= 100MB). the total size is chosen to be larger than any
+    # per-replica kernel TCP send buffer (default 4MB, auto-tuned up to ~32MB) so that the
+    # master's rdb pipe actually stalls on the slow replica; the key count is chosen to be
+    # low so that the worst-case slow-replica load time (N * per-key-time, where per-key-time
+    # can be tens of ms on heavily loaded CI runners, see issue #14983) stays well inside
+    # the wait_for_condition budget in the "no"-drop sub-case, which has to wait for the
+    # slow replica to drain the entire rdb.
     # we also need the replica to process requests during transfer (which it does only once in 2mb)
-    $master debug populate 20000 test 10000
+    $master debug populate 2000 test 50000
     $master config set rdbcompression no
     $master config set repl-rdb-channel no
     # If running on Linux, we also measure utime/stime to detect possible I/O handling issues
@@ -917,7 +923,11 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                     set loglines [count_log_lines -2]
                     [lindex $replicas 0] config set repl-diskless-load swapdb
                     [lindex $replicas 1] config set repl-diskless-load swapdb
-                    [lindex $replicas 0] config set key-load-delay 100 ;# 20k keys and 100 microseconds sleep means at least 2 seconds
+                    # slow the replica's rdb load; 1ms per key is deliberately small (total
+                    # ideal slow-load ~1s, far less than the 50s wait budget) so CI runners
+                    # with slow per-key processing still fit; the stall at t=500ms is ensured
+                    # by the 100MB total data size rather than by long per-key sleeps.
+                    [lindex $replicas 0] config set key-load-delay 1000
                     [lindex $replicas 0] replicaof $master_host $master_port
                     [lindex $replicas 1] replicaof $master_host $master_port
 
@@ -955,7 +965,7 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                     }
 
                     # wait for rdb child to exit
-                    wait_for_condition 500 100 {
+                    wait_for_condition 1000 100 {
                         [s -2 rdb_bgsave_in_progress] == 0
                     } else {
                         fail "rdb child didn't terminate"
