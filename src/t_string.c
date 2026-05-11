@@ -212,21 +212,16 @@ void setGenericCommand(client *c, int flags, robj *key, robj **valref, robj *exp
 
     /* Propagate without the GET argument (Isn't needed if we had expire since in that case we completely re-written the command argv) */
     if ((flags & OBJ_SET_GET) && !expire) {
-        int argc = 0;
-        int j;
-        robj **argv = zmalloc((c->argc-1)*sizeof(robj*));
-        for (j=0; j < c->argc; j++) {
+        for (int j = c->argc - 1; j >= 3; j--) {
             char *a = c->argv[j]->ptr;
             /* Skip GET which may be repeated multiple times. */
-            if (j >= 3 &&
-                (a[0] == 'g' || a[0] == 'G') &&
+            if ((a[0] == 'g' || a[0] == 'G') &&
                 (a[1] == 'e' || a[1] == 'E') &&
                 (a[2] == 't' || a[2] == 'T') && a[3] == '\0')
-                continue;
-            argv[argc++] = c->argv[j];
-            incrRefCount(c->argv[j]);
+            {
+                rewriteClientCommandArgument(c, j, NULL);
+            }
         }
-        replaceClientCommandVector(c, argc, argv);
     }
 }
 
@@ -627,7 +622,7 @@ void setrangeCommand(client *c) {
         kv = dbUnshareStringValueByLink(c->db, c->argv[1], kv, link);
 
         newLen = max(oldLen, (int64_t) (offset + value_len));
-        updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_STRING, oldLen, newLen);            
+        updateKeysizesHist(c->db, OBJ_STRING, oldLen, newLen);            
     }
 
     if (value_len > 0) {
@@ -844,8 +839,7 @@ void incrDecrCommand(client *c, long long incr) {
     {
         new = o;
         o->ptr = (void*)((long)value);
-        updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr),
-                           OBJ_STRING,
+        updateKeysizesHist(c->db, OBJ_STRING,
                            (int64_t) sdigits10(oldvalue),
                            (int64_t) sdigits10(value));
     } else {
@@ -958,7 +952,7 @@ void appendCommand(client *c) {
             updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), o, oldsize, kvobjAllocSize(o));
         totlen = sdslen(o->ptr);
         int64_t oldlen = totlen - append_len;
-        updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_STRING, oldlen, totlen);
+        updateKeysizesHist(c->db, OBJ_STRING, oldlen, totlen);
     }
     keyModified(c,c->db,c->argv[1],o,1);
     notifyKeyspaceEvent(NOTIFY_STRING,"append",c->argv[1],c->db->id);

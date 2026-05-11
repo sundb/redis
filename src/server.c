@@ -32,6 +32,7 @@
 #include "fwtree.h"
 #include "estore.h"
 #include "chk.h"
+#include "fast_float_strtod.h"
 
 #include <time.h>
 #include <signal.h>
@@ -350,8 +351,13 @@ static void dictDestructorKV(dict *d, void *key) {
         meta->alloc_size -= alloc_size;
         /* kvstoreMeta may be NULL when freeing kvstore created with kvstoreBaseType
          * (e.g. in lazy free context). */
-        if (kvstoreMeta)
-            updateSlotHist(kvstoreMeta->allocsizes_hist, NULL, kv->type, alloc_size, -1);
+        if (kvstoreMeta && kv->type < OBJ_TYPE_BASIC_MAX) {
+            /* we don't call kvsUpdateHistogram() because it contains debugServerAssert
+             * that may fail in bg thread as kvstore might not being fully initialized */
+            int old_bin = (alloc_size == 0) ? 0 : log2ceil(alloc_size) + 1;
+            debugServerAssert(old_bin < MAX_KEYSIZES_BINS);
+            kvstoreMeta->allocsizes_hist[kv->type][old_bin]--;
+        }
     }
     decrRefCount(kv);
 }
@@ -540,11 +546,11 @@ static void kvstoreOnEmpty(kvstore *kvs) {
 
 static void kvstoreOnDictEmpty(kvstore *kvs, int didx) {
     kvstoreDictMetadata *meta = kvstoreGetDictMeta(kvs, didx, 0);
+    UNUSED(meta);
 #ifdef DEBUG_ASSERTIONS
     dictEmpty(kvstoreGetDict(kvs, didx), NULL);
 #endif
     debugServerAssert(meta->alloc_size == 0);
-    memset(&meta->keysizes_hist, 0, sizeof(meta->keysizes_hist));
 }
 
 /* Return 1 if currently we allow dict to expand. Dict may allocate huge
@@ -574,6 +580,19 @@ dictType objectKeyPointerValueDictType = {
     dictObjectDestructor,      /* key destructor */
     NULL,                      /* val destructor */
     NULL                       /* allow to expand */
+};
+
+/* Dict type with robj pointer keys and no values. */
+dictType objectKeyNoValueDictType = {
+    dictEncObjHash,            /* hash function */
+    NULL,                      /* key dup */
+    NULL,                      /* val dup */
+    dictEncObjKeyCompare,      /* key compare */
+    dictObjectDestructor,      /* key destructor */
+    NULL,                      /* val destructor */
+    NULL,                      /* allow to expand */
+    .no_value = 1,             /* no values in this dict */
+    .keys_are_odd = 0,         /* robj pointers are not odd */
 };
 
 /* Like objectKeyPointerValueDictType(), but values can be destroyed, if
@@ -1040,7 +1059,8 @@ static inline clientMemUsageBucket *getMemUsageBucket(size_t mem) {
  */
 void updateClientMemoryUsage(client *c) {
     serverAssert(c->conn);
-    size_t mem = getClientMemoryUsage(c, NULL);
+    size_t mem = getClientMemoryUsage(c);
+
     int type = getClientType(c);
     /* Now that we have the memory used by the client, remove the old
      * value from the old category, and add it back. */
@@ -1107,6 +1127,20 @@ int updateClientMemUsageAndBucket(client *c) {
 
     if (!allow_eviction) {
         return 0;
+    }
+
+    /* Include unshared reply bytes in the client's memory usage for eviction.
+     * Walking the reply buffer is costly, so skip the scan when its outcome
+     * cannot affect bucket placement: since 0 <= unshared <= shared, if both
+     * endpoints map to the same bucket the cached value is reused. */
+    if (c->reply_bytes_shared > 0) {
+        size_t lower_bound = getClientMemoryUsage(c) - c->reply_bytes_unshared;
+        size_t upper_bound = lower_bound + c->reply_bytes_shared;
+        if (getMemUsageBucket(lower_bound) != getMemUsageBucket(upper_bound))
+            updateClientUnsharedReplyBytes(c);
+    } else {
+        /* No shared bytes: clear any stale cached unshared. */
+        c->reply_bytes_unshared = 0;
     }
 
     /* Update client memory usage. */
@@ -2227,6 +2261,7 @@ void createSharedObjects(void) {
     shared.srem = createStringObject("SREM",4);
     shared.xgroup = createStringObject("XGROUP",6);
     shared.xclaim = createStringObject("XCLAIM",6);
+    shared.xack = createStringObject("XACK",4);
     shared.script = createStringObject("SCRIPT",6);
     shared.replconf = createStringObject("REPLCONF",8);
     shared.pexpireat = createStringObject("PEXPIREAT",9);
@@ -2325,11 +2360,9 @@ void initServerConfig(void) {
     server.executable = NULL;
     server.arch_bits = (sizeof(long) == 8) ? 64 : 32;
 #if DEBUG_ASSERT_KEYSPACE
-    server.dbg_assert_keysizes = 1;
-    server.dbg_assert_alloc_per_slot = 1;
+    server.dbg_assert_flags = DBG_ASSERT_KEYSIZES | DBG_ASSERT_ALLOC_SLOT;
 #else
-    server.dbg_assert_keysizes = 0;
-    server.dbg_assert_alloc_per_slot = 0;
+    server.dbg_assert_flags = 0;
 #endif
     server.bindaddr_count = CONFIG_DEFAULT_BINDADDR_COUNT;
     for (j = 0; j < CONFIG_DEFAULT_BINDADDR_COUNT; j++)
@@ -2339,6 +2372,7 @@ void initServerConfig(void) {
     server.allow_access_expired = 0;
     server.allow_access_trimmed = 0;
     server.skip_checksum_validation = 0;
+    server.allow_keymeta_registration = 0;
     server.loading = 0;
     server.async_loading = 0;
     server.loading_rdb_used_mem = 0;
@@ -2878,6 +2912,9 @@ void resetServerStats(void) {
     stat_prev_total_client_process_input_buff_events = 0;
     memset(server.duration_stats, 0, sizeof(durationStats) * EL_DURATION_TYPE_NUM);
     server.el_cmd_cnt_max = 0;
+    server.stat_slowlog_count = 0;
+    server.stat_slowlog_time_us_sum = 0;
+    server.stat_slowlog_time_us_max = 0;
     lazyfreeResetStats();
 }
 
@@ -2988,7 +3025,7 @@ void initServer(void) {
         server.db[j].blocking_keys = dictCreate(&keylistDictType);
         server.db[j].blocking_keys_unblock_on_nokey = dictCreate(&objectKeyPointerValueDictType);
         server.db[j].stream_claim_pending_keys = dictCreate(&objectKeyPointerValueDictType);
-        server.db[j].stream_idmp_keys = dictCreate(&objectKeyPointerValueDictType);
+        server.db[j].stream_idmp_keys = dictCreate(&objectKeyNoValueDictType);
         server.db[j].ready_keys = dictCreate(&objectKeyPointerValueDictType);
         server.db[j].watched_keys = dictCreate(&keylistDictType);
         server.db[j].id = j;
@@ -3436,6 +3473,9 @@ void resetCommandTableStats(dict* commands) {
         c->calls = 0;
         c->rejected_calls = 0;
         c->failed_calls = 0;
+        c->slowlog_count = 0;
+        c->slowlog_time_us_sum = 0;
+        c->slowlog_time_us_max = 0;
         if(c->latency_histogram) {
             hdr_close(c->latency_histogram);
             c->latency_histogram = NULL;
@@ -3700,7 +3740,16 @@ void slowlogPushCurrentCommand(client *c, struct redisCommand *cmd, ustime_t dur
      * arguments. */
     robj **argv = c->original_argv ? c->original_argv : c->argv;
     int argc = c->original_argv ? c->original_argc : c->argc;
-    slowlogPushEntryIfNeeded(c,argv,argc,duration);
+    if (slowlogPushEntryIfNeeded(c,argv,argc,duration)) {
+        server.stat_slowlog_count++;
+        server.stat_slowlog_time_us_sum += duration;
+        if (duration > server.stat_slowlog_time_us_max)
+            server.stat_slowlog_time_us_max = duration;
+        cmd->slowlog_count++;
+        cmd->slowlog_time_us_sum += duration;
+        if (duration > cmd->slowlog_time_us_max)
+            cmd->slowlog_time_us_max = duration;
+    }
 }
 
 /* This function is called in order to update the total command histogram duration.
@@ -4194,13 +4243,9 @@ void afterCommand(client *c) {
     if (!server.execution_nesting)
         listJoin(c->reply, server.pending_push_messages);
 
-    /* Assert keysizes histogram if enabled */
-    if (unlikely(server.dbg_assert_keysizes))
-        dbgAssertKeysizesHist(c->db);
-
-    /* Assert per-slot alloc_size if enabled */
-    if (unlikely(server.dbg_assert_alloc_per_slot))
-        dbgAssertAllocSizePerSlot(c->db);
+    /* Run debug assertions if any are enabled */
+    if (unlikely(server.dbg_assert_flags))
+        dbgRunAssertions(c->db);
 }
 
 /* Check if c->cmd exists, fills `err` with details in case it doesn't.
@@ -6070,12 +6115,24 @@ sds genRedisInfoStringCommandStats(sds info, dict *commands) {
         char *tmpsafe;
         c = (struct redisCommand *) dictGetVal(de);
         if (c->calls || c->failed_calls || c->rejected_calls) {
-            info = sdscatprintf(info,
-                "cmdstat_%s:calls=%lld,usec=%lld,usec_per_call=%.2f"
-                ",rejected_calls=%lld,failed_calls=%lld\r\n",
-                getSafeInfoString(c->fullname, sdslen(c->fullname), &tmpsafe), c->calls, c->microseconds,
-                (c->calls == 0) ? 0 : ((float)c->microseconds/c->calls),
-                c->rejected_calls, c->failed_calls);
+            if (c->slowlog_count > 0) {
+                info = sdscatprintf(info,
+                    "cmdstat_%s:calls=%lld,usec=%lld,usec_per_call=%.2f"
+                    ",rejected_calls=%lld,failed_calls=%lld"
+                    ",slowlog_count=%lld,slowlog_time_ms_sum=%.2f,slowlog_time_ms_max=%.2f\r\n",
+                    getSafeInfoString(c->fullname, sdslen(c->fullname), &tmpsafe), c->calls, c->microseconds,
+                    (c->calls == 0) ? 0 : ((float)c->microseconds/c->calls),
+                    c->rejected_calls, c->failed_calls,
+                    c->slowlog_count, (double)c->slowlog_time_us_sum / 1000,
+                    (double)c->slowlog_time_us_max / 1000);
+            } else {
+                info = sdscatprintf(info,
+                    "cmdstat_%s:calls=%lld,usec=%lld,usec_per_call=%.2f"
+                    ",rejected_calls=%lld,failed_calls=%lld\r\n",
+                    getSafeInfoString(c->fullname, sdslen(c->fullname), &tmpsafe), c->calls, c->microseconds,
+                    (c->calls == 0) ? 0 : ((float)c->microseconds/c->calls),
+                    c->rejected_calls, c->failed_calls);
+            }
             if (tmpsafe != NULL) zfree(tmpsafe);
         }
         if (c->subcommands_dict) {
@@ -6428,7 +6485,9 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "mem_total_replication_buffers:%zu\r\n", server.repl_buffer_mem + server.repl_full_sync_buffer.mem_used,
             "mem_replica_full_sync_buffer:%zu\r\n", server.repl_full_sync_buffer.mem_used,
             "mem_clients_slaves:%zu\r\n", mh->clients_slaves,
-            "mem_clients_normal:%zu\r\n", mh->clients_normal,
+            "mem_clients_normal:%zu\r\n", mh->clients_normal, /* actual memory usage (includes unshared memory, excludes shared memory) */
+            "mem_clients_normal_shared:%zu\r\n", mh->clients_normal_shared, /* shared memory (not solely owned by this client) */
+            "mem_clients_normal_unshared:%zu\r\n", mh->clients_normal_unshared, /* unshared memory (solely owned by this client) */
             "mem_cluster_slot_migration_output_buffer:%zu\r\n", mh->asm_migrate_output_buffer,
             "mem_cluster_slot_migration_input_buffer:%zu\r\n", mh->asm_import_input_buffer,
             "mem_cluster_slot_migration_input_buffer_peak:%zu\r\n", asmGetPeakSyncBufferSize(),
@@ -6661,7 +6720,10 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "total_client_processing_events:%lld\r\n", stat_total_client_process_input_buff_events,
             "avg_pipeline_length_sum:%lld\r\n", stat_avg_pipeline_length_sum,
             "avg_pipeline_length_cnt:%lld\r\n", stat_avg_pipeline_length_cnt,
-            "avg_pipeline_length:%.2f\r\n", stat_avg_pipeline_length_cnt ? (double)stat_avg_pipeline_length_sum / stat_avg_pipeline_length_cnt : 0));
+            "avg_pipeline_length:%.2f\r\n", stat_avg_pipeline_length_cnt ? (double)stat_avg_pipeline_length_sum / stat_avg_pipeline_length_cnt : 0,
+            "slowlog_commands_count:%lld\r\n", server.stat_slowlog_count,
+            "slowlog_commands_time_ms_max:%.2f\r\n", (double)server.stat_slowlog_time_us_max / 1000,
+            "slowlog_commands_time_ms_sum:%.2f\r\n", (double)server.stat_slowlog_time_us_sum / 1000));
         info = genRedisInfoStringACLStats(info);
         if (!server.cluster_enabled && server.cluster_compatibility_sample_ratio) {
             info = sdscatprintf(info, "cluster_incompatible_ops:%lld\r\n", server.stat_cluster_incompatible_ops);
@@ -7348,6 +7410,8 @@ int redisFork(int purpose) {
         updateDictResizePolicy();
         dismissMemoryInChild();
         closeChildUnusedResourceAfterFork();
+        /* Memory tracking for slots is unnecessary in child processes. */
+        server.memory_tracking_enabled = 0;
         /* Close the reading part, so that if the parent crashes, the child will
          * get a write error and exit. */
         if (server.child_info_pipe[0] != -1)
@@ -7450,6 +7514,20 @@ void dismissClientMemory(client *c) {
     }
 }
 
+/* Dismiss the hash table bucket arrays of a dict. */
+void dismissDictBucketsMemory(dict *d) {
+    if (!d) return;
+    dismissMemory(d->ht_table[0], DICTHT_SIZE(d->ht_size_exp[0]) * sizeof(dictEntry*));
+    dismissMemory(d->ht_table[1], DICTHT_SIZE(d->ht_size_exp[1]) * sizeof(dictEntry*));
+}
+
+/* Dismiss the hash table bucket arrays for all dicts in the given kvstore. */
+void dismissKvstoreBucketsMemory(kvstore *kvs) {
+    for (int didx = 0; didx < kvstoreNumDicts(kvs); didx++) {
+        dismissDictBucketsMemory(kvstoreGetDict(kvs, didx));
+    }
+}
+
 /* In the child process, we don't need some buffers anymore, and these are
  * likely to change in the parent when there's heavy write traffic.
  * We dismiss them right away, to avoid CoW.
@@ -7487,6 +7565,14 @@ void dismissMemoryInChild(void) {
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
         dismissClientMemory(c);
+    }
+
+    /* Dismiss expires kvstore bucket arrays since the child process never
+     * accesses them, expire times are embedded in key objects. */
+    if (server.in_fork_child == CHILD_TYPE_RDB || server.in_fork_child == CHILD_TYPE_AOF) {
+        for (int dbid = 0; dbid < server.dbnum; dbid++) {
+            dismissKvstoreBucketsMemory(server.db[dbid].expires);
+        }
     }
 #endif
 }
@@ -7751,10 +7837,12 @@ int __test_num = 0;
 typedef int redisTestProc(int argc, char **argv, int flags);
 int bitopsTest(int argc, char **argv, int flags);
 int zsetTest(int argc, char **argv, int flags);
+int vectorTest(int argc, char **argv, int flags);
 struct redisTest {
     char *name;
     redisTestProc *proc;
-    int failed;
+    int test_count;
+    int passed_count;
 } redisTests[] = {
     {"ziplist", ziplistTest},
     {"quicklist", quicklistTest},
@@ -7773,10 +7861,12 @@ struct redisTest {
     {"fwtree", fwtreeTest},
     {"estore", estoreTest},
     {"ebuckets", ebucketsTest},
+    {"vector", vectorTest},
     {"bitmap", bitopsTest},
     {"rax", raxTest},
     {"zset", zsetTest},
     {"topk", chkTopKTest},
+    {"fastfloat", fastFloatTest},
 };
 redisTestProc *getTestProcByName(const char *name) {
     int numtests = sizeof(redisTests)/sizeof(struct redisTest);
@@ -7808,32 +7898,40 @@ int main(int argc, char **argv) {
 
         if (!strcasecmp(argv[2], "all")) {
             int numtests = sizeof(redisTests)/sizeof(struct redisTest);
-            for (j = 0; j < numtests; j++) {
-                redisTests[j].failed = (redisTests[j].proc(argc,argv,flags) != 0);
-            }
-
-            /* Report tests result */
             int failed_num = 0;
             for (j = 0; j < numtests; j++) {
-                if (redisTests[j].failed) {
+                int before_total = __test_num;
+                int before_failed = __failed_tests;
+                redisTests[j].proc(argc,argv,flags);
+                redisTests[j].test_count = __test_num - before_total;
+                redisTests[j].passed_count = redisTests[j].test_count - (__failed_tests - before_failed);
+                if (redisTests[j].passed_count < redisTests[j].test_count)
                     failed_num++;
-                    printf("[failed] Test - %s\n", redisTests[j].name);
-                } else {
-                    printf("[ok] Test - %s\n", redisTests[j].name);
-                }
             }
 
-            printf("%d tests, %d passed, %d failed\n", numtests,
-                   numtests-failed_num, failed_num);
+            printf("\n========== Test Suite Summary ==========\n\n");
+            for (j = 0; j < numtests; j++) {
+                int failed = redisTests[j].passed_count < redisTests[j].test_count;
+                printf("  %s %-15s (%d/%d passed)%s\n",
+                       failed ? "\033[31m[failed]" : "\033[32m[ok]    \033[0m",
+                       redisTests[j].name,
+                       redisTests[j].passed_count, redisTests[j].test_count,
+                       failed ? "\033[0m" : "");
+            }
 
-            return failed_num == 0 ? 0 : 1;
+            printf("\n  Test Groups: %s%d passed\033[0m, %s%d failed\033[0m, %d total\n",
+                   failed_num ? "" : "\033[32m", numtests-failed_num,
+                   failed_num ? "\033[31m" : "", failed_num, numtests);
+
+            test_report();
         } else {
             redisTestProc *proc = getTestProcByName(argv[2]);
             if (!proc) return -1; /* test not found */
-            return proc(argc,argv,flags);
+            proc(argc,argv,flags);
+            test_report();
         }
 
-        return 0;
+        return __failed_tests ? 1 : 0;
     }
 #endif
 
@@ -8015,6 +8113,10 @@ int main(int argc, char **argv) {
         sdsfree(options);
     }
     if (server.sentinel_mode) sentinelCheckConfigFile();
+
+    /* Reserve dedicated used_memory slots for main + IO threads (single-writer
+     * fast path). See zmalloc_reserve_thread_slots(). */
+    zmalloc_reserve_thread_slots(server.io_threads_num);
 
     /* Do system checks */
 #ifdef __linux__

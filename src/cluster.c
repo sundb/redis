@@ -295,13 +295,19 @@ void restoreCommand(client *c) {
     /* Create the key and set the TTL if any */
     kvobj *kv = dbAddInternal(c->db, key, &obj, NULL, &keymeta);
 
+    /* Save type: kv may be reallocated by module callbacks during notifyKeyspaceEvent below. */
+    int kvtype = kv->type;
+
     /* If minExpiredField was set, then the object is hash with expiration
      * on fields and need to register it in global HFE DS */
-    if (kv->type == OBJ_HASH) {
+    if (kvtype == OBJ_HASH) {
         uint64_t minExpiredField = hashTypeGetMinExpire(kv, 1);
         if (minExpiredField != EB_EXPIRE_TIME_INVALID)
             estoreAdd(c->db->subexpires, getKeySlot(key->ptr), kv, minExpiredField);
     }
+
+    if (kvtype == OBJ_STREAM)
+        streamKeyLoaded(c->db, key, kv);
 
     if (ttl) {
         if (!absttl) {
@@ -315,12 +321,13 @@ void restoreCommand(client *c) {
     objectSetLRUOrLFU(kv, lfu_freq, lru_idle, lru_clock, 1000);
     keyModified(c,c->db,key,NULL,1);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"restore",key,c->db->id);
+    KSN_INVALIDATE_KVOBJ(kv);
 
     /* If we deleted a key that means REPLACE parameter was passed and the
      * destination key existed. */
     if (deleted) {
         notifyKeyspaceEvent(NOTIFY_OVERWRITTEN, "overwritten", key, c->db->id);
-        if (oldtype != kv->type) {
+        if (oldtype != kvtype) {
             notifyKeyspaceEvent(NOTIFY_TYPE_CHANGED, "type_changed", key, c->db->id);
         }
     }
@@ -1734,7 +1741,7 @@ unsigned int clusterDelKeysInSlot(unsigned int hashslot, int by_command) {
              * just moved to another node. The modules needs to know that these
              * keys are no longer available locally, so just send the keyspace
              * notification to the modules, but not to clients. */
-            moduleNotifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, server.db[0].id);
+            moduleNotifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, server.db[0].id, NULL, 0);
         }
         exitExecutionUnit();
         postExecutionUnitOperations();
@@ -1761,14 +1768,13 @@ int clusterIsMySlot(int slot) {
     return getMyClusterNode() == getNodeBySlot(slot);
 }
 
-void replySlotsFlushAndFree(client *c, slotRangeArray *slots) {
+void replySlotsFlush(client *c, slotRangeArray *slots) {
     addReplyArrayLen(c, slots->num_ranges);
     for (int i = 0 ; i < slots->num_ranges ; i++) {
         addReplyArrayLen(c, 2);
         addReplyLongLong(c, slots->ranges[i].start);
         addReplyLongLong(c, slots->ranges[i].end);
     }
-    slotRangeArrayFree(slots);
 }
 
 /* Normalizes (sorts and merges adjacent ranges), checks that slot ranges are
@@ -2182,6 +2188,9 @@ void sflushCommand(client *c) {
         return;
     }
     slotRangeArrayFree(slots);
+    
+    /* takes ownership of myslots */
+    asmTrimCtx *trim_ctx = asmTrimCtxCreate(myslots, server.db[0].keys);
 
     /* If the selected slots are exactly the same as the local slots, we can
      * simply flush the entire DB by flushCommandCommon. */
@@ -2190,9 +2199,10 @@ void sflushCommand(client *c) {
     slotRangeArrayFree(local_slots);
     if (all_slots_covered) {
         /* If not flush as blocking async, then reply immediately */
-        if (flushCommandCommon(c, FLUSH_TYPE_SLOTS, flags, myslots) == 0) {
-            replySlotsFlushAndFree(c, myslots);
+        if (flushCommandCommon(c, FLUSH_TYPE_SLOTS, flags, trim_ctx) == 0) {
+            replySlotsFlush(c, trim_ctx->slots);
         }
+        asmTrimCtxRelease(trim_ctx);
         return;
     }
 
@@ -2212,7 +2222,7 @@ void sflushCommand(client *c) {
         /* Update dirty stats before trimming. */
         server.dirty += getKeyCountInSlotRangeArray(myslots);
         /* Pass client id for active trim to unblock client when trim completes. */
-        trim_method = asmTrimSlots(myslots, blocking_async ? c->id : 0, 0);
+        trim_method = asmTrimSlots(trim_ctx, blocking_async ? c->id : CLIENT_ID_NONE, 0);
     } else {
         clusterDelKeysInSlotRangeArray(myslots, 1);
     }
@@ -2229,15 +2239,13 @@ void sflushCommand(client *c) {
      *   unblock client and reply in active trim completion. */
     if (blocking_async && trim_method != ASM_TRIM_METHOD_NONE) {
         blockClientForAsyncFlush(c);
-        if (trim_method == ASM_TRIM_METHOD_BG)
-            bioCreateCompRq(BIO_WORKER_LAZY_FREE, unblockClientForAsyncFlush, c->id, myslots);
-        else /* ASM_TRIM_METHOD_ACTIVE, just free the slot ranges */
-            slotRangeArrayFree(myslots);
     } else {
         /* Reply with slot ranges that were flushed. SYNC and ASYNC mode will be
          * replied here immediately. */
-        replySlotsFlushAndFree(c, myslots);
+        replySlotsFlush(c, trim_ctx->slots);
     }
+
+    asmTrimCtxRelease(trim_ctx); /* if bg trim, released later by kvsAsyncFreeDoneCB() */
 }
 
 /* The READWRITE command just clears the READONLY command state. */

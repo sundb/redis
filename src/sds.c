@@ -213,12 +213,14 @@ sds sdsdup(const sds s) {
 /* Free an sds string. No operation is performed if 's' is NULL. */
 void sdsfree(sds s) {
     if (s == NULL) return;
-    s_free((char*)s-sdsHdrSize(s[-1]));
-}
-
-void sdsfreeusable(sds s, size_t *usable) {
-    if (s == NULL) return;
-    s_free_usable((char*)s-sdsHdrSize(s[-1]), usable);
+    if (sdsType(s) == SDS_TYPE_5) {
+        /* TYPE_5 has no alloc field so sdsAllocSize() returns the requested
+         * size which may not match the actual allocation, so not suitable for
+         * s_free_with_size(). */
+        s_free(sdsAllocPtr(s));
+    } else {
+        s_free_with_size(sdsAllocPtr(s), sdsAllocSize(s));
+    }
 }
 
 /* Generic version of sdsfree. */
@@ -1507,27 +1509,42 @@ int sdsTest(int argc, char **argv, int flags) {
         x = sdsResize(x, 200, 1);
         test_cond("sdsresize() expand len", sdslen(x) == 40);
         test_cond("sdsresize() expand strlen", strlen(x) == 40);
-        test_cond("sdsresize() expand alloc", sdsalloc(x) == 200);
+#if defined(USE_JEMALLOC)
+        /* 224 - hdrlen(3) - 1(\0) */
+        test_cond("sdsresize() expand alloc", sdsalloc(x) == 220);
+#endif
         /* Test sdsresize - trim free space */
         x = sdsResize(x, 80, 1);
         test_cond("sdsresize() shrink len", sdslen(x) == 40);
         test_cond("sdsresize() shrink strlen", strlen(x) == 40);
-        test_cond("sdsresize() shrink alloc", sdsalloc(x) == 80);
+#if defined(USE_JEMALLOC)
+        /* 96 - hdrlen(3) - 1(\0) */
+        test_cond("sdsresize() shrink alloc", sdsalloc(x) == 92);
+#endif
         /* Test sdsresize - crop used space */
         x = sdsResize(x, 30, 1);
         test_cond("sdsresize() crop len", sdslen(x) == 30);
         test_cond("sdsresize() crop strlen", strlen(x) == 30);
-        test_cond("sdsresize() crop alloc", sdsalloc(x) == 30);
+#if defined(USE_JEMALLOC)
+        /* 40 - hdrlen(3) - 1(\0) */
+        test_cond("sdsresize() crop alloc", sdsalloc(x) == 36);
+#endif
         /* Test sdsresize - extend to different class */
         x = sdsResize(x, 400, 1);
         test_cond("sdsresize() expand len", sdslen(x) == 30);
         test_cond("sdsresize() expand strlen", strlen(x) == 30);
-        test_cond("sdsresize() expand alloc", sdsalloc(x) == 400);
+#if defined(USE_JEMALLOC)
+        /* 448 - hdrlen(5) - 1(\0) */
+        test_cond("sdsresize() expand alloc", sdsalloc(x) == 442);
+#endif
         /* Test sdsresize - shrink to different class */
         x = sdsResize(x, 4, 1);
         test_cond("sdsresize() crop len", sdslen(x) == 4);
         test_cond("sdsresize() crop strlen", strlen(x) == 4);
+#if defined(USE_JEMALLOC)
+        /* 8 - hdrlen(3) - 1(\0) */
         test_cond("sdsresize() crop alloc", sdsalloc(x) == 4);
+#endif
         sdsfree(x);
         
         { /* Test adjustTypeIfNeeded() */
