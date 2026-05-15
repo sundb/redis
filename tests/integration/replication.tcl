@@ -67,19 +67,20 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                         # drop path instead of racing with normal completion.
                         $master config set rdb-key-save-delay 1000
                     }
-                    # Throttle replica 0 hard enough that the master gets
-                    # EAGAIN writing to its socket — that's what installs the
-                    # per-replica write handler, disables pipe read, and sets
-                    # repl_last_partial_write (which the "timeout" subcase
-                    # depends on for repl-timeout to fire). With a lighter
-                    # delay the replica drains in step with the master's
-                    # writes and the pipe stall is never engineered.
-                    # 4000 keys * 2000us ≈ 8s of total throttle; the actual
-                    # transfer still finishes in a few seconds because the
-                    # master can burst data into the socket buffer.
-                    # Note: see issue #14983 — diskless replication is
-                    # fundamentally rate-limited by the slowest replica.
-                    [lindex $replicas 0] config set key-load-delay 2000
+                    # Throttle replica 0 enough that its socket buffer fills
+                    # (master gets EAGAIN, installs per-replica write handler,
+                    # sets repl_last_partial_write), but NOT so heavily that
+                    # the fast replica also gets EAGAIN — otherwise the
+                    # rate-limited pipe (issue #14983) causes fast to also
+                    # have repl_last_partial_write set, and when repl-timeout
+                    # is dropped to 2s for the "timeout" subcase BOTH replicas
+                    # get timed out in the same replicationCron tick.
+                    # 300us drains ~166MB/s on the slow replica's side; the
+                    # master can still saturate its 256KB-ish kernel send
+                    # buffer faster than that and trigger EAGAIN, but the
+                    # fast replica (no throttle) drains its buffer between
+                    # master writes and its writes always complete fully.
+                    [lindex $replicas 0] config set key-load-delay 300
                     [lindex $replicas 0] replicaof $master_host $master_port
                     [lindex $replicas 1] replicaof $master_host $master_port
 
