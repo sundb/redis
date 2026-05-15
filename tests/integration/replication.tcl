@@ -39,13 +39,10 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
     set measure_time [expr {$os == "Linux"} ? 1 : 0]
     foreach all_drop {no slow fast all timeout} {
         test "diskless $all_drop replicas drop during rdb pipe" {
-            # Use a modest repl-timeout (not the default 60s) so that when a
-            # slow/killed replica leaves the master with a full socket buffer
-            # the kernel can't drain (no ACKs from dead peer), the fallback
-            # disconnect in replicationCron fires within a few seconds rather
-            # than blowing the test budget. The "timeout" subcase sets its
-            # own short value transiently.
-            $master config set repl-timeout 10
+            # Reset state between subcases. The "timeout" subcase changes
+            # repl-timeout transiently; the "all" subcase changes
+            # rdb-key-save-delay.
+            $master config set repl-timeout 60
             $master config set rdb-key-save-delay 0
             set replicas {}
             set replicas_alive {}
@@ -70,6 +67,19 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                         # drop path instead of racing with normal completion.
                         $master config set rdb-key-save-delay 1000
                     }
+                    # Throttle replica 0 hard enough that the master gets
+                    # EAGAIN writing to its socket — that's what installs the
+                    # per-replica write handler, disables pipe read, and sets
+                    # repl_last_partial_write (which the "timeout" subcase
+                    # depends on for repl-timeout to fire). With a lighter
+                    # delay the replica drains in step with the master's
+                    # writes and the pipe stall is never engineered.
+                    # 4000 keys * 2000us ≈ 8s of total throttle; the actual
+                    # transfer still finishes in a few seconds because the
+                    # master can burst data into the socket buffer.
+                    # Note: see issue #14983 — diskless replication is
+                    # fundamentally rate-limited by the slowest replica.
+                    [lindex $replicas 0] config set key-load-delay 2000
                     [lindex $replicas 0] replicaof $master_host $master_port
                     [lindex $replicas 1] replicaof $master_host $master_port
 
@@ -83,38 +93,17 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                         set start_time [clock seconds]
                     }
 
-                    # Pause the slow replica to deterministically stall the
-                    # master's pipe-read handler on a blocked write to that
-                    # replica (rdbPipeReadHandler installs a per-replica write
-                    # handler and disables pipe read until all writes drain).
-                    # This decouples the test from real-time key-load-delay
-                    # throttling which is flaky on slow/TLS CI runners due to
-                    # issue #14983 (one slow replica throttles the whole pipe).
-                    # In "all" the master generates the RDB slowly via
-                    # rdb-key-save-delay, so pausing is unnecessary (and we
-                    # want to kill the replica anyway).
-                    # "no" tests the happy path (both replicas complete) and
-                    # does not need an engineered pipe stall — pausing the
-                    # slow replica there only adds post-resume drain time and
-                    # makes the final "replica online" wait flaky.
-                    # "all" generates the RDB slowly via rdb-key-save-delay,
-                    # so pausing is unnecessary.
-                    set slow_paused 0
-                    if {$all_drop != "all" && $all_drop != "no"} {
-                        pause_process [srv -1 pid]
-                        set slow_paused 1
-                    }
+                    # wait a while so that the pipe socket writer will be
+                    # blocked on write (since replica 0 is slow to read from the socket)
                     after 500
 
                     # add some command to be present in the command stream after the rdb.
                     $master incr $all_drop
 
                     # disconnect replicas depending on the current test.
-                    # Always use SIGKILL: SIGTERM goes through Redis's signal
+                    # Use SIGKILL because SIGTERM goes through Redis's signal
                     # handler and graceful shutdown, which can delay master
-                    # detection of the dead connection. SIGKILL also works on
-                    # a SIGSTOPped process (the slow replica may be paused),
-                    # whereas SIGTERM would queue and be ignored.
+                    # detection of the dead connection.
                     if {$all_drop == "all" || $all_drop == "fast"} {
                         exec kill -9 [srv 0 pid]
                         set replicas_alive [lreplace $replicas_alive 1 1]
@@ -122,43 +111,22 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                     if {$all_drop == "all" || $all_drop == "slow"} {
                         exec kill -9 [srv -1 pid]
                         set replicas_alive [lreplace $replicas_alive 0 0]
-                        set slow_paused 0
-                    }
-                    # For "fast"/"slow" subcases, let the master detect the
-                    # dead replica (NULLing its slot in rdb_pipe_conns) BEFORE
-                    # we proceed. Otherwise pipe EOF can arrive while the
-                    # dead replica's slot is still set, and the master logs
-                    # the wrong "N replicas still up" count.
-                    if {$all_drop == "fast" || $all_drop == "slow"} {
-                        wait_for_condition 200 50 {
-                            [regexp -all {state=wait_bgsave} [$master info replication]] <= 1
-                        } else {
-                            # Best-effort: fall through and let the log-message
-                            # check below surface the issue with more context.
-                        }
                     }
                     if {$all_drop == "timeout"} {
-                        # Let one replica hit repl-timeout while the slow reader
-                        # is paused, then restore a generous timeout so the
-                        # remaining replica can finish the streamed RDB.
+                        # We want the slow replica to hang on a key for long
+                        # enough to reach repl-timeout. With key-load-delay
+                        # already set, pausing pushes it well past repl-timeout
+                        # without making the whole subcase wait that long.
                         $master config set repl-timeout 2
-                        wait_for_log_messages -2 {"*Disconnecting timedout replica (full sync)*"} $loglines 100 100
-                        $master config set repl-timeout 10
-                    } elseif {$all_drop == "fast" && $slow_paused} {
-                        # For "fast" the slow replica (-1) must finish after
-                        # the fast one is killed. Resume the slow reader so
-                        # the pipe drains and the RDB transfer completes
-                        # promptly — no longer rate-limited by socket
-                        # backpressure (issue #14983).
-                        resume_process [srv -1 pid]
-                        set slow_paused 0
+                        pause_process [srv -1 pid]
+                        after 2000
                     }
 
-                    # Use a generous budget; successful runs exit early.
-                    wait_for_condition 2400 100 {
+                    # wait for rdb child to exit. Use a generous budget for
+                    # slow CI runners; successful runs still exit early.
+                    wait_for_condition 1200 100 {
                         [s -2 rdb_bgsave_in_progress] == 0
                     } else {
-                        if {$slow_paused} { resume_process [srv -1 pid] }
                         fail "rdb child didn't terminate"
                     }
 
@@ -173,6 +141,7 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                         wait_for_log_messages -2 {"*Diskless rdb transfer, done reading from pipe, 1 replicas still up*"} $loglines 1 1
                     }
                     if {$all_drop == "timeout"} {
+                        wait_for_log_messages -2 {"*Disconnecting timedout replica (full sync)*"} $loglines 1 1
                         wait_for_log_messages -2 {"*Diskless rdb transfer, done reading from pipe, 1 replicas still up*"} $loglines 1 1
                         # master disconnected the slow replica, remove from array
                         set replicas_alive [lreplace $replicas_alive 0 0]
