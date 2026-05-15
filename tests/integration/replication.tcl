@@ -91,6 +91,17 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                         set start_time [clock seconds]
                     }
 
+                    # For the "timeout" subcase, pause the slow replica IMMEDIATELY
+                    # so the master is guaranteed to be mid-transfer when its
+                    # writes start to EAGAIN — otherwise on a fast box the master
+                    # can finish streaming the entire RDB into the slow replica's
+                    # kernel buffer before we get a chance to pause it, leaving
+                    # the slave past WAIT_BGSAVE_END so the repl-timeout check in
+                    # replicationCron no longer applies.
+                    if {$all_drop == "timeout"} {
+                        pause_process [srv -1 pid]
+                    }
+
                     # wait a while so that the pipe socket writer will be
                     # blocked on write (since replica 0 is slow to read from the socket)
                     after 500
@@ -140,20 +151,19 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                         }
                     }
                     if {$all_drop == "timeout"} {
-                        # We want the slow replica to hang long enough to
-                        # reach repl-timeout. Pause it and wait for the
-                        # master to log the timed-out disconnect. Then
-                        # immediately restore a generous repl-timeout: when
-                        # one replica throttles the diskless pipe (issue
-                        # #14983) the OTHER replica's writes are also
-                        # partial, so it too has repl_last_partial_write set
-                        # and would time out on the next replicationCron tick
-                        # — leaving the master with zero alive replicas and
-                        # logging "last replica dropped" instead of the
-                        # expected "1 replicas still up".
+                        # Slow has already been paused above. Now drop the
+                        # repl-timeout to 2s and wait for the master to log
+                        # the timed-out disconnect. Then restore a generous
+                        # repl-timeout: when one replica throttles the
+                        # diskless pipe (issue #14983) the OTHER replica's
+                        # writes are also partial, so it too has
+                        # repl_last_partial_write set and would time out on
+                        # the next replicationCron tick — leaving the master
+                        # with zero alive replicas and logging "last replica
+                        # dropped" instead of the expected "1 replicas still
+                        # up".
                         $master config set repl-timeout 2
-                        pause_process [srv -1 pid]
-                        wait_for_log_messages -2 {"*Disconnecting timedout replica (full sync)*"} $loglines 100 50
+                        wait_for_log_messages -2 {"*Disconnecting timedout replica (full sync)*"} $loglines 200 100
                         $master config set repl-timeout 60
                     }
 
