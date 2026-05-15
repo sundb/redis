@@ -113,11 +113,6 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                     # Use SIGKILL because SIGTERM goes through Redis's signal
                     # handler and graceful shutdown, which can delay master
                     # detection of the dead connection.
-                    # Additionally, explicitly close the connection from the
-                    # master side via CLIENT KILL — when a replica's TCP
-                    # receive buffer is full and the process dies, the master
-                    # can spend a long time (TCP retransmit / keepalive
-                    # timeouts) before noticing via the kernel.
                     if {$all_drop == "all" || $all_drop == "fast"} {
                         exec kill -9 [srv 0 pid]
                         set replicas_alive [lreplace $replicas_alive 1 1]
@@ -126,28 +121,24 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                         exec kill -9 [srv -1 pid]
                         set replicas_alive [lreplace $replicas_alive 0 0]
                     }
-                    # After SIGKILL, force-close the master-side connection
-                    # for the killed replica. We do this by killing the
-                    # client connection at the slave's port (via the master's
-                    # view of slaves) — the master's CLIENT LIST shows the
-                    # replica's *listening* port in laddr/port fields, so we
-                    # match on that.
+                    # After SIGKILL, wait for the master to actually detect
+                    # and free the dead replica(s). On systems where the
+                    # killed peer's TCP socket buffer was full, the master's
+                    # kernel may not deliver EPOLLOUT/EPOLLHUP quickly (no
+                    # ACKs from dead peer → retransmit loop), and we'd be
+                    # racing against the master's slow detection.
+                    set expected_alive 0
+                    if {$all_drop == "no" || $all_drop == "timeout"} {
+                        set expected_alive 2
+                    } elseif {$all_drop == "slow" || $all_drop == "fast"} {
+                        set expected_alive 1
+                    }
                     if {$all_drop != "no" && $all_drop != "timeout"} {
-                        set targets {}
-                        if {$all_drop == "all" || $all_drop == "slow"} {
-                            lappend targets [srv -1 port]
-                        }
-                        if {$all_drop == "all" || $all_drop == "fast"} {
-                            lappend targets [srv 0 port]
-                        }
-                        foreach line [split [$master client list type replica] "\n"] {
-                            if {![regexp {id=(\d+)} $line -> id]} continue
-                            if {![regexp {slave_listening_port=(\d+)} $line -> port]} continue
-                            foreach t $targets {
-                                if {$port == $t} {
-                                    catch {$master client kill id $id}
-                                }
-                            }
+                        wait_for_condition 600 100 {
+                            [regexp -all {id=\d+} [$master client list type replica]] == $expected_alive
+                        } else {
+                            # Best-effort: fall through; the wait below will
+                            # surface a clearer error.
                         }
                     }
                     if {$all_drop == "timeout"} {
