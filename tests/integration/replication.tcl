@@ -93,8 +93,14 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                     # In "all" the master generates the RDB slowly via
                     # rdb-key-save-delay, so pausing is unnecessary (and we
                     # want to kill the replica anyway).
+                    # "no" tests the happy path (both replicas complete) and
+                    # does not need an engineered pipe stall — pausing the
+                    # slow replica there only adds post-resume drain time and
+                    # makes the final "replica online" wait flaky.
+                    # "all" generates the RDB slowly via rdb-key-save-delay,
+                    # so pausing is unnecessary.
                     set slow_paused 0
-                    if {$all_drop != "all"} {
+                    if {$all_drop != "all" && $all_drop != "no"} {
                         pause_process [srv -1 pid]
                         set slow_paused 1
                     }
@@ -138,12 +144,12 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                         $master config set repl-timeout 2
                         wait_for_log_messages -2 {"*Disconnecting timedout replica (full sync)*"} $loglines 100 100
                         $master config set repl-timeout 10
-                    } elseif {($all_drop == "no" || $all_drop == "fast") && $slow_paused} {
-                        # For "no" both replicas must finish; for "fast" the
-                        # slow replica (-1) must finish after the fast one is
-                        # killed. Resume the slow reader so the pipe drains
-                        # and the RDB transfer completes promptly — no longer
-                        # rate-limited by socket backpressure (issue #14983).
+                    } elseif {$all_drop == "fast" && $slow_paused} {
+                        # For "fast" the slow replica (-1) must finish after
+                        # the fast one is killed. Resume the slow reader so
+                        # the pipe drains and the RDB transfer completes
+                        # promptly — no longer rate-limited by socket
+                        # backpressure (issue #14983).
                         resume_process [srv -1 pid]
                         set slow_paused 0
                     }
