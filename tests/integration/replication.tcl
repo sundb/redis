@@ -103,19 +103,33 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                     # add some command to be present in the command stream after the rdb.
                     $master incr $all_drop
 
-                    # disconnect replicas depending on the current test
+                    # disconnect replicas depending on the current test.
+                    # Always use SIGKILL: SIGTERM goes through Redis's signal
+                    # handler and graceful shutdown, which can delay master
+                    # detection of the dead connection. SIGKILL also works on
+                    # a SIGSTOPped process (the slow replica may be paused),
+                    # whereas SIGTERM would queue and be ignored.
                     if {$all_drop == "all" || $all_drop == "fast"} {
-                        exec kill [srv 0 pid]
+                        exec kill -9 [srv 0 pid]
                         set replicas_alive [lreplace $replicas_alive 1 1]
                     }
                     if {$all_drop == "all" || $all_drop == "slow"} {
-                        # Use SIGKILL because the slow replica may currently
-                        # be SIGSTOPped — SIGTERM would be queued and ignored
-                        # until SIGCONT, leaving the master waiting for the
-                        # dead connection until repl-timeout fires.
                         exec kill -9 [srv -1 pid]
                         set replicas_alive [lreplace $replicas_alive 0 0]
                         set slow_paused 0
+                    }
+                    # For "fast"/"slow" subcases, let the master detect the
+                    # dead replica (NULLing its slot in rdb_pipe_conns) BEFORE
+                    # we proceed. Otherwise pipe EOF can arrive while the
+                    # dead replica's slot is still set, and the master logs
+                    # the wrong "N replicas still up" count.
+                    if {$all_drop == "fast" || $all_drop == "slow"} {
+                        wait_for_condition 200 50 {
+                            [regexp -all {state=wait_bgsave} [$master info replication]] <= 1
+                        } else {
+                            # Best-effort: fall through and let the log-message
+                            # check below surface the issue with more context.
+                        }
                     }
                     if {$all_drop == "timeout"} {
                         # Let one replica hit repl-timeout while the slow reader
