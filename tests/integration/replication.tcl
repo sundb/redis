@@ -113,13 +113,21 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                         set replicas_alive [lreplace $replicas_alive 0 0]
                     }
                     if {$all_drop == "timeout"} {
-                        # We want the slow replica to hang on a key for long
-                        # enough to reach repl-timeout. With key-load-delay
-                        # already set, pausing pushes it well past repl-timeout
-                        # without making the whole subcase wait that long.
+                        # We want the slow replica to hang long enough to
+                        # reach repl-timeout. Pause it and wait for the
+                        # master to log the timed-out disconnect. Then
+                        # immediately restore a generous repl-timeout: when
+                        # one replica throttles the diskless pipe (issue
+                        # #14983) the OTHER replica's writes are also
+                        # partial, so it too has repl_last_partial_write set
+                        # and would time out on the next replicationCron tick
+                        # — leaving the master with zero alive replicas and
+                        # logging "last replica dropped" instead of the
+                        # expected "1 replicas still up".
                         $master config set repl-timeout 2
                         pause_process [srv -1 pid]
-                        after 2000
+                        wait_for_log_messages -2 {"*Disconnecting timedout replica (full sync)*"} $loglines 100 50
+                        $master config set repl-timeout 60
                     }
 
                     # wait for rdb child to exit. Use a generous budget for
