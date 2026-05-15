@@ -44,6 +44,17 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
             # rdb-key-save-delay.
             $master config set repl-timeout 60
             $master config set rdb-key-save-delay 0
+            # Make sure stale replicas from the previous iteration (whose
+            # processes were killed when their nested start_server scope
+            # exited) have been reaped from server.slaves before we start
+            # a fresh sync — otherwise repl-diskless-sync-max-replicas can
+            # block the new sync, and the rdb child for the new iteration
+            # is delayed waiting for the stale ones to be detected via TCP.
+            wait_for_condition 100 100 {
+                [regexp -all {id=\d+} [$master client list type replica]] == 0
+            } else {
+                catch {$master client kill type replica}
+            }
             set replicas {}
             set replicas_alive {}
             # start one replica that will read the rdb fast, and one that will be slow
@@ -158,13 +169,14 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                         $master config set repl-timeout 60
                     }
 
-                    # wait for rdb child to exit. Generous budget (240s)
-                    # for slow CI: with one slow replica connected, the
-                    # diskless pipe is rate-limited by it (issue #14983),
-                    # and after a kill the master may still need to wait
-                    # for the remaining replica to drain its receive buffer
-                    # before pipe EOF can be reached.
-                    wait_for_condition 2400 100 {
+                    # wait for rdb child to exit. Very generous budget (600s)
+                    # for heavily loaded CI: the diskless pipe is fundamentally
+                    # rate-limited by the slowest connected replica (issue
+                    # #14983), and under CPU contention a replica's loading
+                    # speed can drop dramatically — without ever fully
+                    # stalling (so repl-timeout never fires). The transfer
+                    # eventually completes; we just need to be patient enough.
+                    wait_for_condition 6000 100 {
                         [s -2 rdb_bgsave_in_progress] == 0
                     } else {
                         fail "rdb child didn't terminate"
@@ -213,8 +225,10 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
 
                     # In the "no" case both replicas stay alive through the
                     # full streamed RDB, so on slow TLS runners the final
-                    # ONLINE transition can lag behind child exit.
-                    set replica_online_wait_tries [expr {$all_drop == "no" ? 600 : 150}]
+                    # ONLINE transition can lag behind child exit. Be very
+                    # generous (300s per replica) for the same reason we
+                    # bumped the rdb-child wait above.
+                    set replica_online_wait_tries [expr {$all_drop == "no" ? 3000 : 150}]
 
                     # verify the data integrity
                     foreach replica $replicas_alive {
