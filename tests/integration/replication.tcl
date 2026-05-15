@@ -67,20 +67,17 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                         # drop path instead of racing with normal completion.
                         $master config set rdb-key-save-delay 1000
                     }
-                    # Throttle replica 0 enough that its socket buffer fills
-                    # (master gets EAGAIN, installs per-replica write handler,
-                    # sets repl_last_partial_write), but NOT so heavily that
-                    # the fast replica also gets EAGAIN — otherwise the
-                    # rate-limited pipe (issue #14983) causes fast to also
-                    # have repl_last_partial_write set, and when repl-timeout
-                    # is dropped to 2s for the "timeout" subcase BOTH replicas
-                    # get timed out in the same replicationCron tick.
-                    # 300us drains ~166MB/s on the slow replica's side; the
-                    # master can still saturate its 256KB-ish kernel send
-                    # buffer faster than that and trigger EAGAIN, but the
-                    # fast replica (no throttle) drains its buffer between
-                    # master writes and its writes always complete fully.
-                    [lindex $replicas 0] config set key-load-delay 300
+                    # Throttle replica 0 so the master's writes EAGAIN on it,
+                    # installing the per-replica write handler and setting
+                    # repl_last_partial_write (the "timeout" subcase needs
+                    # this for repl-timeout to fire on slow).
+                    # Skip the throttle for the "no" subcase — it tests the
+                    # happy path of both replicas finishing, and the
+                    # rate-limited pipe (issue #14983) under throttling can
+                    # turn this into a multi-minute transfer on CI.
+                    if {$all_drop != "no"} {
+                        [lindex $replicas 0] config set key-load-delay 300
+                    }
                     [lindex $replicas 0] replicaof $master_host $master_port
                     [lindex $replicas 1] replicaof $master_host $master_port
 
@@ -105,6 +102,11 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                     # Use SIGKILL because SIGTERM goes through Redis's signal
                     # handler and graceful shutdown, which can delay master
                     # detection of the dead connection.
+                    # Additionally, explicitly close the connection from the
+                    # master side via CLIENT KILL — when a replica's TCP
+                    # receive buffer is full and the process dies, the master
+                    # can spend a long time (TCP retransmit / keepalive
+                    # timeouts) before noticing via the kernel.
                     if {$all_drop == "all" || $all_drop == "fast"} {
                         exec kill -9 [srv 0 pid]
                         set replicas_alive [lreplace $replicas_alive 1 1]
@@ -112,6 +114,30 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                     if {$all_drop == "all" || $all_drop == "slow"} {
                         exec kill -9 [srv -1 pid]
                         set replicas_alive [lreplace $replicas_alive 0 0]
+                    }
+                    # After SIGKILL, force-close the master-side connection
+                    # for the killed replica. We do this by killing the
+                    # client connection at the slave's port (via the master's
+                    # view of slaves) — the master's CLIENT LIST shows the
+                    # replica's *listening* port in laddr/port fields, so we
+                    # match on that.
+                    if {$all_drop != "no" && $all_drop != "timeout"} {
+                        set targets {}
+                        if {$all_drop == "all" || $all_drop == "slow"} {
+                            lappend targets [srv -1 port]
+                        }
+                        if {$all_drop == "all" || $all_drop == "fast"} {
+                            lappend targets [srv 0 port]
+                        }
+                        foreach line [split [$master client list type replica] "\n"] {
+                            if {![regexp {id=(\d+)} $line -> id]} continue
+                            if {![regexp {slave_listening_port=(\d+)} $line -> port]} continue
+                            foreach t $targets {
+                                if {$port == $t} {
+                                    catch {$master client kill id $id}
+                                }
+                            }
+                        }
                     }
                     if {$all_drop == "timeout"} {
                         # We want the slow replica to hang long enough to
@@ -131,9 +157,13 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
                         $master config set repl-timeout 60
                     }
 
-                    # wait for rdb child to exit. Use a generous budget for
-                    # slow CI runners; successful runs still exit early.
-                    wait_for_condition 1200 100 {
+                    # wait for rdb child to exit. Generous budget (240s)
+                    # for slow CI: with one slow replica connected, the
+                    # diskless pipe is rate-limited by it (issue #14983),
+                    # and after a kill the master may still need to wait
+                    # for the remaining replica to drain its receive buffer
+                    # before pipe EOF can be reached.
+                    wait_for_condition 2400 100 {
                         [s -2 rdb_bgsave_in_progress] == 0
                     } else {
                         fail "rdb child didn't terminate"
