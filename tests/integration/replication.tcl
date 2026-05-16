@@ -19,26 +19,26 @@ proc log_file_matches {log pattern} {
     string match $pattern $content
 }
 
-start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
-    set master [srv 0 client]
-    $master config set repl-diskless-sync yes
-    $master config set repl-diskless-sync-delay 5
-    $master config set repl-diskless-sync-max-replicas 2
-    set master_host [srv 0 host]
-    set master_port [srv 0 port]
-    set master_pid [srv 0 pid]
-    # Put enough data in the db that the RDB is comfortably larger than the
-    # pipe and socket buffers so the primary can hit the blocked writer path,
-    # but keep it small enough that slow TLS CI runners don't spend minutes
-    # draining an oversized transfer (~40 MB uncompressed).
-    $master debug populate 4000 test 10000
-    $master config set rdbcompression no
-    $master config set repl-rdb-channel no
-    # If running on Linux, we also measure utime/stime to detect possible I/O handling issues
-    set os [catch {exec uname}]
-    set measure_time [expr {$os == "Linux"} ? 1 : 0]
+test "diskless no replicas drop during rdb pipe" {
+    start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
+        set master [srv 0 client]
+        $master config set repl-diskless-sync yes
+        $master config set repl-diskless-sync-delay 5
+        $master config set repl-diskless-sync-max-replicas 2
+        set master_host [srv 0 host]
+        set master_port [srv 0 port]
+        set master_pid [srv 0 pid]
+        # Put enough data in the db that the RDB is comfortably larger than the
+        # pipe and socket buffers so the primary can hit the blocked writer path,
+        # but keep it small enough that slow TLS CI runners don't spend minutes
+        # draining an oversized transfer (~40 MB uncompressed).
+        $master debug populate 4000 test 10000
+        $master config set rdbcompression no
+        $master config set repl-rdb-channel no
+        # If running on Linux, we also measure utime/stime to detect possible I/O handling issues
+        set os [catch {exec uname}]
+        set measure_time [expr {$os == "Linux"} ? 1 : 0]
 
-    test "diskless no replicas drop during rdb pipe" {
         set replicas {}
         set replicas_alive {}
         # start one replica that will read the rdb fast, and one that will be slow
@@ -126,26 +126,26 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
     }
 }
 
-start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
-    set master [srv 0 client]
-    $master config set repl-diskless-sync yes
-    $master config set repl-diskless-sync-delay 5
-    $master config set repl-diskless-sync-max-replicas 2
-    set master_host [srv 0 host]
-    set master_port [srv 0 port]
-    set master_pid [srv 0 pid]
-    # Put enough data in the db that the RDB is comfortably larger than the
-    # pipe and socket buffers so the primary can hit the blocked writer path,
-    # but keep it small enough that slow TLS CI runners don't spend minutes
-    # draining an oversized transfer (~40 MB uncompressed).
-    $master debug populate 4000 test 10000
-    $master config set rdbcompression no
-    $master config set repl-rdb-channel no
-    # If running on Linux, we also measure utime/stime to detect possible I/O handling issues
-    set os [catch {exec uname}]
-    set measure_time [expr {$os == "Linux"} ? 1 : 0]
+test "diskless slow replicas drop during rdb pipe" {
+    start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
+        set master [srv 0 client]
+        $master config set repl-diskless-sync yes
+        $master config set repl-diskless-sync-delay 5
+        $master config set repl-diskless-sync-max-replicas 2
+        set master_host [srv 0 host]
+        set master_port [srv 0 port]
+        set master_pid [srv 0 pid]
+        # Put enough data in the db that the RDB is comfortably larger than the
+        # pipe and socket buffers so the primary can hit the blocked writer path,
+        # but keep it small enough that slow TLS CI runners don't spend minutes
+        # draining an oversized transfer (~40 MB uncompressed).
+        $master debug populate 4000 test 10000
+        $master config set rdbcompression no
+        $master config set repl-rdb-channel no
+        # If running on Linux, we also measure utime/stime to detect possible I/O handling issues
+        set os [catch {exec uname}]
+        set measure_time [expr {$os == "Linux"} ? 1 : 0]
 
-    test "diskless slow replicas drop during rdb pipe" {
         set replicas {}
         set replicas_alive {}
         # start one replica that will read the rdb fast, and one that will be slow
@@ -244,26 +244,26 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
     }
 }
 
-start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
-    set master [srv 0 client]
-    $master config set repl-diskless-sync yes
-    $master config set repl-diskless-sync-delay 5
-    $master config set repl-diskless-sync-max-replicas 2
-    set master_host [srv 0 host]
-    set master_port [srv 0 port]
-    set master_pid [srv 0 pid]
-    # Put enough data in the db that the RDB is comfortably larger than the
-    # pipe and socket buffers so the primary can hit the blocked writer path,
-    # but keep it small enough that slow TLS CI runners don't spend minutes
-    # draining an oversized transfer (~40 MB uncompressed).
-    $master debug populate 4000 test 10000
-    $master config set rdbcompression no
-    $master config set repl-rdb-channel no
-    # If running on Linux, we also measure utime/stime to detect possible I/O handling issues
-    set os [catch {exec uname}]
-    set measure_time [expr {$os == "Linux"} ? 1 : 0]
+test "diskless fast replicas drop during rdb pipe" {
+    start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
+        set master [srv 0 client]
+        $master config set repl-diskless-sync yes
+        $master config set repl-diskless-sync-delay 5
+        $master config set repl-diskless-sync-max-replicas 2
+        set master_host [srv 0 host]
+        set master_port [srv 0 port]
+        set master_pid [srv 0 pid]
+        # Put enough data in the db that the RDB is comfortably larger than the
+        # pipe and socket buffers so the primary can hit the blocked writer path,
+        # but keep it small enough that slow TLS CI runners don't spend minutes
+        # draining an oversized transfer (~40 MB uncompressed).
+        $master debug populate 4000 test 10000
+        $master config set rdbcompression no
+        $master config set repl-rdb-channel no
+        # If running on Linux, we also measure utime/stime to detect possible I/O handling issues
+        set os [catch {exec uname}]
+        set measure_time [expr {$os == "Linux"} ? 1 : 0]
 
-    test "diskless fast replicas drop during rdb pipe" {
         set replicas {}
         set replicas_alive {}
         start_server {overrides {save ""}} {
@@ -345,26 +345,26 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
     }
 }
 
-start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
-    set master [srv 0 client]
-    $master config set repl-diskless-sync yes
-    $master config set repl-diskless-sync-delay 5
-    $master config set repl-diskless-sync-max-replicas 2
-    set master_host [srv 0 host]
-    set master_port [srv 0 port]
-    set master_pid [srv 0 pid]
-    # Put enough data in the db that the RDB is comfortably larger than the
-    # pipe and socket buffers so the primary can hit the blocked writer path,
-    # but keep it small enough that slow TLS CI runners don't spend minutes
-    # draining an oversized transfer (~40 MB uncompressed).
-    $master debug populate 4000 test 10000
-    $master config set rdbcompression no
-    $master config set repl-rdb-channel no
-    # If running on Linux, we also measure utime/stime to detect possible I/O handling issues
-    set os [catch {exec uname}]
-    set measure_time [expr {$os == "Linux"} ? 1 : 0]
+test "diskless all replicas drop during rdb pipe" {
+    start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
+        set master [srv 0 client]
+        $master config set repl-diskless-sync yes
+        $master config set repl-diskless-sync-delay 5
+        $master config set repl-diskless-sync-max-replicas 2
+        set master_host [srv 0 host]
+        set master_port [srv 0 port]
+        set master_pid [srv 0 pid]
+        # Put enough data in the db that the RDB is comfortably larger than the
+        # pipe and socket buffers so the primary can hit the blocked writer path,
+        # but keep it small enough that slow TLS CI runners don't spend minutes
+        # draining an oversized transfer (~40 MB uncompressed).
+        $master debug populate 4000 test 10000
+        $master config set rdbcompression no
+        $master config set repl-rdb-channel no
+        # If running on Linux, we also measure utime/stime to detect possible I/O handling issues
+        set os [catch {exec uname}]
+        set measure_time [expr {$os == "Linux"} ? 1 : 0]
 
-    test "diskless all replicas drop during rdb pipe" {
         set replicas {}
         set replicas_alive {}
         start_server {overrides {save ""}} {
@@ -442,26 +442,26 @@ start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
     }
 }
 
-start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
-    set master [srv 0 client]
-    $master config set repl-diskless-sync yes
-    $master config set repl-diskless-sync-delay 5
-    $master config set repl-diskless-sync-max-replicas 2
-    set master_host [srv 0 host]
-    set master_port [srv 0 port]
-    set master_pid [srv 0 pid]
-    # Put enough data in the db that the RDB is comfortably larger than the
-    # pipe and socket buffers so the primary can hit the blocked writer path,
-    # but keep it small enough that slow TLS CI runners don't spend minutes
-    # draining an oversized transfer (~40 MB uncompressed).
-    $master debug populate 4000 test 10000
-    $master config set rdbcompression no
-    $master config set repl-rdb-channel no
-    # If running on Linux, we also measure utime/stime to detect possible I/O handling issues
-    set os [catch {exec uname}]
-    set measure_time [expr {$os == "Linux"} ? 1 : 0]
+test "diskless timeout replicas drop during rdb pipe" {
+    start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
+        set master [srv 0 client]
+        $master config set repl-diskless-sync yes
+        $master config set repl-diskless-sync-delay 5
+        $master config set repl-diskless-sync-max-replicas 2
+        set master_host [srv 0 host]
+        set master_port [srv 0 port]
+        set master_pid [srv 0 pid]
+        # Put enough data in the db that the RDB is comfortably larger than the
+        # pipe and socket buffers so the primary can hit the blocked writer path,
+        # but keep it small enough that slow TLS CI runners don't spend minutes
+        # draining an oversized transfer (~40 MB uncompressed).
+        $master debug populate 4000 test 10000
+        $master config set rdbcompression no
+        $master config set repl-rdb-channel no
+        # If running on Linux, we also measure utime/stime to detect possible I/O handling issues
+        set os [catch {exec uname}]
+        set measure_time [expr {$os == "Linux"} ? 1 : 0]
 
-    test "diskless timeout replicas drop during rdb pipe" {
         set replicas {}
         set replicas_alive {}
         start_server {overrides {save ""}} {
