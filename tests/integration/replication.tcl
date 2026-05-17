@@ -126,125 +126,7 @@ proc log_file_matches {log pattern} {
 #     }
 # }
 
-test "diskless slow replicas drop during rdb pipe" {
-    start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
-        set master [srv 0 client]
-        $master config set repl-diskless-sync yes
-        $master config set repl-diskless-sync-delay 5
-        $master config set repl-diskless-sync-max-replicas 2
-        set master_host [srv 0 host]
-        set master_port [srv 0 port]
-        set master_pid [srv 0 pid]
-        # Put enough data in the db that the RDB is comfortably larger than the
-        # pipe and socket buffers so the primary can hit the blocked writer path,
-        # but keep it small enough that slow TLS CI runners don't spend minutes
-        # draining an oversized transfer (~40 MB uncompressed).
-        $master debug populate 4000 test 10000
-        $master config set rdbcompression no
-        $master config set repl-rdb-channel no
-        # If running on Linux, we also measure utime/stime to detect possible I/O handling issues
-        set os [catch {exec uname}]
-        set measure_time [expr {$os == "Linux"} ? 1 : 0]
-
-        set replicas {}
-        set replicas_alive {}
-        # start one replica that will read the rdb fast, and one that will be slow
-        start_server {overrides {save ""}} {
-            lappend replicas [srv 0 client]
-            lappend replicas_alive [srv 0 client]
-            start_server {overrides {save ""}} {
-                lappend replicas [srv 0 client]
-                lappend replicas_alive [srv 0 client]
-
-                # start replication
-                # it's enough for just one replica to be slow, and have it's write handler enabled
-                # so that the whole rdb generation process is bound to that
-                set loglines [count_log_lines -2]
-                [lindex $replicas 0] config set repl-diskless-load swapdb
-                [lindex $replicas 1] config set repl-diskless-load swapdb
-                # Throttle replica 0 so the master's writes EAGAIN on it,
-                # installing the per-replica write handler and setting
-                # repl_last_partial_write — that's the diskless pipe stall
-                # path we want to exercise before killing the replica.
-                [lindex $replicas 0] config set key-load-delay 300
-                [lindex $replicas 0] replicaof $master_host $master_port
-                [lindex $replicas 1] replicaof $master_host $master_port
-
-                wait_for_log_messages -1 {"*Loading DB in memory*"} 0 1500 10
-
-                if {$measure_time} {
-                    set master_statfile "/proc/$master_pid/stat"
-                    set master_start_metrics [get_cpu_metrics $master_statfile]
-                    set start_time [clock seconds]
-                }
-
-                # wait a while so that the pipe socket writer will be blocked
-                # on write (since replica 0 is slow to read from the socket)
-                after 500
-                $master incr slow
-
-                # SIGKILL the slow replica. Avoid SIGTERM so we don't wait
-                # for Redis's graceful shutdown path before the master sees
-                # the dead connection.
-                exec kill -9 [srv -1 pid]
-                set replicas_alive [lreplace $replicas_alive 0 0]
-
-                # Wait for the master to detect and free the dead replica.
-                # When the killed peer's TCP receive buffer was full, the
-                # master's kernel may take a long time to deliver EPOLL
-                # events for the dead peer (no ACKs → retransmit loop).
-                wait_for_condition 600 100 {
-                    [regexp -all {id=\d+} [$master client list type replica]] == 1
-                } else {}
-
-                wait_for_condition 6000 100 {
-                    [s -2 rdb_bgsave_in_progress] == 0
-                } else {
-                    fail "rdb child didn't terminate"
-                }
-
-                wait_for_log_messages -2 {"*Diskless rdb transfer, done reading from pipe, 1 replicas still up*"} $loglines 1 1
-
-                if {$measure_time} {
-                    set master_end_metrics [get_cpu_metrics $master_statfile]
-                    set time_elapsed [expr {[clock seconds]-$start_time}]
-                    set master_cpu [compute_cpu_usage $master_start_metrics $master_end_metrics]
-                    set master_utime [lindex $master_cpu 0]
-                    set master_stime [lindex $master_cpu 1]
-                    if {$::verbose} {
-                        puts "elapsed: $time_elapsed"
-                        puts "master utime: $master_utime"
-                        puts "master stime: $master_stime"
-                    }
-                    if {!$::no_latency} {
-                        assert {$master_utime < 70}
-                        assert {$master_stime < 70}
-                    }
-                }
-
-                # verify the data integrity (only the surviving fast replica)
-                foreach replica $replicas_alive {
-                    wait_for_condition 150 100 {
-                        [lindex [$replica role] 3] eq {connected}
-                    } else {
-                        fail "replicas still not connected after some time"
-                    }
-                    wait_for_condition 50 100 {
-                        [$master dbsize] == [$replica dbsize]
-                    } else {
-                        fail "Different number of keys between master and replicas after too long time."
-                    }
-                    set digest [$master debug digest]
-                    set digest0 [$replica debug digest]
-                    assert {$digest ne 0000000000000000000000000000000000000000}
-                    assert {$digest eq $digest0}
-                }
-            }
-        }
-    }
-}
-
-# test "diskless fast replicas drop during rdb pipe" {
+# test "diskless slow replicas drop during rdb pipe" {
 #     start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
 #         set master [srv 0 client]
 #         $master config set repl-diskless-sync yes
@@ -266,6 +148,7 @@ test "diskless slow replicas drop during rdb pipe" {
 
 #         set replicas {}
 #         set replicas_alive {}
+#         # start one replica that will read the rdb fast, and one that will be slow
 #         start_server {overrides {save ""}} {
 #             lappend replicas [srv 0 client]
 #             lappend replicas_alive [srv 0 client]
@@ -273,9 +156,16 @@ test "diskless slow replicas drop during rdb pipe" {
 #                 lappend replicas [srv 0 client]
 #                 lappend replicas_alive [srv 0 client]
 
+#                 # start replication
+#                 # it's enough for just one replica to be slow, and have it's write handler enabled
+#                 # so that the whole rdb generation process is bound to that
 #                 set loglines [count_log_lines -2]
 #                 [lindex $replicas 0] config set repl-diskless-load swapdb
 #                 [lindex $replicas 1] config set repl-diskless-load swapdb
+#                 # Throttle replica 0 so the master's writes EAGAIN on it,
+#                 # installing the per-replica write handler and setting
+#                 # repl_last_partial_write — that's the diskless pipe stall
+#                 # path we want to exercise before killing the replica.
 #                 [lindex $replicas 0] config set key-load-delay 300
 #                 [lindex $replicas 0] replicaof $master_host $master_port
 #                 [lindex $replicas 1] replicaof $master_host $master_port
@@ -288,13 +178,21 @@ test "diskless slow replicas drop during rdb pipe" {
 #                     set start_time [clock seconds]
 #                 }
 
+#                 # wait a while so that the pipe socket writer will be blocked
+#                 # on write (since replica 0 is slow to read from the socket)
 #                 after 500
-#                 $master incr fast
+#                 $master incr slow
 
-#                 # SIGKILL the fast replica; the slow one continues.
-#                 exec kill -9 [srv 0 pid]
-#                 set replicas_alive [lreplace $replicas_alive 1 1]
+#                 # SIGKILL the slow replica. Avoid SIGTERM so we don't wait
+#                 # for Redis's graceful shutdown path before the master sees
+#                 # the dead connection.
+#                 exec kill -9 [srv -1 pid]
+#                 set replicas_alive [lreplace $replicas_alive 0 0]
 
+#                 # Wait for the master to detect and free the dead replica.
+#                 # When the killed peer's TCP receive buffer was full, the
+#                 # master's kernel may take a long time to deliver EPOLL
+#                 # events for the dead peer (no ACKs → retransmit loop).
 #                 wait_for_condition 600 100 {
 #                     [regexp -all {id=\d+} [$master client list type replica]] == 1
 #                 } else {}
@@ -319,11 +217,12 @@ test "diskless slow replicas drop during rdb pipe" {
 #                         puts "master stime: $master_stime"
 #                     }
 #                     if {!$::no_latency} {
-#                         assert {$master_utime < 15}
-#                         assert {$master_stime < 15}
+#                         assert {$master_utime < 70}
+#                         assert {$master_stime < 70}
 #                     }
 #                 }
 
+#                 # verify the data integrity (only the surviving fast replica)
 #                 foreach replica $replicas_alive {
 #                     wait_for_condition 150 100 {
 #                         [lindex [$replica role] 3] eq {connected}
@@ -344,6 +243,107 @@ test "diskless slow replicas drop during rdb pipe" {
 #         }
 #     }
 # }
+
+test "diskless fast replicas drop during rdb pipe" {
+    start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
+        set master [srv 0 client]
+        $master config set repl-diskless-sync yes
+        $master config set repl-diskless-sync-delay 5
+        $master config set repl-diskless-sync-max-replicas 2
+        set master_host [srv 0 host]
+        set master_port [srv 0 port]
+        set master_pid [srv 0 pid]
+        # Put enough data in the db that the RDB is comfortably larger than the
+        # pipe and socket buffers so the primary can hit the blocked writer path,
+        # but keep it small enough that slow TLS CI runners don't spend minutes
+        # draining an oversized transfer (~40 MB uncompressed).
+        $master debug populate 4000 test 10000
+        $master config set rdbcompression no
+        $master config set repl-rdb-channel no
+        # If running on Linux, we also measure utime/stime to detect possible I/O handling issues
+        set os [catch {exec uname}]
+        set measure_time [expr {$os == "Linux"} ? 1 : 0]
+
+        set replicas {}
+        set replicas_alive {}
+        start_server {overrides {save ""}} {
+            lappend replicas [srv 0 client]
+            lappend replicas_alive [srv 0 client]
+            start_server {overrides {save ""}} {
+                lappend replicas [srv 0 client]
+                lappend replicas_alive [srv 0 client]
+
+                set loglines [count_log_lines -2]
+                [lindex $replicas 0] config set repl-diskless-load swapdb
+                [lindex $replicas 1] config set repl-diskless-load swapdb
+                [lindex $replicas 0] config set key-load-delay 300
+                [lindex $replicas 0] replicaof $master_host $master_port
+                [lindex $replicas 1] replicaof $master_host $master_port
+
+                wait_for_log_messages -1 {"*Loading DB in memory*"} 0 1500 10
+
+                if {$measure_time} {
+                    set master_statfile "/proc/$master_pid/stat"
+                    set master_start_metrics [get_cpu_metrics $master_statfile]
+                    set start_time [clock seconds]
+                }
+
+                after 500
+                $master incr fast
+
+                # SIGKILL the fast replica; the slow one continues.
+                exec kill -9 [srv 0 pid]
+                set replicas_alive [lreplace $replicas_alive 1 1]
+
+                wait_for_condition 600 100 {
+                    [regexp -all {id=\d+} [$master client list type replica]] == 1
+                } else {}
+
+                wait_for_condition 6000 100 {
+                    [s -2 rdb_bgsave_in_progress] == 0
+                } else {
+                    fail "rdb child didn't terminate"
+                }
+
+                wait_for_log_messages -2 {"*Diskless rdb transfer, done reading from pipe, 1 replicas still up*"} $loglines 1 1
+
+                if {$measure_time} {
+                    set master_end_metrics [get_cpu_metrics $master_statfile]
+                    set time_elapsed [expr {[clock seconds]-$start_time}]
+                    set master_cpu [compute_cpu_usage $master_start_metrics $master_end_metrics]
+                    set master_utime [lindex $master_cpu 0]
+                    set master_stime [lindex $master_cpu 1]
+                    if {$::verbose} {
+                        puts "elapsed: $time_elapsed"
+                        puts "master utime: $master_utime"
+                        puts "master stime: $master_stime"
+                    }
+                    if {!$::no_latency} {
+                        assert {$master_utime < 15}
+                        assert {$master_stime < 15}
+                    }
+                }
+
+                foreach replica $replicas_alive {
+                    wait_for_condition 150 100 {
+                        [lindex [$replica role] 3] eq {connected}
+                    } else {
+                        fail "replicas still not connected after some time"
+                    }
+                    wait_for_condition 50 100 {
+                        [$master dbsize] == [$replica dbsize]
+                    } else {
+                        fail "Different number of keys between master and replicas after too long time."
+                    }
+                    set digest [$master debug digest]
+                    set digest0 [$replica debug digest]
+                    assert {$digest ne 0000000000000000000000000000000000000000}
+                    assert {$digest eq $digest0}
+                }
+            }
+        }
+    }
+}
 
 # test "diskless all replicas drop during rdb pipe" {
 #     start_server {tags {"repl external:skip tsan:skip"} overrides {save ""}} {
