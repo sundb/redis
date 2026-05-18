@@ -397,6 +397,7 @@ test "diskless all replicas drop during rdb pipe" {
                 pause_process [srv -1 pid]
                 after 500
                 $master incr all
+                resume_process [srv -1 pid]
 
                 # SIGKILL both replicas while the rdb child is still active.
                 exec kill -9 [srv 0 pid]
