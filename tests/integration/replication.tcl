@@ -394,6 +394,7 @@ test "diskless all replicas drop during rdb pipe" {
                     set start_time [clock seconds]
                 }
 
+                pause_process [srv -1 pid]
                 after 500
                 $master incr all
 
