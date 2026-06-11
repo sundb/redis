@@ -12,6 +12,8 @@
 
 #include <sys/types.h>
 
+#include "adlist.h"
+
 /* Opaque handle to client's compression state used internally by client_comp */
 typedef struct compressionState compressionState;
 
@@ -23,12 +25,17 @@ typedef enum {
     DECOMPRESS,
 } compressionDirection;
 
-int clientCreateCompressionState(struct client *c, compressionDirection dir);
+int clientEnableCompression(struct client *c, compressionDirection dir);
+void clientDisableCompression(struct client *c);
 void clientDestroyCompressionState(struct client *c);
 
-int clientEnableCompression(struct client *c, compressionDirection dir);
+int clientCompressesWrites(struct client *c);
+int clientDecompressesReads(struct client *c);
 
-void clientDisableCompression(struct client *c);
+ssize_t clientCompressAndWriteBuf(struct client *c, const char *data, size_t len,
+                                  ssize_t *socket_written);
+int clientReadAndDecompress(struct client *c, char *buf, size_t buf_len,
+                            size_t *socket_read);
 
 int compressAndWrite(struct client *c, int *tot_written);
 
@@ -38,5 +45,7 @@ int readFromBufAndDecompress(struct client *c, char *input_buf, size_t input_len
 
 int clientHasPendingCompressionFlush(struct client *c);
 int clientHasPendingCompressedData(struct client *c);
+
+int compressionProcessPendingReads(list *compression_clients);
 
 #endif /* __CLIENT_COMP_H */

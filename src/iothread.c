@@ -830,8 +830,13 @@ void IOThreadBeforeSleep(struct aeEventLoop *el) {
     /* Handle pending data(typical TLS). */
     connTypeProcessPendingData(el);
 
-    /* If any connection type(typical TLS) still has pending unread data don't sleep at all. */
-    int dont_sleep = connTypeHasPendingData(el);
+    /* Handle decompressed data that wasn't fully consumed by the last read
+     * event (e.g. the query buffer filled up). */
+    int compression_pending = compressionProcessPendingReads(t->compression_clients);
+
+    /* If any connection type(typical TLS) or compression client still has
+     * pending unread data don't sleep at all. */
+    int dont_sleep = connTypeHasPendingData(el) || compression_pending > 0;
 
     /* Process clients from main thread, since the main thread may deliver clients
      * without notification during IO thread processing events. */
@@ -904,10 +909,11 @@ void IOThreadCompressionCron(IOThread *t) {
         if (c->io_flags & CLIENT_IO_CLOSE_ASAP) continue;
         serverAssert(c->compression_state);
 
-        /* Usually compressAndWrite will be called at the end of
-         * consumeAndTryWriteCompressed but when compression maximum latency ms
-         * have passed we want to force flush to the compression buffer so we
-         * don't have much delays between writes to the socket */
+        /* Usually compressAndWrite is called via clientCompressAndWriteBuf
+         * when repl data is written to the replica, but when compression
+         * maximum latency ms have passed we want to force flush the
+         * compression buffer so we don't have much delays between writes to
+         * the socket */
         if (clientHasPendingCompressionFlush(c)) {
             /* Only master/replica clients support client compression for now. */
             serverAssert(c->flags & CLIENT_SLAVE);

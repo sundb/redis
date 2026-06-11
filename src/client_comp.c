@@ -31,10 +31,14 @@ struct compressionState {
     } ctx;
     int write_flush_pending;    /* write flush not yet completed */
     int read_flush_pending;    /* read flush not yet completed */
+    int handle_pending;   /* Set while processing pending decompressed data, in
+                           * which case we must not read from the socket. */
     mstime_t last_write;  /* Time since last write. Used to check if it's time
                            * to flush the buffer */
     compressionDirection dir;
 };
+
+static int decompressInto(compressionState *state, char *buf, size_t buflen);
 
 /* --- zstd --- */
 
@@ -208,425 +212,20 @@ static const compressionType zstdType = {
     .end = zstdEnd,
 };
 
-/* Compression connection. It wraps over existing connection in order to add
- * compression capability during read/write operations. The `base` member is only
- * used for getting the ConnectionType but whenever we do any operation on the
- * connection we use the underlying pointer which is the actual connection.
- * See CT_Compression. */
-typedef struct compressionConnection {
-    connection base;
-    connection *underlying;
-    listNode *pending_data_node;
-    size_t last_read;
-    size_t last_written;
-    int handle_pending;
-} compressionConnection;
-
-int decompressInto(compressionState *state, char *buf, size_t buflen);
-
-static void compressionPendingAdd(compressionConnection *cc) {
-    if (cc->pending_data_node) return;
-
-    if (!cc->underlying->el->privdata[2]) {
-        cc->underlying->el->privdata[2] = listCreate();
-    }
-
-    list *l = cc->underlying->el->privdata[2];
-    listAddNodeTail(l, cc);
-    cc->pending_data_node = listLast(l);
-}
-
-static void compressionPendingRemove(compressionConnection *cc) {
-    if (!cc->pending_data_node) return;
-
-    list *l = cc->underlying->el->privdata[2];
-    if (l && listLength(l) > 0 && listSearchKey(l, cc) == cc->pending_data_node) {
-        listDelNode(l, cc->pending_data_node);
-    } else if (cc->pending_data_node) {
-        zfree(cc->pending_data_node);
-    }
-    cc->pending_data_node = NULL;
-}
-
-static const char *connCompressionGetType(connection *conn) {
-    UNUSED(conn);
-    return CONN_TYPE_COMPRESSION;
-}
-
-static void connCompressionAeHandler(aeEventLoop *el, int fd, void *clientData, int mask) {
-    compressionConnection *cc = (compressionConnection *)clientData;
-    cc->underlying->type->ae_handler(el, fd, clientData, mask);
-}
-
-static int connCompressionAddr(connection *conn, char *ip, size_t ip_len, int *port, int remote) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->type->addr(cc->underlying, ip, ip_len, port, remote);
-}
-
-static int connCompressionIsLocal(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->type->is_local(cc->underlying);
-}
-
-static void connCompressionShutdown(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    cc->underlying->type->shutdown(cc->underlying);
-}
-
-static void connCompressionClose(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    cc->underlying->type->close(cc->underlying);
-    zfree(conn);
-}
-
-static int connCompressionConnect(connection *conn, const char *addr, int port, const char *source_addr, ConnectionCallbackFunc connect_handler) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->type->connect(cc->underlying, addr, port, source_addr, connect_handler);
-}
-
-static int connCompressionBlockingConnect(connection *conn, const char *addr, int port, long long timeout) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->type->blocking_connect(cc->underlying, addr, port, timeout);
-}
-
-static int connCompressionAccept(connection *conn, ConnectionCallbackFunc accept_handler) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->type->accept(cc->underlying, accept_handler);
-}
-
-/* If decompression is initialized for a connection it reads compressed data
- * from the underlying connection (i.e usually from socket) into a temp buffer
- * and decompresses into the passed `buf`. Tries to read and decompress as much
- * as possible.
- * There are some scenarios though that we may still have pending data to process
- * (see clientHasPendingCompressedData). In such cases the connection is added
- * to the event-loop's pending data and processed via connProcessPendingData. */
-static int connCompressionRead(struct connection *conn, void *buf, size_t buf_len) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    client *c = connGetPrivateData(conn);
-    compressionState *state = c->compression_state;
-    if (!state || state->dir != DECOMPRESS)
-        return connRead(cc->underlying, buf, buf_len);
-
-    cc->last_read = 0;
-    size_t decompressed = 0;
-    do {
-        int curr = decompressInto(state, (char*)buf + decompressed, buf_len - decompressed);
-        /* Decompression error, we should close the connection */
-        if (curr < 0) {
-            cc->underlying->state = CONN_STATE_CLOSED;
-            break;
-        }
-        decompressed += curr;
-
-        int nread = 0;
-        /* If the handle_pending flag is raised we only decompress whatever data
-         * we have read from the socket without reading anything more. Socket
-         * reading will happened when the event loop handles read event in which
-         * case the handle_pending flags wouldn't be raised. */
-        if (!cc->handle_pending) {
-            nread = cc->underlying->type->read(
-                cc->underlying,
-                state->input.data + state->input.written,
-                state->input.size - state->input.written);
-
-            if (nread < 0 && connGetState(cc->underlying) == CONN_STATE_ERROR) {
-                cc->last_read = -1;
-                return -1;
-            }
-            /* Even if nread == 0 we continue the loop until decompressInto has
-             * nothing more it can do. */
-            if (nread > 0) {
-                cc->last_read += nread;
-                state->input.written += nread;
-            }
-        }
-
-        if (curr <= 0 && nread <= 0) break;
-    } while (decompressed < buf_len);
-
-    if (decompressed == 0 && connGetState(cc->underlying) == CONN_STATE_CONNECTED)
-        return -1;
-
-    /* No need to give pending work to main thread as the client must be send to
-     * IO-thread soon enough. */
-    if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-        if (connGetState(conn) == CONN_STATE_CONNECTED && clientHasPendingCompressedData(c)) {
-            compressionPendingAdd(cc);
-        } else if (cc->pending_data_node) {
-            compressionPendingRemove(cc);
-        }
-    }
-
-    return decompressed;
-}
-
-/* Compress all bytes from `data` and pass the compressed data to the underlying's
- * connection write method. */
-static int connCompressionWrite(connection *conn, const void *data, size_t len) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    client *c = connGetPrivateData(conn);
-    compressionState *state = c->compression_state;
-    /* If no compression state or we are not compressing data - defer to
-     * underlying connection. */
-    if (!state || state->dir != COMPRESS)
-        return connWrite(cc->underlying, data, len);
-
-    int consumed = 0;
-    cc->last_written = 0;
-    while ((size_t)consumed != len) {
-        int to_consume =
-            min(state->input.size - state->input.written, (int)(len - consumed));
-        serverAssert(to_consume >= 0);
-
-        memcpy(state->input.data + state->input.written,
-               (char*)data + consumed, to_consume);
-
-        state->input.written += to_consume;
-        consumed += to_consume;
-
-        /* Write whatever we have available in the compressed buffer */
-        int written = 0;
-        int err = compressAndWrite(c, &written);
-        if (err) {
-            if (connGetState(c->conn) != CONN_STATE_CONNECTED) {
-                return -1;
-            }
-            return consumed;
-        }
-        cc->last_written += written;
-
-        if (written == 0 && state->output.written == state->output.consumed)
-            break;
-    }
-
-    return consumed;
-}
-
-static int connCompressionWritev(connection *conn, const struct iovec *iov, int iovcnt) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->type->writev(cc->underlying, iov, iovcnt);
-}
-
-static int connCompressionSetWriteHandler(connection *conn, ConnectionCallbackFunc handler, int barrier) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->type->set_write_handler(cc->underlying, handler, barrier);
-}
-
-static int connCompressionSetReadHandler(connection *conn, ConnectionCallbackFunc handler) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->type->set_read_handler(cc->underlying, handler);
-}
-
-static const char *connCompressionGetLastError(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->type->get_last_error(cc->underlying);
-}
-
-static ssize_t connCompressionSyncWrite(connection *conn, char *ptr, ssize_t size, long long timeout) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->type->sync_write(cc->underlying, ptr, size, timeout);
-}
-
-static ssize_t connCompressionSyncRead(connection *conn, char *ptr, ssize_t size, long long timeout) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->type->sync_read(cc->underlying, ptr, size, timeout);
-}
-
-static ssize_t connCompressionSyncReadLine(connection *conn, char *ptr, ssize_t size, long long timeout) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->type->sync_readline(cc->underlying, ptr, size, timeout);
-}
-
-static size_t connCompressionGetLastRead(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->last_read;
-}
-
-static size_t connCompressionGetLastWritten(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->last_written;
-}
-
-static void connCompressionUnbindEventLoop(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    aeEventLoop *el = cc->underlying->el;
-    if (el) {
-        int fd = cc->underlying->fd;
-        int mask = aeGetFileEvents(el, cc->underlying->fd);
-        if (mask & AE_READABLE) aeDeleteFileEvent(el, fd, AE_READABLE);
-        if (mask & AE_WRITABLE) aeDeleteFileEvent(el, fd, AE_WRITABLE);
-
-        if (cc->pending_data_node) {
-            compressionPendingRemove(cc);
-        }
-    }
-}
-
-static int connCompressionRebindEventLoop(connection *conn, aeEventLoop *el) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->type->rebind_event_loop(cc->underlying, el);
-}
-
-static aeEventLoop *connCompressionGetEventLoop(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->el;
-}
-
-static void connCompressionUnsetEventLoop(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    cc->underlying->el = NULL;
-}
-
-static int connCompressionGetFd(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->fd;
-}
-
-static int connCompressionGetIovcnt(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->iovcnt;
-}
-
-static ConnectionState connCompressionGetState(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->state;
-}
-
-static int connCompressionGetLastErrno(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->last_errno;
-}
-
-static int connCompressionHasReadHandler(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->read_handler != NULL;
-}
-
-static int connCompressionHasWriteHandler(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->write_handler != NULL;
-}
-
-static void connCompressionSetPrivateData(connection *conn, void *data) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    cc->underlying->private_data = data;
-}
-
-static void *connCompressionGetPrivateData(connection *conn) {
-    compressionConnection *cc = (compressionConnection*)conn;
-    return cc->underlying->private_data;
-}
-
-static int compressionHasPendingData(struct aeEventLoop *el) {
-    list *pending_list = el->privdata[2];
-    if (!pending_list)
-        return 0;
-    return listLength(pending_list) > 0;
-}
-
-/* Handling pending data involves calling the read handler of the underlying
- * connection. We don't actually want to call connRead on it as we handle only
- * pending data(i.e internal buffers of the compression library not yet flushed
- * or non-consumed decompressed data in our temp buffers) and not any actual
- * read events. */
-static int compressionProcessPendingData(struct aeEventLoop *el) {
-    list *pending_list = el->privdata[2];
-    if (!pending_list || listLength(pending_list) == 0)
-        return 0;
-
-    listIter li;
-    listNode *ln;
-    int processed = 0;
-    listRewind(pending_list,&li);
-    while((ln = listNext(&li))) {
-        compressionConnection *cc = listNodeValue(ln);
-        if (!cc || !cc->underlying || !connHasReadHandler((connection*)cc)) continue;
-
-        cc->handle_pending = 1;
-        cc->underlying->read_handler(cc->underlying);
-        cc->handle_pending = 0;
-
-        ++processed;
-    }
-    return processed;
-}
-
-/* ConnectionType for the compression connection */
-static ConnectionType CT_Compression = {
-    /* connection type */
-    .get_type = connCompressionGetType,
-
-    /* ae & accept & listen & error & address handler */
-    .ae_handler = connCompressionAeHandler,
-    .addr = connCompressionAddr,
-    .is_local = connCompressionIsLocal,
-
-    /* shutdown/close connection */
-    .shutdown = connCompressionShutdown,
-    .close = connCompressionClose,
-
-    /* connect & accept */
-    .connect = connCompressionConnect,
-    .blocking_connect = connCompressionBlockingConnect,
-    .accept = connCompressionAccept,
-
-    /* event loop */
-    .unbind_event_loop = connCompressionUnbindEventLoop,
-    .rebind_event_loop = connCompressionRebindEventLoop,
-
-    /* IO */
-    .read = connCompressionRead,
-    .write = connCompressionWrite,
-    .writev = connCompressionWritev,
-    .set_write_handler = connCompressionSetWriteHandler,
-    .set_read_handler = connCompressionSetReadHandler,
-    .get_last_error = connCompressionGetLastError,
-    .sync_write = connCompressionSyncWrite,
-    .sync_read = connCompressionSyncRead,
-    .sync_readline = connCompressionSyncReadLine,
-    .get_last_read = connCompressionGetLastRead,
-    .get_last_written = connCompressionGetLastWritten,
-
-    /* pending data */
-    .has_pending_data = compressionHasPendingData,
-    .process_pending_data = compressionProcessPendingData,
-
-    .get_peer_cert = NULL,
-    .get_peer_username = NULL,
-
-    /* connection accessors */
-    .get_event_loop = connCompressionGetEventLoop,
-    .unset_event_loop = connCompressionUnsetEventLoop,
-    .get_fd = connCompressionGetFd,
-    .get_iovcnt = connCompressionGetIovcnt,
-    .get_state = connCompressionGetState,
-    .get_last_errno = connCompressionGetLastErrno,
-    .has_read_handler = connCompressionHasReadHandler,
-    .has_write_handler = connCompressionHasWriteHandler,
-    .set_private_data = connCompressionSetPrivateData,
-    .get_private_data = connCompressionGetPrivateData,
-};
-
-int RedisRegisterConnectionTypeCompression(void) {
-    return connTypeRegister(&CT_Compression);
-}
-
 /* Create compression state for the client */
-int compressionStateCreate(client *c) {
+static void compressionStateCreate(client *c) {
     compressionState *st = zcalloc(sizeof(compressionState));
     st->type = &zstdType;
     st->last_write = 0;
     st->write_flush_pending = 0;
     st->read_flush_pending = 0;
+    st->handle_pending = 0;
     st->dir = CD_INVALID;
 
     c->compression_state = st;
-
-    return 1;
 }
 
-void compressionStateDestroy(compressionState *state) {
+static void compressionStateDestroy(compressionState *state) {
     if (state == NULL) return;
 
     state->type->end(state);
@@ -639,12 +238,12 @@ void compressionStateDestroy(compressionState *state) {
  * initialized. `dir` indicates the compression direction, i.e if the client
  * will compress or decompress data.
  * Currently only viable for master/replica clients. */
-int clientCreateCompressionState(client *c, compressionDirection dir) {
+static int clientCreateCompressionState(client *c, compressionDirection dir) {
     /* Client compression already initialized */
     if (c->compression_state != NULL)
         return 1;
 
-    serverAssert(compressionStateCreate(c));
+    compressionStateCreate(c);
 
     compressionState *st = c->compression_state;
 
@@ -669,7 +268,7 @@ int clientCreateCompressionState(client *c, compressionDirection dir) {
             c->compression_state = NULL;
             return 0;
         }
- 
+
         st->dir = DECOMPRESS;
 
         serverLog(LL_NOTICE, "Decompression for master client initialized.");
@@ -678,30 +277,11 @@ int clientCreateCompressionState(client *c, compressionDirection dir) {
         serverAssert(0);
     }
 
-    compressionConnection *cc = zmalloc(sizeof(compressionConnection));
-    cc->base.type = &CT_Compression;
-    cc->underlying = c->conn;
-    cc->pending_data_node = NULL;
-    cc->last_read = 0;
-    cc->last_written = 0;
-    cc->handle_pending = 0;
-    c->conn = (connection*)cc;
-
     return 1;
 }
 
 void clientDestroyCompressionState(client *c) {
     if (c->compression_state == NULL) return;
-
-    /* If the connection is not destroyed yet we need to switch back to the
-     * underlying connection. */
-    if (c->conn) {
-        compressionConnection *cc = (compressionConnection*)c->conn;
-        compressionPendingRemove(cc);
-        c->conn = cc->underlying;
-
-        zfree(cc);
-    }
 
     compressionStateDestroy(c->compression_state);
     c->compression_state = NULL;
@@ -733,11 +313,26 @@ void clientDisableCompression(client *c) {
     c->io_flags &= ~CLIENT_IO_COMPRESSION_ENABLED;
 }
 
-/* Compress any data send for compression (see connCompressionWrite) and
+/* Return 1 if data written to the client must be compressed. Note that this
+ * is independent from CLIENT_IO_COMPRESSION_ENABLED: once the compressed
+ * stream has started the peer expects compressed data, no matter which thread
+ * the client is currently running on. */
+int clientCompressesWrites(client *c) {
+    return c->compression_state && c->compression_state->dir == COMPRESS;
+}
+
+/* Return 1 if data read from the client must be decompressed. */
+int clientDecompressesReads(client *c) {
+    return c->compression_state && c->compression_state->dir == DECOMPRESS;
+}
+
+/* Compress any data fed for compression (see clientCompressAndWriteBuf) and
  * write to socket. Compression library may not return compressed data
  * immediately so this call may not write anything to socket.
  * Force flushes the compressed buffer according to compression_max_latency.
- * Return number of bytes written to socket or -1 on socket write error. */
+ * Return 0 on success and 1 on error. On a compression error the client is
+ * scheduled for close as the compressed stream cannot be recovered; on a
+ * socket error the caller can inspect the connection state. */
 int compressAndWrite(client *c, int *tot_written) {
     if (c->compression_level <= 0)
         return 0;
@@ -760,12 +355,12 @@ int compressAndWrite(client *c, int *tot_written) {
          * data. */
         int flush = mstime() - state->last_write > server.compression_max_latency;
         if (state->type->compress(state, flush) == -1) {
-            clientDestroyCompressionState(c);
+            /* The compressed stream is broken, there is no way to recover:
+             * close the link and let the replica resync. */
+            freeClientAsync(c);
             return 1;
         }
     }
-
-    compressionConnection *cc = (compressionConnection*)c->conn;
 
     /* Try to write all the data available in the compressed buffer. */
     *tot_written = 0;
@@ -773,7 +368,7 @@ int compressAndWrite(client *c, int *tot_written) {
         state->output.written - state->output.consumed;
     do {
         int written = connWrite(
-            cc->underlying, state->output.data + state->output.consumed, towrite);
+            c->conn, state->output.data + state->output.consumed, towrite);
         if (written < 0) {
             return 1;
         }
@@ -798,11 +393,105 @@ int compressAndWrite(client *c, int *tot_written) {
     return 0;
 }
 
+/* Compress `len` bytes from `data` and write the compressed output to the
+ * client's connection. The compression library may buffer data internally,
+ * so consuming input doesn't imply an actual socket write.
+ * Return the number of bytes consumed from `data` (uncompressed), or -1 on
+ * connection error. `*socket_written` is set to the number of (compressed)
+ * bytes actually written to the socket. */
+ssize_t clientCompressAndWriteBuf(client *c, const char *data, size_t len, ssize_t *socket_written) {
+    compressionState *state = c->compression_state;
+    serverAssert(state && state->dir == COMPRESS);
+
+    *socket_written = 0;
+    size_t consumed = 0;
+    while (consumed != len) {
+        int to_consume =
+            min(state->input.size - state->input.written, (int)(len - consumed));
+        serverAssert(to_consume >= 0);
+
+        memcpy(state->input.data + state->input.written,
+               data + consumed, to_consume);
+
+        state->input.written += to_consume;
+        consumed += to_consume;
+
+        /* Write whatever we have available in the compressed buffer */
+        int written = 0;
+        if (compressAndWrite(c, &written)) {
+            if (connGetState(c->conn) != CONN_STATE_CONNECTED) {
+                return -1;
+            }
+            return consumed;
+        }
+        *socket_written += written;
+
+        if (written == 0 && state->output.written == state->output.consumed)
+            break;
+    }
+
+    return consumed;
+}
+
+/* Read compressed data from the client's connection and decompress it into
+ * `buf`. Tries to read and decompress as much as possible.
+ * Return the number of decompressed bytes placed in `buf`, 0 if the peer
+ * closed the connection, or -1 if no data is available or on error (on a
+ * decompression error `c->read_error` is set as the stream cannot be
+ * recovered).
+ * We may not be able to consume all the data we read from the socket in one
+ * call (e.g. `buf` is full while decompressed data is still pending). Such
+ * leftovers are processed via compressionProcessPendingReads. */
+int clientReadAndDecompress(client *c, char *buf, size_t buf_len, size_t *socket_read) {
+    compressionState *state = c->compression_state;
+    serverAssert(state && state->dir == DECOMPRESS);
+
+    *socket_read = 0;
+    size_t decompressed = 0;
+    do {
+        int curr = decompressInto(state, buf + decompressed, buf_len - decompressed);
+        if (curr < 0) {
+            /* Decompression error: the compressed stream is broken, there is
+             * no way to recover, so close the connection with the master. */
+            c->read_error = CLIENT_READ_CONN_DISCONNECTED;
+            return -1;
+        }
+        decompressed += curr;
+
+        int nread = 0;
+        /* If the handle_pending flag is raised we only decompress whatever data
+         * we have already read from the socket without reading anything more.
+         * Socket reading will happen when the event loop handles the read
+         * event, in which case the handle_pending flag wouldn't be raised. */
+        if (!state->handle_pending) {
+            nread = connRead(c->conn,
+                             state->input.data + state->input.written,
+                             state->input.size - state->input.written);
+
+            if (nread < 0 && connGetState(c->conn) == CONN_STATE_ERROR)
+                return -1;
+            /* Even if nread == 0 we continue the loop until decompressInto has
+             * nothing more it can do. */
+            if (nread > 0) {
+                *socket_read += nread;
+                state->input.written += nread;
+            }
+        }
+
+        if (curr <= 0 && nread <= 0) break;
+    } while (decompressed < buf_len);
+
+    if (decompressed == 0 && connGetState(c->conn) == CONN_STATE_CONNECTED)
+        return -1;
+
+    return decompressed;
+}
+
 /* Decompress input compressed data and put it in `buf`. If decompressed data
  * is more than buflen this function must be called again so output data can
  * be consumed. If buflen is sufficiently large this function will decompress
  * as much data as possible. */
-int decompressInto(compressionState *state, char *buf, size_t buflen) {
+static int decompressInto(compressionState *state, char *buf, size_t buflen) {
     if (buflen == 0)
       return 0;
 
@@ -921,3 +610,38 @@ int clientHasPendingCompressedData(client *c) {
            state->output.written > state->output.consumed;
 }
 
+/* Process pending decompressed data of the given compression clients. There
+ * are some scenarios in which a read event doesn't consume all the available
+ * data (see clientHasPendingCompressedData), e.g. the query buffer filled up
+ * while decompressed data was still pending. In such cases this function,
+ * called from the IO thread's beforeSleep, re-invokes the read handler in
+ * decompress-only mode (no socket reads).
+ * Return the number of clients that still have pending data afterwards, so
+ * the caller knows it should not block waiting for events. */
+int compressionProcessPendingReads(list *compression_clients) {
+    if (listLength(compression_clients) == 0) return 0;
+
+    int pending = 0;
+    listIter li;
+    listNode *ln;
+    listRewind(compression_clients, &li);
+    while ((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);
+
+        if (c->io_flags & CLIENT_IO_CLOSE_ASAP) continue;
+        if (!clientHasPendingCompressedData(c)) continue;
+        if (!connHasReadHandler(c->conn)) continue;
+
+        compressionState *state = c->compression_state;
+        state->handle_pending = 1;
+        readQueryFromClient(c->conn);
+        state->handle_pending = 0;
+
+        if (!(c->io_flags & CLIENT_IO_CLOSE_ASAP) &&
+            clientHasPendingCompressedData(c))
+        {
+            pending++;
+        }
+    }
+    return pending;
+}
