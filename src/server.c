@@ -1508,24 +1508,6 @@ void cronUpdateMemoryStats(void) {
                                                 &server.cron_malloc_stats.lua_allocator_resident,
                                                 &server.cron_malloc_stats.lua_allocator_frag_smallbins_bytes);
         }
-        /* Publish the just-measured (Lua-arena-subtracted) fragmentation
-         * values into the defrag-side tick-local cache so
-         * computeDefragCycles() later this tick can skip its own
-         * duplicate jemalloc measurement. Mirrors
-         * getAllocatorFragmentation()'s Lua subtraction so the cached
-         * value matches the fall-through real measurement exactly.
-         * Publishing with allocated==0 leaves the cache invalid
-         * (sentinel set inside the publish) — defrag should decide on
-         * real data or none. */
-        {
-            size_t pub_frag  = server.cron_malloc_stats.allocator_frag_smallbins_bytes;
-            size_t pub_alloc = server.cron_malloc_stats.allocator_allocated;
-            if (pub_alloc > 0 && server.lua_arena != UINT_MAX) {
-                pub_frag  -= server.cron_malloc_stats.lua_allocator_frag_smallbins_bytes;
-                pub_alloc -= server.cron_malloc_stats.lua_allocator_allocated;
-            }
-            defragFragCachePut(pub_frag, pub_alloc);
-        }
         /* in case the allocator isn't providing these stats, fake them so that
          * fragmentation info still shows some (inaccurate metrics) */
         if (!server.cron_malloc_stats.allocator_resident)
@@ -1534,6 +1516,9 @@ void cronUpdateMemoryStats(void) {
             server.cron_malloc_stats.allocator_active = server.cron_malloc_stats.allocator_resident;
         if (!server.cron_malloc_stats.allocator_allocated)
             server.cron_malloc_stats.allocator_allocated = server.cron_malloc_stats.zmalloc_used;
+        /* Stamp the tick we sampled in, so defrag can tell if these stats are
+         * fresh this cron tick or if it should take its own measurement. */
+        server.cron_malloc_stats_loops = server.cronloops;
     }
 }
 
@@ -1845,13 +1830,6 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     server.cronloops++;
 
     server.el_cron_duration = getMonotonicUs() - cron_start;
-
-    /* End-of-tick invalidation for the defrag-side fragmentation cache.
-     * The cache is valid only within the current cron tick — out-of-cron
-     * callers (defragWhileBlocked during long Lua/RDB load, or
-     * endDefragCycle's recursive activeDefragCycle from a defrag time
-     * event) see -1 and fall through to a fresh measurement. */
-    defragFragCacheInvalidate();
 
     return 1000/server.hz;
 }
@@ -2399,10 +2377,6 @@ void initServerConfig(void) {
                                       updated later after loading the config.
                                       This value may be used before the server
                                       is initialized. */
-    defragFragCacheInvalidate();  /* Mark defrag-side fragmentation cache as
-                                      stale so the first computeDefragCycles()
-                                      call falls through to a real measurement
-                                      until cronUpdateMemoryStats() publishes. */
     server.timezone = getTimeZone(); /* Initialized by tzset(). */
     server.configfile = NULL;
     server.executable = NULL;
@@ -3093,6 +3067,7 @@ void initServer(void) {
     server.pubsub_clients = 0;
     server.watching_clients = 0;
     server.cronloops = 0;
+    server.cron_malloc_stats_loops = -1; /* no sample taken yet */
     server.in_exec = 0;
     server.busy_module_yield_flags = BUSY_MODULE_YIELD_NONE;
     server.busy_module_yield_reply = NULL;
@@ -6518,7 +6493,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "maxmemory_policy:%s\r\n", evict_policy,
             "allocator_frag_ratio:%.2f\r\n", mh->allocator_frag,
             "allocator_frag_bytes:%zu\r\n", mh->allocator_frag_bytes,
-"allocator_rss_ratio:%.2f\r\n", mh->allocator_rss,
+            "allocator_rss_ratio:%.2f\r\n", mh->allocator_rss,
             "allocator_rss_bytes:%zd\r\n", mh->allocator_rss_bytes,
             "rss_overhead_ratio:%.2f\r\n", mh->rss_extra,
             "rss_overhead_bytes:%zd\r\n", mh->rss_extra_bytes,

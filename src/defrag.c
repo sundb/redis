@@ -1386,65 +1386,34 @@ static doneStatus defragLaterStep(void *ctx, monotime endtime) {
 #define INTERPOLATE(x, x1, x2, y1, y2) ( (y1) + ((x)-(x1)) * ((y2)-(y1)) / ((x2)-(x1)) )
 #define LIMIT(y, min, max) ((y)<(min)? min: ((y)>(max)? max: (y)))
 
-/* ===== Defrag-check tick-local cache ================================
- *
- * Background: getAllocatorFragmentation() forces a jemalloc epoch refresh
- * (cross-thread stats sync via IPIs) plus a walk over every arena's
- * small-bin slabs.  On systems with many threads and/or arenas the call
- * is non-trivial and ends up being made TWICE per cron tick:
- *   1. by cronUpdateMemoryStats() to refresh INFO MEMORY allocator_* fields
- *   2. by computeDefragCycles() (immediately after, same tick) to decide
- *      whether to engage active defrag
- * The decision in (2) is almost always "no engagement" on real workloads,
- * so the second call's result is computed and then discarded.
- *
- * Fix: cronUpdateMemoryStats() puts the (Lua-arena-subtracted) values it
- * just measured into the cache.  computeDefragCycles() takes from the cache
- * at its top; on hit it uses the cached value directly; on miss it falls
- * through to the original expensive call unchanged.
- *
- * Invalidation: serverCron() calls defragFragCacheInvalidate() near its
- * exit to cover the put-but-no-take case (defrag disabled by config, or
- * active_defrag_running > 0).  Without this, a value published this tick
- * could leak past the tick boundary into a defrag time-event running
- * between cron iterations.  Out-of-cron callers (defragWhileBlocked,
- * endDefragCycle recursion) always see a stale cache after the tick-exit
- * invalidation and fall through to a real measurement.
- *
- * Single-threaded by Redis's main-thread invariant; no synchronization
- * needed. */
-void defragFragCachePut(size_t frag_bytes, size_t allocated) {
-    if (allocated == 0) {
-        /* Allocator hasn't reported usable numbers yet (cold start). */
-        server.defrag_check_cache.frag_pct_x100 = -1;
-        return;
+/* Compute the defrag-relevant fragmentation from the allocator stats already
+ * sampled into server.cron_malloc_stats, reusing cronUpdateMemoryStats()'s
+ * measurement instead of forcing our own (a fresh getAllocatorFragmentation()
+ * triggers a jemalloc epoch refresh and a walk over every arena's small-bin
+ * slabs). The Lua arena is excluded to match getAllocatorFragmentation()'s
+ * accounting. */
+static float getCronAllocatorFragmentation(size_t *out_frag_bytes) {
+    size_t allocated = server.cron_malloc_stats.allocator_allocated;
+    size_t frag_bytes = server.cron_malloc_stats.allocator_frag_smallbins_bytes;
+    if (server.lua_arena != UINT_MAX) {
+        allocated -= server.cron_malloc_stats.lua_allocator_allocated;
+        frag_bytes -= server.cron_malloc_stats.lua_allocator_frag_smallbins_bytes;
     }
-    /* Write frag_bytes first; only set the validity field (frag_pct_x100)
-     * last.  Same-thread context means this isn't a memory-ordering
-     * concern in practice, but it documents the intended invariant. */
-    server.defrag_check_cache.frag_bytes = frag_bytes;
-    server.defrag_check_cache.frag_pct_x100 =
-        (int64_t)((double)frag_bytes / (double)allocated * 10000.0);
-}
-
-int defragFragCacheTake(float *out_frag_pct, size_t *out_frag_bytes) {
-    int64_t pct_x100 = server.defrag_check_cache.frag_pct_x100;
-    if (pct_x100 < 0) return 0;
-    *out_frag_pct   = (float)pct_x100 / 100.0f;
-    *out_frag_bytes = server.defrag_check_cache.frag_bytes;
-    return 1;
-}
-
-void defragFragCacheInvalidate(void) {
-    server.defrag_check_cache.frag_pct_x100 = -1;
-    server.defrag_check_cache.frag_bytes = 0;
+    if (out_frag_bytes) *out_frag_bytes = frag_bytes;
+    return allocated ? (float)frag_bytes / allocated * 100 : 0;
 }
 
 /* decide if defrag is needed, and at what CPU effort to invest in it */
 void computeDefragCycles(void) {
     size_t frag_bytes;
     float frag_pct;
-    if (!defragFragCacheTake(&frag_pct, &frag_bytes))
+    /* cronUpdateMemoryStats() only refreshes cron_malloc_stats every 100ms,
+     * while we may run on every (sub-100ms) cron tick. Reuse its measurement
+     * only when it was sampled in this same cron tick; otherwise the cached
+     * value is stale and we take a fresh measurement ourselves. */
+    if (server.cron_malloc_stats_loops == server.cronloops)
+        frag_pct = getCronAllocatorFragmentation(&frag_bytes);
+    else
         frag_pct = getAllocatorFragmentation(&frag_bytes);
 
     /* If we're not already running, and below the threshold, exit. */
@@ -2069,18 +2038,6 @@ robj *activeDefragStringOb(robj *ob) {
 }
 
 void defragWhileBlocked(void) {
-}
-
-void defragFragCachePut(size_t frag_bytes, size_t allocated) {
-    UNUSED(frag_bytes); UNUSED(allocated);
-}
-
-int defragFragCacheTake(float *out_frag_pct, size_t *out_frag_bytes) {
-    UNUSED(out_frag_pct); UNUSED(out_frag_bytes);
-    return 0;
-}
-
-void defragFragCacheInvalidate(void) {
 }
 
 #endif
