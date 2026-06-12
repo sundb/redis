@@ -1444,9 +1444,9 @@ void defragFragCacheInvalidate(void) {
 void computeDefragCycles(void) {
     size_t frag_bytes;
     float frag_pct;
-    if (!defragFragCacheTake(&frag_pct, &frag_bytes)) {
+    if (!defragFragCacheTake(&frag_pct, &frag_bytes))
         frag_pct = getAllocatorFragmentation(&frag_bytes);
-    }
+
     /* If we're not already running, and below the threshold, exit. */
     if (!server.active_defrag_running) {
         if(frag_pct < server.active_defrag_threshold_lower || frag_bytes < server.active_defrag_ignore_bytes)
