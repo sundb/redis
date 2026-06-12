@@ -1907,15 +1907,15 @@ struct malloc_stats {
  * already performs for its own purposes earlier in the same cron tick.
  *
  * Lifecycle (single-threaded by Redis's main-thread invariant):
- *   - Producer: defragCheckCachePublish() — called from
- *     cronUpdateMemoryStats() after its zmalloc_get_allocator_info() call,
- *     mirroring getAllocatorFragmentation()'s Lua-arena subtraction so the
- *     cached value matches the real measurement exactly.
- *   - Consumer: defragCheckCacheConsume() — called from computeDefragCycles();
+ *   - Producer: defragFragCachePut() — called from cronUpdateMemoryStats()
+ *     after its zmalloc_get_allocator_info() call, mirroring
+ *     getAllocatorFragmentation()'s Lua-arena subtraction so the cached
+ *     value matches the real measurement exactly.
+ *   - Consumer: defragFragCacheTake() — called from computeDefragCycles();
  *     returns 1 on cache hit, 0 on miss. Does NOT invalidate; the value
  *     remains valid for the rest of the current cron tick so any
  *     additional in-cron consumer can also benefit.
- *   - Invalidation: defragCheckCacheInvalidate() — called near the end of
+ *   - Invalidation: defragFragCacheInvalidate() — called near the end of
  *     serverCron() (the tick-boundary invalidation point) and at startup.
  *     Out-of-cron callers (defrag time-event recursion via endDefragCycle,
  *     or defragWhileBlocked) see a stale (-1) value and fall through to
@@ -1925,13 +1925,6 @@ struct malloc_stats {
 struct defragCheckCache {
     int64_t frag_pct_x100;  /* frag_pct expressed as percentage * 100; -1 = stale */
     size_t  frag_bytes;     /* defrag-relevant small-bins fragmentation in bytes */
-    /* Observability counters. INFO MEMORY exposes them as
-     *   defrag_check_cache_hits  : consumer found a valid value
-     *   defrag_check_cache_skips : valid value was below threshold, so
-     *                              computeDefragCycles() returned early
-     *                              (no expensive getAllocatorFragmentation() call) */
-    long long hits;
-    long long skips;
 };
 
 /*-----------------------------------------------------------------------------
@@ -3763,9 +3756,9 @@ void exitExecutionUnit(void);
 void resetServerStats(void);
 void activeDefragCycle(void);
 void defragWhileBlocked(void);
-void defragCheckCachePublish(size_t frag_bytes, size_t allocated);
-int  defragCheckCacheConsume(int64_t *out_frag_pct_x100, size_t *out_frag_bytes);
-void defragCheckCacheInvalidate(void);
+void defragFragCachePut(size_t frag_bytes, size_t allocated);
+int  defragFragCacheTake(float *out_frag_pct, size_t *out_frag_bytes);
+void defragFragCacheInvalidate(void);
 unsigned int getLRUClock(void);
 unsigned int LRU_CLOCK(void);
 const char *evictPolicyToString(void);

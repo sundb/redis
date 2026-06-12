@@ -1524,7 +1524,7 @@ void cronUpdateMemoryStats(void) {
                 pub_frag  -= server.cron_malloc_stats.lua_allocator_frag_smallbins_bytes;
                 pub_alloc -= server.cron_malloc_stats.lua_allocator_allocated;
             }
-            defragCheckCachePublish(pub_frag, pub_alloc);
+            defragFragCachePut(pub_frag, pub_alloc);
         }
         /* in case the allocator isn't providing these stats, fake them so that
          * fragmentation info still shows some (inaccurate metrics) */
@@ -1851,7 +1851,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * callers (defragWhileBlocked during long Lua/RDB load, or
      * endDefragCycle's recursive activeDefragCycle from a defrag time
      * event) see -1 and fall through to a fresh measurement. */
-    defragCheckCacheInvalidate();
+    defragFragCacheInvalidate();
 
     return 1000/server.hz;
 }
@@ -2399,7 +2399,7 @@ void initServerConfig(void) {
                                       updated later after loading the config.
                                       This value may be used before the server
                                       is initialized. */
-    defragCheckCacheInvalidate();  /* Mark defrag-side fragmentation cache as
+    defragFragCacheInvalidate();  /* Mark defrag-side fragmentation cache as
                                       stale so the first computeDefragCycles()
                                       call falls through to a real measurement
                                       until cronUpdateMemoryStats() publishes. */
@@ -6518,9 +6518,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "maxmemory_policy:%s\r\n", evict_policy,
             "allocator_frag_ratio:%.2f\r\n", mh->allocator_frag,
             "allocator_frag_bytes:%zu\r\n", mh->allocator_frag_bytes,
-            "defrag_check_cache_hits:%lld\r\n", server.defrag_check_cache.hits,
-            "defrag_check_cache_skips:%lld\r\n", server.defrag_check_cache.skips,
-            "allocator_rss_ratio:%.2f\r\n", mh->allocator_rss,
+"allocator_rss_ratio:%.2f\r\n", mh->allocator_rss,
             "allocator_rss_bytes:%zd\r\n", mh->allocator_rss_bytes,
             "rss_overhead_ratio:%.2f\r\n", mh->rss_extra,
             "rss_overhead_bytes:%zd\r\n", mh->rss_extra_bytes,
