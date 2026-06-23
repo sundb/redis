@@ -241,30 +241,30 @@ int clientIsCompressing(client *c) {
 
 /* The IO thread's pending-decompress list (IOThread.pending_decompress_clients)
  * holds clients that still have buffered decompressed data to drain even though
- * the socket may not have a read event pending. Membership uses the client's
- * embedded io_thread_pending_decompress_node, mirroring the compression_clients
- * (write-flush) mechanism. We only register on IO-thread loops (not the main
- * loop), since on the main loop the client is handed off to an IO thread soon
- * enough; the IO thread is reachable via el->privdata[0]. */
+ * the socket may not have a read event pending. The client's
+ * io_thread_pending_decompress_node points to its node in that list (NULL when
+ * not linked), mirroring the compression_clients (write-flush) mechanism. We
+ * only register on IO-thread loops (not the main loop), since on the main loop
+ * the client is handed off to an IO thread soon enough; the IO thread is
+ * reachable via el->privdata[0]. */
 static void clientCompressionPendingAdd(client *c) {
+    if (c->io_thread_pending_decompress_node) return;
     IOThread *t = c->conn->el->privdata[0];
-    if (listSearchKey(t->pending_decompress_clients, c) == NULL) {
-        listLinkNodeTail(t->pending_decompress_clients,
-                         &c->io_thread_pending_decompress_node);
-    }
+    listAddNodeTail(t->pending_decompress_clients, c);
+    c->io_thread_pending_decompress_node = listLast(t->pending_decompress_clients);
 }
 
 static void clientCompressionPendingRemove(client *c) {
-    aeEventLoop *el = c->conn ? c->conn->el : NULL;
+    if (!c->io_thread_pending_decompress_node) return;
     /* Only IO-thread loops carry the pending list. If the client already left
-     * the IO thread, the unbind/cleanup paths have unlinked the node. */
+     * the IO thread, the unbind/cleanup paths have unlinked the node and reset
+     * the pointer, so we wouldn't reach here. */
+    aeEventLoop *el = c->conn ? c->conn->el : NULL;
     if (!el || el == server.el) return;
     IOThread *t = el->privdata[0];
-    if (listSearchKey(t->pending_decompress_clients, c) ==
-        &c->io_thread_pending_decompress_node) {
-        listUnlinkNode(t->pending_decompress_clients,
-                       &c->io_thread_pending_decompress_node);
-    }
+    listDelNode(t->pending_decompress_clients,
+                c->io_thread_pending_decompress_node);
+    c->io_thread_pending_decompress_node = NULL;
 }
 
 /* Decompress input compressed data and put it in `buf`. If decompressed data

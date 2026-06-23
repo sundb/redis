@@ -1586,8 +1586,8 @@ typedef struct client {
     sds sockname;           /* Cached connection target address. */
     listNode *client_list_node; /* list node in client list */
     listNode *io_thread_client_list_node; /* list node in io thread client list */
-    listNode io_thread_compression_clients_node; /* list node in io thread compression clients list */
-    listNode io_thread_pending_decompress_node; /* list node in io thread pending-decompress clients list */
+    listNode *io_thread_compression_clients_node; /* list node in io thread compression clients list, or NULL */
+    listNode *io_thread_pending_decompress_node; /* list node in io thread pending-decompress clients list, or NULL */
     listNode *postponed_list_node; /* list node within the postponed list */
     void *module_blocked_client; /* Pointer to the RedisModuleBlockedClient associated with this
                                   * client. This is set in case of module authentication before the

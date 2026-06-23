@@ -227,8 +227,8 @@ client *createClient(connection *conn) {
     c->sockname = NULL;
     c->client_list_node = NULL;
     c->io_thread_client_list_node = NULL;
-    listInitNode(&c->io_thread_compression_clients_node, c);
-    listInitNode(&c->io_thread_pending_decompress_node, c);
+    c->io_thread_compression_clients_node = NULL;
+    c->io_thread_pending_decompress_node = NULL;
     c->postponed_list_node = NULL;
     c->client_tracking_redirection = 0;
     c->client_tracking_prefixes = NULL;
