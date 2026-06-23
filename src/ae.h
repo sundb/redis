@@ -89,7 +89,7 @@ typedef struct aeEventLoop {
     aeBeforeSleepProc *beforesleep;
     aeBeforeSleepProc *aftersleep;
     int flags;
-    void *privdata[3];
+    void *privdata[2];
 } aeEventLoop;
 
 /* Prototypes */

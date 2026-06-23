@@ -1587,6 +1587,7 @@ typedef struct client {
     listNode *client_list_node; /* list node in client list */
     listNode *io_thread_client_list_node; /* list node in io thread client list */
     listNode io_thread_compression_clients_node; /* list node in io thread compression clients list */
+    listNode io_thread_pending_decompress_node; /* list node in io thread pending-decompress clients list */
     listNode *postponed_list_node; /* list node within the postponed list */
     void *module_blocked_client; /* Pointer to the RedisModuleBlockedClient associated with this
                                   * client. This is set in case of module authentication before the
@@ -1606,6 +1607,9 @@ typedef struct client {
     int compression_level;  /* Compression level (0 means no compresison).
                              * Currently not relevant for non-replication
                              * connections. */
+    struct compressionState *compr; /* Per-client compression/decompression
+                             * state, or NULL if compression is not used for
+                             * this client. Owned by the client. See client_comp.c. */
     /* If this client is in tracking mode and this field is non zero,
      * invalidation messages for keys fetched by this client will be sent to
      * the specified client ID. */
@@ -1688,6 +1692,7 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     redisAtomic long long io_reads_processed;   /* Number of read events processed */
     redisAtomic long long io_writes_processed;  /* Number of write events processed */
     list *compression_clients;                  /* Clients that write/read compressed data */
+    list *pending_decompress_clients;           /* Clients with buffered decompressed data still to drain */
     size_t cronloops;
 } IOThread;
 

@@ -137,6 +137,12 @@ void enqueuePendingClientsToMainThread(client *c, int unbind) {
             listUnlinkNode(t->compression_clients,
                            &c->io_thread_compression_clients_node);
         }
+        if (listSearchKey(t->pending_decompress_clients, c) ==
+            &c->io_thread_pending_decompress_node)
+        {
+            listUnlinkNode(t->pending_decompress_clients,
+                           &c->io_thread_pending_decompress_node);
+        }
     }
 }
 
@@ -199,6 +205,12 @@ void unbindClientFromIOThreadEventLoop(client *c) {
         listUnlinkNode(t->compression_clients,
                        &c->io_thread_compression_clients_node);
         clientDisableCompression(c);
+    }
+    if (listSearchKey(t->pending_decompress_clients, c) ==
+        &c->io_thread_pending_decompress_node)
+    {
+        listUnlinkNode(t->pending_decompress_clients,
+                       &c->io_thread_pending_decompress_node);
     }
     resumeIOThread(c->tid);
 }
@@ -830,8 +842,12 @@ void IOThreadBeforeSleep(struct aeEventLoop *el) {
     /* Handle pending data(typical TLS). */
     connTypeProcessPendingData(el);
 
-    /* If any connection type(typical TLS) still has pending unread data don't sleep at all. */
-    int dont_sleep = connTypeHasPendingData(el);
+    /* Drain buffered decompressed data for replication clients on this loop. */
+    processPendingCompressionReads(el);
+
+    /* If any connection type(typical TLS) still has pending unread data, or any
+     * client still has buffered decompressed data, don't sleep at all. */
+    int dont_sleep = connTypeHasPendingData(el) || compressionHasPendingReads(el);
 
     /* Process clients from main thread, since the main thread may deliver clients
      * without notification during IO thread processing events. */
@@ -986,6 +1002,7 @@ void initThreadedIO(void) {
         t->pending_clients_to_main_thread = listCreate();
         t->clients = listCreate();
         t->compression_clients = listCreate();
+        t->pending_decompress_clients = listCreate();
         t->cronloops = 0;
         atomicSetWithSync(t->paused, IO_THREAD_UNPAUSED);
         atomicSetWithSync(t->running, 0);

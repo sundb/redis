@@ -228,6 +228,7 @@ client *createClient(connection *conn) {
     c->client_list_node = NULL;
     c->io_thread_client_list_node = NULL;
     listInitNode(&c->io_thread_compression_clients_node, c);
+    listInitNode(&c->io_thread_pending_decompress_node, c);
     c->postponed_list_node = NULL;
     c->client_tracking_redirection = 0;
     c->client_tracking_prefixes = NULL;
@@ -258,6 +259,7 @@ client *createClient(connection *conn) {
     c->task = NULL;
     c->node_id = NULL;
     c->compression_level = 0;
+    c->compr = NULL;
     atomicSet(c->pending_read, 0);
     return c;
 }
@@ -1913,7 +1915,7 @@ void unlinkClient(client *c) {
              * the main process is stale. SSL_shutdown() involves a handshake,
              * and it may block the caller when used with stale TLS state.*/
             if (c->flags & CLIENT_REPL_RDB_CHANNEL)
-                shutdown(connGetFd(c->conn), SHUT_RDWR);
+                shutdown(c->conn->fd, SHUT_RDWR);
             else
                 connShutdown(c->conn);
         }
@@ -2564,7 +2566,7 @@ static payloadHeader *processSentDataInEncodedBuffer(client *c, char *start_ptr,
  * and 'nwritten' is an output parameter, it means how many bytes server write
  * to client. */
 static int _writevToClient(client *c, ssize_t *nwritten) {
-    int iovmax = min(IOV_MAX, connGetIovcnt(c->conn));
+    int iovmax = min(IOV_MAX, c->conn->iovcnt);
     struct iovec iov[iovmax];
     ReplyIOV reply_iov = {iov, iovmax};
 
@@ -2729,23 +2731,24 @@ static inline int _writeToClientSlaveIOThread(client *c, ssize_t *nwritten) {
     size_t pos = c->io_curr_repl_node == c->io_bound_repl_node ?
                  c->io_bound_block_pos : o->used;
     if (pos > c->io_curr_block_pos) {
-        int consumed = connWrite(c->conn, o->buf+c->io_curr_block_pos,
-                                 pos-c->io_curr_block_pos);
-
-        if (consumed <= 0) return C_ERR;
-
-        /* Note, that consumed is how much bytes we've read from the repl buffer,
-         * where as the bytes we've written into the socket may be different if
-         * connCheckLastWritten returns so (f.e compression case) */
-        /* TODO: if compression is generalized for all types of clients we will
-         * need to add this check in writeToClientNonSlave also */
-        size_t last_written = 0;
-        if (connCheckLastWritten(c->conn, &last_written)) {
-            *nwritten += last_written;
-            /* Since nwritten stores the number of compressed bytes written to
+        int consumed;
+        /* When compression is enabled `consumed` is how many uncompressed bytes
+         * were fed from the repl buffer, while the bytes actually written to the
+         * socket (compressed) may differ. We advance the block position by the
+         * uncompressed count but account *nwritten / stats by the socket count. */
+        if (clientIsCompressing(c)) {
+            int socket_written = 0;
+            consumed = compressDataAndWrite(c, (char*)o->buf+c->io_curr_block_pos,
+                                            pos-c->io_curr_block_pos, &socket_written);
+            if (consumed <= 0) return C_ERR;
+            *nwritten += socket_written;
+            /* Since *nwritten stores the number of compressed bytes written to
              * socket we also store the uncompressed size for stats. */
             atomicIncr(server.stat_net_repl_uncompressed_bytes, consumed);
         } else {
+            consumed = connWrite(c->conn, o->buf+c->io_curr_block_pos,
+                                 pos-c->io_curr_block_pos);
+            if (consumed <= 0) return C_ERR;
             *nwritten += consumed;
         }
 
@@ -2780,10 +2783,21 @@ static inline int _writeToClientSlave(client *c, ssize_t *nwritten) {
     serverAssert(o->used >= c->ref_block_pos);
     /* Send current block if it is not fully sent. */
     if (o->used > c->ref_block_pos) {
-        *nwritten = connWrite(c->conn, o->buf+c->ref_block_pos,
-                                o->used-c->ref_block_pos);
-        if (*nwritten <= 0) return C_ERR;
-        c->ref_block_pos += *nwritten;
+        if (clientIsCompressing(c)) {
+            int socket_written = 0;
+            int consumed = compressDataAndWrite(c, (char*)o->buf+c->ref_block_pos,
+                                                o->used-c->ref_block_pos, &socket_written);
+            if (consumed <= 0) return C_ERR;
+            *nwritten = socket_written;
+            atomicIncr(server.stat_net_repl_uncompressed_bytes, consumed);
+            /* Advance the block position by the uncompressed bytes consumed. */
+            c->ref_block_pos += consumed;
+        } else {
+            *nwritten = connWrite(c->conn, o->buf+c->ref_block_pos,
+                                    o->used-c->ref_block_pos);
+            if (*nwritten <= 0) return C_ERR;
+            c->ref_block_pos += *nwritten;
+        }
     }
 
     /* If we fully sent the object on head, go to the next one. */
@@ -3939,7 +3953,16 @@ void readQueryFromClient(connection *conn) {
         /* Read as much as possible from the socket to save read(2) system calls. */
         readlen = sdsavail(c->querybuf);
     }
-    nread = connRead(c->conn, c->querybuf+qblen, readlen);
+    size_t socket_read = 0;
+    int is_decompressing = clientIsDecompressing(c);
+    if (is_decompressing) {
+        /* nread is the number of decompressed bytes written into the query
+         * buffer; socket_read is the raw (compressed) bytes read from the
+         * socket, used for network statistics. */
+        nread = readAndDecompress(c, c->querybuf+qblen, readlen, &socket_read);
+    } else {
+        nread = connRead(c->conn, c->querybuf+qblen, readlen);
+    }
     if (nread == -1) {
         if (connGetState(conn) == CONN_STATE_CONNECTED) {
             goto done;
@@ -3967,13 +3990,14 @@ void readQueryFromClient(connection *conn) {
         c->io_lastinteraction = server.unixtime;
 
     size_t network_read;
-    if (!connCheckLastRead(c->conn, &network_read)) {
-        network_read = nread;
-    } else {
+    if (is_decompressing) {
         /* In case of compression nread is the number of decompressed bytes,
          * whereas network_read stores the actual number of bytes read from
          * socket. */
+        network_read = socket_read;
         atomicIncr(server.stat_net_repl_decompressed_bytes, nread);
+    } else {
+        network_read = nread;
     }
 
     if (c->flags & CLIENT_MASTER) {
