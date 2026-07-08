@@ -3,10 +3,29 @@ name: Post-Release Automation
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      skipjobs:
+        description: 'jobs to skip (delete the ones you wanna keep, do not leave empty)'
+        default: 'valgrind,sanitizer,tls,freebsd,macos,alpine,32bit,iothreads,ubuntu,centos,malloc,specific,fortify,reply-schema,oldTC,defrag,vectorset,assert-keyspace,arm'
+      skiptests:
+        description: 'tests to skip (delete the ones you wanna keep, do not leave empty)'
+        default: 'redis,modules,sentinel,cluster,unittest'
+      test_args:
+        description: 'extra test arguments'
+        default: ''
+      cluster_test_args:
+        description: 'extra cluster / sentinel test arguments'
+        default: ''
+      use_repo:
+        description: 'repo owner and name'
+        default: 'redis/redis'
+      use_git_ref:
+        description: 'git branch or sha to use'
+        default: 'unstable'
 
 jobs:
   extract-release-info:
-    if: github.repository == 'redis/redis'
     runs-on: ubuntu-latest
     outputs:
       tag_name: ${{ steps.release-info.outputs.tag_name }}
@@ -158,38 +177,3 @@ jobs:
   #         # This will require:
   #         # - Access to redis-hashes repository
   #         # - Git credentials for committing and pushing
-
-  summary-and-notify:
-    needs: [extract-release-info, create-tarball] # update-release-hashes
-    if: always() && github.repository == 'redis/redis'
-    runs-on: ubuntu-latest
-    env:
-      TAG_NAME: ${{ needs.extract-release-info.outputs.tag_name }}
-      RELEASE_TYPE: ${{ needs.extract-release-info.outputs.release_type }}
-      SHA256: ${{ needs.create-tarball.outputs.sha256 }}
-      SIZE_MB: ${{ needs.create-tarball.outputs.size_mb }}
-      SIZE_WARNING: ${{ needs.create-tarball.outputs.size_warning }}
-    steps:
-      - name: Summary
-        run: |
-          {
-            echo "## Post-Release Automation Summary"
-            echo ""
-            echo "- **Release Tag:** ${TAG_NAME}"
-            echo "- **Release Type:** ${RELEASE_TYPE}"
-            echo "- **Tarball SHA256:** ${SHA256}"
-            echo "- **Tarball Size:** ${SIZE_MB} MB"
-            if [ "${SIZE_WARNING}" == "true" ]; then
-              echo ""
-              echo "> [!WARNING]"
-              echo "> Tarball size is outside expected range, check the logs for details."
-            fi
-          } >> $GITHUB_STEP_SUMMARY
-
-      # - name: Send Slack notification
-      #   run: |
-      #     echo "TODO: Implement Slack notification"
-      #     # This will require:
-      #     # - Slack webhook URL or bot token (stored in secrets)
-      #     # - Determine appropriate channel (e.g., #releases, #redis-releases)
-      #     # - Craft message with release information and workflow status
