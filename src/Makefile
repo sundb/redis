@@ -26,13 +26,18 @@ CLANG := $(findstring clang,$(shell sh -c '$(CC) --version | head -1'))
 # explicitly without any defaults added, pass the OPT variable instead.
 OPTIMIZATION?=-O3
 ENABLE_LTO?=
+# Don't enable LTO under a sanitizer build: clang's LTO emits per-TU ASan
+# module destructors that the GNU bfd linker fails to resolve ("defined in
+# discarded section"), and LTO offers no benefit while sanitizing anyway.
 ifeq ($(OPTIMIZATION),-O3)
+ifeq ($(SANITIZER),)
 	ifeq (clang,$(CLANG))
 		ENABLE_LTO=-flto
 	else
 		ENABLE_LTO=-flto=auto -ffat-lto-objects
 	endif
 	OPTIMIZATION+=$(ENABLE_LTO)
+endif
 endif
 ifneq ($(OPTIMIZATION),-O0)
 	OPTIMIZATION+=-fno-omit-frame-pointer
@@ -343,6 +348,16 @@ ifneq ($(SKIP_VEC_SETS),yes)
 	vpath %.c ../modules/vector-sets
 	REDIS_VEC_SETS_OBJ=hnsw.o vset.o vset_config.o
 	FINAL_CFLAGS+=-DINCLUDE_VEC_SETS=1
+# Vector sets are built into the server but use the Redis module API
+# (redismodule.h), which calls every RedisModule_* symbol through a type-erased
+# (void*-cast) function pointer. That is ABI-safe but trips clang UBSan's
+# -fsanitize=function check, so disable that sub-check for these objects only
+# (the check is clang-only; gcc has no C `function` sanitizer).
+ifeq ($(SANITIZER),undefined)
+ifeq ($(CLANG),clang)
+$(REDIS_VEC_SETS_OBJ): FINAL_CFLAGS += -fno-sanitize=function
+endif
+endif
 endif
 
 ifndef V

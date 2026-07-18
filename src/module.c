@@ -13390,7 +13390,13 @@ int moduleLoad(const char *path, void **module_argv, int module_argc, int is_loa
 }
 
 /* Load a module by its 'onload' callback and initialize it. On success C_OK is returned, otherwise
- * C_ERR is returned. */
+ * C_ERR is returned.
+ *
+ * The module's RedisModule_OnLoad is resolved via dlsym and called through a
+ * type-erased pointer (int (*)(void *, void **, int)), which does not match its
+ * real signature (int (RedisModuleCtx *, RedisModuleString **, int)). This is
+ * intentional and ABI-safe, but trips UBSan's -fsanitize=function check, so we
+ * disable it for this function only. */
 int moduleOnLoad(int (*onload)(void *, void **, int), const char *path, void *handle, void **module_argv, int module_argc, int is_loadex) {
     RedisModuleCtx ctx;
     moduleCreateContext(&ctx, NULL, REDISMODULE_CTX_TEMP_CLIENT); /* We pass NULL since we don't have a module yet. */
