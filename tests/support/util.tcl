@@ -1341,10 +1341,15 @@ proc system_backtrace_supported {} {
         return 0
     }
 
-    # libmusl does not support backtrace. Also return 0 on
-    # static binaries (ldd exit code 1) where we can't detect libmusl
+    # libmusl does not provide backtrace() by itself, but when Redis is built
+    # against libunwind (e.g. USE_BACKTRACE=yes on Alpine) crash-time stack
+    # traces are available. Also return 0 on static binaries (ldd exit code 1)
+    # where we can't detect libmusl.
     if {![catch {set ldd [exec ldd src/redis-server]}]} {
         if {![string match {*libc.*musl*} $ldd]} {
+            return 1
+        }
+        if {[string match {*libunwind*} $ldd]} {
             return 1
         }
     }

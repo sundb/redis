@@ -240,6 +240,14 @@ else
 	# All the other OSes (notably Linux)
 	FINAL_LDFLAGS+= -rdynamic
 	FINAL_LIBS+=-ldl -pthread -lrt
+	# glibc provides backtrace() natively (enabled from config.h). On libcs
+	# without <execinfo.h> (e.g. musl/Alpine) crash-time stack traces can be
+	# produced via libunwind + dladdr instead (see src/debug.c). This is opt-in:
+	# build with USE_BACKTRACE=yes (requires libunwind-dev) to enable it.
+	ifeq ($(USE_BACKTRACE),yes)
+	    FINAL_CFLAGS+= -DUSE_BACKTRACE -DUSE_LIBUNWIND
+	    FINAL_LIBS+= -lunwind
+	endif
 endif
 endif
 endif

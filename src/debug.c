@@ -33,7 +33,14 @@
 #include <unistd.h>
 
 #ifdef HAVE_BACKTRACE
+#ifdef USE_LIBUNWIND
+/* Libcs without <execinfo.h> (e.g. musl/Alpine) capture the stack via
+ * libunwind instead; symbols are resolved with dladdr() (see below). */
+#define UNW_LOCAL_ONLY
+#include <libunwind.h>
+#else
 #include <execinfo.h>
+#endif
 #ifndef __OpenBSD__
 #include <ucontext.h>
 #else
@@ -64,7 +71,7 @@ static volatile int signal_handler_lock_initialized = 0;
 int bugReportStart(void);
 void printCrashReport(void);
 void bugReportEnd(int killViaSignal, int sig);
-void logStackTrace(void *eip, int uplevel, int current_thread);
+void logStackTrace(void *eip, int uplevel, int current_thread, void *crash_uc);
 void sigalrmSignalHandler(int sig, siginfo_t *info, void *secret);
 
 /* ================================= Debugging ============================== */
@@ -1254,7 +1261,7 @@ void _serverAssert(const char *estr, const char *file, int line) {
 
     if (server.crashlog_enabled) {
 #ifdef HAVE_BACKTRACE
-        logStackTrace(NULL, 1, 0);
+        logStackTrace(NULL, 1, 0, NULL);
 #endif
         /* If this was a recursive assertion, it what most likely generated
          * from printCrashReport. */
@@ -1375,7 +1382,7 @@ void _serverPanic(const char *file, int line, const char *msg, ...) {
 
     if (server.crashlog_enabled) {
 #ifdef HAVE_BACKTRACE
-        logStackTrace(NULL, 1, 0);
+        logStackTrace(NULL, 1, 0, NULL);
 #endif
         /* If this was a recursive panic, it what most likely generated
          * from printCrashReport. */
@@ -2107,6 +2114,64 @@ static void setupStacktracePipe(void) {/* we don't need a pipe to write the stac
 #ifdef HAVE_BACKTRACE
 #define BACKTRACE_MAX_SIZE 100
 
+#ifdef USE_LIBUNWIND
+/* musl and other libcs without <execinfo.h> do not provide backtrace() /
+ * backtrace_symbols_fd(). Reimplement exactly the two entry points Redis needs
+ * on top of libunwind (stack capture) and dladdr() (symbolization), preserving
+ * the async-signal-safe, fd-based behavior of the glibc originals. The call
+ * sites below stay unchanged thanks to the matching macros. */
+static int redis_unw_backtrace(void **buffer, int size) {
+    return unw_backtrace(buffer, size);
+}
+
+/* Unwind starting from a saved machine context (ucontext_t) rather than from
+ * the current call site. This lets the crash handler start unwinding at the
+ * exact interrupted instruction and avoids having to step across the signal
+ * frame - which several libcs (notably musl) don't annotate with CFI, causing
+ * unw_backtrace() called from within a signal handler to stop right after the
+ * handler. Returns the number of frames written to buffer. */
+static int redis_unw_backtrace_ctx(void *ucontext, void **buffer, int size) {
+    unw_cursor_t cursor;
+    unw_context_t *uc = (unw_context_t *)ucontext;
+    int n = 0;
+    if (uc == NULL) return 0;
+    /* On Linux (UNW_LOCAL_ONLY) unw_context_t is layout-compatible with
+     * ucontext_t, so a signal handler's context can be fed directly. */
+    if (unw_init_local(&cursor, uc) != 0) return 0;
+    do {
+        unw_word_t ip;
+        if (unw_get_reg(&cursor, UNW_REG_IP, &ip) != 0) break;
+        buffer[n++] = (void *)(uintptr_t)ip;
+    } while (n < size && unw_step(&cursor) > 0);
+    return n;
+}
+
+static void redis_unw_backtrace_symbols_fd(void *const *buffer, int size, int fd) {
+    char line[512];
+    for (int i = 0; i < size; i++) {
+        Dl_info info;
+        void *addr = buffer[i];
+        if (dladdr(addr, &info) != 0 && info.dli_sname != NULL) {
+            /* module(symbol+0xoffset) [0xaddress] */
+            unsigned long off = (unsigned long)((char *)addr - (char *)info.dli_saddr);
+            snprintf_async_signal_safe(line, sizeof(line), "%s(%s+0x%lx) [%p]\n",
+                info.dli_fname ? info.dli_fname : "?", info.dli_sname, off, addr);
+        } else if (dladdr(addr, &info) != 0 && info.dli_fname != NULL) {
+            /* module(+0xoffset) [0xaddress] - no symbol resolved */
+            unsigned long off = (unsigned long)((char *)addr - (char *)info.dli_fbase);
+            snprintf_async_signal_safe(line, sizeof(line), "%s(+0x%lx) [%p]\n",
+                info.dli_fname, off, addr);
+        } else {
+            snprintf_async_signal_safe(line, sizeof(line), "[%p]\n", addr);
+        }
+        if (write(fd, line, strlen(line)) == -1) {/* Avoid warning. */}
+    }
+}
+
+#define backtrace(buffer, size) redis_unw_backtrace((buffer), (size))
+#define backtrace_symbols_fd(buffer, size, fd) redis_unw_backtrace_symbols_fd((buffer), (size), (fd))
+#endif /* USE_LIBUNWIND */
+
 #ifdef __linux__
 #if !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
@@ -2143,7 +2208,8 @@ __attribute__ ((noinline)) static void collect_stacktrace_data(void) {
 }
 
 __attribute__ ((noinline))
-static void writeStacktraces(int fd, int uplevel) {
+static void writeStacktraces(int fd, int uplevel, void *crash_uc) {
+    UNUSED(crash_uc);
     /* get the list of all the process's threads that don't block or ignore the THREADS_SIGNAL */
     pid_t tids[TIDS_MAX_SIZE];
     size_t len_tids = get_ready_to_signal_threads_tids(THREADS_SIGNAL, tids);
@@ -2171,7 +2237,6 @@ static void writeStacktraces(int fd, int uplevel) {
 
         /* skip kernel call to the signal handler, the signal handler and the callback addresses */
         int curr_uplevel = 3;
-
         if (curr_stacktrace_data.tid == calling_tid) {
             /* skip signal syscall and ThreadsManager_runOnThreads */
             curr_uplevel += uplevel + 2;
@@ -2183,7 +2248,19 @@ static void writeStacktraces(int fd, int uplevel) {
         }
 
         /* add the stacktrace */
-        backtrace_symbols_fd(curr_stacktrace_data.trace+curr_uplevel, curr_stacktrace_data.trace_size-curr_uplevel, fd);
+#ifdef USE_LIBUNWIND
+        if (crash_uc != NULL && curr_stacktrace_data.tid == calling_tid) {
+            /* We are running on the crashing thread itself, so unwind it from
+             * the real crash context: the trace starts at the crash point with
+             * no signal-handler frames to skip (see redis_unw_backtrace_ctx). */
+            void *trace[BACKTRACE_MAX_SIZE];
+            int n = redis_unw_backtrace_ctx(crash_uc, trace, BACKTRACE_MAX_SIZE);
+            backtrace_symbols_fd(trace, n, fd);
+        } else
+#endif
+        {
+            backtrace_symbols_fd(curr_stacktrace_data.trace+curr_uplevel, curr_stacktrace_data.trace_size-curr_uplevel, fd);
+        }
 
         ++collected;
     }
@@ -2195,10 +2272,22 @@ static void writeStacktraces(int fd, int uplevel) {
 
 #endif /* __linux__ */
 __attribute__ ((noinline))
-static void writeCurrentThreadsStackTrace(int fd, int uplevel) {
+static void writeCurrentThreadsStackTrace(int fd, int uplevel, void *crash_uc) {
+    UNUSED(crash_uc);
     void *trace[BACKTRACE_MAX_SIZE];
 
-    int trace_size = backtrace(trace, BACKTRACE_MAX_SIZE);
+    int trace_size;
+#ifdef USE_LIBUNWIND
+    if (crash_uc != NULL) {
+        /* Unwind from the real crash point; no handler frames to skip. */
+        trace_size = redis_unw_backtrace_ctx(crash_uc, trace, BACKTRACE_MAX_SIZE);
+        uplevel = 0;
+    } else {
+        trace_size = backtrace(trace, BACKTRACE_MAX_SIZE);
+    }
+#else
+    trace_size = backtrace(trace, BACKTRACE_MAX_SIZE);
+#endif
 
     char *msg = "\nBacktrace:\n";
     if (write(fd,msg,strlen(msg)) == -1) {/* Avoid warning. */};
@@ -2213,7 +2302,7 @@ static void writeCurrentThreadsStackTrace(int fd, int uplevel) {
  * __attribute__ ((noinline)) to make sure the compiler won't inline them.
  */
 __attribute__ ((noinline))
-void logStackTrace(void *eip, int uplevel, int current_thread) {
+void logStackTrace(void *eip, int uplevel, int current_thread, void *crash_uc) {
     int fd = openDirectLogFiledes();
     char *msg;
     uplevel++; /* skip this function */
@@ -2234,14 +2323,14 @@ void logStackTrace(void *eip, int uplevel, int current_thread) {
     ++uplevel;
 #ifdef __linux__
     if (current_thread) {
-        writeCurrentThreadsStackTrace(fd, uplevel);
+        writeCurrentThreadsStackTrace(fd, uplevel, crash_uc);
     } else {
-        writeStacktraces(fd, uplevel);
+        writeStacktraces(fd, uplevel, crash_uc);
     }
 #else
     /* Outside of linux, we only support writing the current thread. */
     UNUSED(current_thread);
-    writeCurrentThreadsStackTrace(fd, uplevel);
+    writeCurrentThreadsStackTrace(fd, uplevel, crash_uc);
 #endif
     msg = "\n------ STACK TRACE DONE ------\n";
     if (write(fd,msg,strlen(msg)) == -1) {/* Avoid warning. */};
@@ -2578,8 +2667,10 @@ static void sigsegvHandler(int sig, siginfo_t *info, void *secret) {
     }
 
     /* When printing the reduced crash info, just print the current thread
-     * to avoid race conditions with the multi-threaded stack collector. */
-    logStackTrace(eip, 1, !print_full_crash_info);
+     * to avoid race conditions with the multi-threaded stack collector.
+     * Pass the crash context so the crashing thread is unwound from the real
+     * crash point (used only in libunwind builds; see writeStacktraces). */
+    logStackTrace(eip, 1, !print_full_crash_info, uc);
 
     if (eip == info->si_addr) {
         /* Restore old eip */
@@ -2760,7 +2851,7 @@ void sigalrmSignalHandler(int sig, siginfo_t *info, void *secret) {
         serverLogRawFromHandler(LL_WARNING, "\nReceived SIGALRM");
     }
 #ifdef HAVE_BACKTRACE
-    logStackTrace(getAndSetMcontextEip(uc, NULL), 1, 0);
+    logStackTrace(getAndSetMcontextEip(uc, NULL), 1, 0, uc);
 #else
     serverLogRawFromHandler(LL_WARNING,"Sorry: no support for backtrace().");
 #endif
