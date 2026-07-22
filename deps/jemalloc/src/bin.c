@@ -47,6 +47,7 @@ bin_init(bin_t *bin) {
 	bin->slabcur = NULL;
 	edata_heap_new(&bin->slabs_nonfull);
 	edata_list_active_init(&bin->slabs_full);
+	bin->defrag_threshold_valid = false;
 	if (config_stats) {
 		memset(&bin->stats, 0, sizeof(bin_stats_t));
 	}

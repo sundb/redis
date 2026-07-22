@@ -1110,6 +1110,99 @@ run_solo {defrag} {
                 assert {$digest eq $newdigest}
                 r save ;# saving an rdb iterates over all the data / pointers
             }
+        }
+
+        test "Active defrag balanced slabs: $type" {
+            # When all the slabs of a bin have the same low utilization (e.g. all at
+            # ~10%), a heuristic comparing each slab against the bin average can't
+            # tell which slabs should be evacuated: it ends up moving (almost) every
+            # allocation and needs several keyspace passes to converge. The
+            # threshold-based hint computes the exact set of slabs to retain up
+            # front, so convergence should happen within a single pass with a
+            # bounded number of moves.
+            # this test is more consistent on a fresh server with no history
+            start_server {tags {"defrag"} overrides {save ""}} {
+                r flushdb
+                r config set hz 100
+                r config set activedefrag no
+                wait_for_defrag_stop 500 100
+                r config resetstat
+                r config set active-defrag-threshold-lower 5
+                r config set active-defrag-cycle-min 65
+                r config set active-defrag-cycle-max 75
+                r config set active-defrag-ignore-bytes 1mb
+                r config set maxmemory 0
+
+                # add a mass of keys with 600 byte values, filling the bin of
+                # 640 bytes which has 32 regs per slab.
+                set rd [redis_deferring_client]
+                set keys 640000
+                set count 0
+                for {set j 0} {$j < $keys} {incr j} {
+                    $rd setrange $j 600 x
+
+                    incr count
+                    discard_replies_every $rd $count 10000 10000
+                }
+
+                # keep only every 10th key, so that all slabs end up with the same
+                # (low) ~10% utilization.
+                set count 0
+                for {set j 0} {$j < $keys} {incr j} {
+                    if {$j % 10 == 0} continue
+                    $rd del $j
+
+                    incr count
+                    discard_replies_every $rd $count 10000 10000
+                }
+
+                # start defrag
+                after 120 ;# serverCron only updates the info once in 100ms
+                set frag [s allocator_frag_ratio]
+                if {$::verbose} {
+                    puts "frag $frag"
+                }
+                assert {$frag >= 1.5}
+
+                set digest [debug_digest]
+                catch {r config set activedefrag yes} e
+                if {[r config get activedefrag] eq "activedefrag yes"} {
+                    # wait for the active defrag to start working (decision once a second)
+                    wait_for_condition 50 100 {
+                        [s total_active_defrag_time] ne 0
+                    } else {
+                        after 120 ;# serverCron only updates the info once in 100ms
+                        puts [r info memory]
+                        puts [r info stats]
+                        puts [r memory malloc-stats]
+                        fail "defrag not started."
+                    }
+
+                    # wait for the active defrag to stop working
+                    wait_for_defrag_stop 1000 100 1.1
+
+                    after 120 ;# serverCron only updates the info once in 100ms
+                    set misses [s active_defrag_misses]
+                    set hits [s active_defrag_hits]
+                    set frag [s allocator_frag_ratio]
+                    if {$::verbose} {
+                        puts "frag $frag"
+                        puts "hits: $hits"
+                        puts "misses: $misses"
+                    }
+                    # the moves needed are bounded by the number of live allocations
+                    # (~64k keys, a few allocations each - we usually see ~130k hits
+                    # and ~20k misses); an average-comparison heuristic moves
+                    # everything it scans, over several passes.
+                    assert {$hits < 400000}
+                    assert {$misses < 5000000}
+                }
+
+                # verify the data isn't corrupted or changed
+                set newdigest [debug_digest]
+                assert {$digest eq $newdigest}
+                r save ;# saving an rdb iterates over all the data / pointers
+            }
         } ;# standalone
         }
     }

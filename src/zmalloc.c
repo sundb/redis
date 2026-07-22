@@ -370,6 +370,18 @@ void zfree_no_tcache(void *ptr) {
     update_zmalloc_stat_free(zmalloc_size(ptr));
     dallocx(ptr, MALLOCX_TCACHE_NONE);
 }
+
+/* Like zmalloc_no_tcache(), but allocates from the given arena. Used by
+ * defrag to keep a moved allocation in the arena it came from, so that
+ * fragmentation of non-main arenas (e.g. those used by I/O threads or
+ * modules) can be reduced too. */
+void *zmalloc_no_tcache_arena(size_t size, unsigned arena_ind) {
+    if (size >= SIZE_MAX/2) zmalloc_oom_handler(size);
+    void *ptr = mallocx(size+PREFIX_SIZE, MALLOCX_ARENA(arena_ind) | MALLOCX_TCACHE_NONE);
+    if (!ptr) zmalloc_oom_handler(size);
+    update_zmalloc_stat_alloc(zmalloc_size(ptr));
+    return ptr;
+}
 #endif
 
 /* Try allocating memory and zero it, and return NULL if failed.

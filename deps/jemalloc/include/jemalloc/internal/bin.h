@@ -39,6 +39,14 @@ struct bin_s {
 
 	/* List used to track full slabs. */
 	edata_list_active_t	slabs_full;
+
+	/*
+	 * Defragmentation threshold (Redis-specific, see get_defrag_hint()).
+	 * A by-value (sn, addr) snapshot of the highest slab that should be
+	 * retained; slabs that compare greater are defrag candidates.
+	 */
+	edata_cmp_summary_t	defrag_threshold;
+	bool			defrag_threshold_valid;
 };
 
 /* A set of sharded bins of the same size class. */

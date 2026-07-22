@@ -4503,13 +4503,191 @@ jemalloc_postfork_child(void) {
 
 /******************************************************************************/
 
+/******************************************************************************/
+/*
+ * Redis-specific defragmentation support.
+ *
+ * Allocations of a small size class are served from the non-full slab that
+ * is oldest/lowest in memory (bin->slabs_nonfull is ordered by
+ * edata_snad_comp()).  Therefore, after a defragmentation pass, the live
+ * regions of each bin should end up packed into the K oldest/lowest slabs,
+ * where K is the minimum number of slabs able to hold them, and the
+ * remaining slabs can be freed.
+ *
+ * defrag_init_step() computes, per bin, a (sn, addr) threshold identifying
+ * the K-th lowest non-full slab.  get_defrag_hint() then simply reports
+ * whether a pointer's slab is above that threshold (i.e. its slab is not
+ * part of the retained set, so moving the allocation will help empty it).
+ * Comparing against a fixed per-scan threshold, rather than the bin's
+ * average utilization, avoids mass churn when all slabs are equally
+ * utilized and never moves allocations out of slabs that would be retained
+ * anyway.
+ */
+
+/*
+ * Bound on the number of slabs popped while locating a bin's threshold, to
+ * limit the time bin->lock is held.  If a bin needs to retain more slabs
+ * than this, the threshold is taken at the cap: the retained set is then
+ * smaller than optimal, which only causes some extra moving (allocations
+ * still flow strictly downwards), never divergence.
+ */
+#define DEFRAG_THRESHOLD_SLAB_CAP (64 * 1024)
+
+/* Compute the defrag threshold of one bin.  bin->lock must be held. */
+static void
+defrag_bin_compute_threshold(bin_t *bin, const bin_info_t *bin_info) {
+	size_t nregs = bin_info->nregs;
+	/* stats.nonfull_slabs tracks bin->slabs_nonfull, which excludes both
+	 * slabcur and full slabs. */
+	size_t nonfull_slabs = bin->stats.nonfull_slabs;
+	size_t full_slabs = bin->stats.curslabs - nonfull_slabs -
+	    (bin->slabcur != NULL ? 1 : 0);
+	/* Regs living in non-full slabs, including slabcur. */
+	size_t nonfull_regs = bin->stats.curregs - full_slabs * nregs;
+	/* Non-full slabs (including slabcur) needed to hold all live regs. */
+	size_t needed_slabs = (nonfull_regs + nregs - 1) / nregs;
+	/* Slabs from slabs_nonfull to retain; slabcur is always retained. */
+	size_t slabcur_slabs = bin->slabcur != NULL ? 1 : 0;
+	size_t retain = needed_slabs > slabcur_slabs ?
+	    needed_slabs - slabcur_slabs : 0;
+
+	if (nonfull_slabs <= retain) {
+		/* Already as packed as it can get; nothing worth moving.
+		 * Leave the threshold invalid so the whole bin reports 0. */
+		return;
+	}
+
+	if (retain == 0) {
+		/* Every slab in slabs_nonfull should be emptied. */
+		bin->defrag_threshold = (edata_cmp_summary_t){0, 0};
+		bin->defrag_threshold_valid = true;
+		return;
+	}
+
+	/* Pop the `retain` lowest slabs to find the threshold, then put them
+	 * back.  The heap is fully restored before the lock is released, so
+	 * this is invisible to the allocation paths and to the stats. */
+	if (retain > DEFRAG_THRESHOLD_SLAB_CAP) {
+		retain = DEFRAG_THRESHOLD_SLAB_CAP;
+	}
+	edata_heap_t tmp;
+	edata_heap_new(&tmp);
+	edata_t *slab = NULL;
+	for (size_t i = 0; i < retain; i++) {
+		edata_t *e = edata_heap_remove_first(&bin->slabs_nonfull);
+		if (e == NULL) {
+			break;
+		}
+		slab = e;
+		edata_heap_insert(&tmp, e);
+	}
+	if (slab != NULL) {
+		/* `slab` is the highest slab that should be retained. */
+		bin->defrag_threshold = edata_cmp_summary_get(slab);
+		bin->defrag_threshold_valid = true;
+	}
+	while ((slab = edata_heap_remove_first(&tmp)) != NULL) {
+		edata_heap_insert(&bin->slabs_nonfull, slab);
+	}
+}
+
+/* Incrementally compute the defrag thresholds of all bins, limited to
+ * max_time_us microseconds per call.  Bins whose threshold is already valid
+ * are skipped, so repeated calls make progress.  Returns non-zero if there
+ * is more work to do, 0 once all bins have been processed.  Must be called
+ * from a single thread (the defragging thread). */
+JEMALLOC_EXPORT int JEMALLOC_NOTHROW
+defrag_init_step(long long max_time_us) {
+	tsd_t *tsd = tsd_fetch();
+	tsdn_t *tsdn = tsd_tsdn(tsd);
+	unsigned narenas = narenas_total_get();
+	nstime_t start;
+	nstime_init_update(&start);
+
+	for (unsigned i = 0; i < narenas; i++) {
+		arena_t *arena = arena_get(tsdn, i, false);
+		if (arena == NULL) {
+			continue;
+		}
+		for (unsigned j = 0; j < SC_NBINS; j++) {
+			const bin_info_t *bin_info = &bin_infos[j];
+			for (unsigned k = 0; k < bin_info->n_shards; k++) {
+				bin_t *bin = arena_get_bin(arena, j, k);
+				malloc_mutex_lock(tsdn, &bin->lock);
+				if (!bin->defrag_threshold_valid) {
+					defrag_bin_compute_threshold(bin,
+					    bin_info);
+				}
+				malloc_mutex_unlock(tsdn, &bin->lock);
+				nstime_t now;
+				nstime_init_update(&now);
+				if ((long long)((nstime_ns(&now) -
+				    nstime_ns(&start)) / 1000) >= max_time_us) {
+					return 1;
+				}
+			}
+		}
+	}
+	return 0;
+}
+
+/* Invalidate all defrag thresholds; called when a defrag scan ends. */
+JEMALLOC_EXPORT void JEMALLOC_NOTHROW
+defrag_finish(void) {
+	tsd_t *tsd = tsd_fetch();
+	tsdn_t *tsdn = tsd_tsdn(tsd);
+	unsigned narenas = narenas_total_get();
+
+	for (unsigned i = 0; i < narenas; i++) {
+		arena_t *arena = arena_get(tsdn, i, false);
+		if (arena == NULL) {
+			continue;
+		}
+		for (unsigned j = 0; j < SC_NBINS; j++) {
+			for (unsigned k = 0; k < bin_infos[j].n_shards; k++) {
+				bin_t *bin = arena_get_bin(arena, j, k);
+				malloc_mutex_lock(tsdn, &bin->lock);
+				bin->defrag_threshold_valid = false;
+				malloc_mutex_unlock(tsdn, &bin->lock);
+			}
+		}
+	}
+}
+
 /* Helps the application decide if a pointer is worth re-allocating in order to reduce fragmentation.
  * returns 1 if the allocation should be moved, and 0 if the allocation be kept.
- * If the application decides to re-allocate it should use MALLOCX_TCACHE_NONE when doing so. */
+ * On a non-zero return, *arena_ind is set to the arena owning the allocation; the
+ * application should re-allocate with MALLOCX_ARENA(*arena_ind) | MALLOCX_TCACHE_NONE
+ * so that the replacement is packed into the retained slabs of the same arena.
+ * Note: only returns 1 while a defrag scan is active, i.e. between
+ * defrag_init_step() and defrag_finish(). */
 JEMALLOC_EXPORT int JEMALLOC_NOTHROW
-get_defrag_hint(void* ptr) {
+get_defrag_hint(void* ptr, unsigned *arena_ind) {
 	assert(ptr != NULL);
-	return iget_defrag_hint(TSDN_NULL, ptr);
+	int defrag = 0;
+	tsdn_t *tsdn = TSDN_NULL;
+	emap_alloc_ctx_t alloc_ctx;
+	emap_alloc_ctx_lookup(tsdn, &arena_emap_global, ptr, &alloc_ctx);
+	if (likely(alloc_ctx.slab)) {
+		/* Small allocation. */
+		edata_t *slab = emap_edata_lookup(tsdn, &arena_emap_global, ptr);
+		arena_t *arena = arena_get_from_edata(slab);
+		szind_t binind = edata_szind_get(slab);
+		unsigned binshard = edata_binshard_get(slab);
+		bin_t *bin = arena_get_bin(arena, binind, binshard);
+		malloc_mutex_lock(tsdn, &bin->lock);
+		/* Don't bother moving allocations from full slabs or from the
+		 * slab currently used for new allocations. */
+		if (slab != bin->slabcur && edata_nfree_get(slab) > 0 &&
+		    bin->defrag_threshold_valid &&
+		    edata_cmp_summary_comp(edata_cmp_summary_get(slab),
+		    bin->defrag_threshold) > 0) {
+			defrag = 1;
+			*arena_ind = edata_arena_ind_get(slab);
+		}
+		malloc_mutex_unlock(tsdn, &bin->lock);
+	}
+	return defrag;
 }
 
 JEMALLOC_EXPORT JEMALLOC_ALLOCATOR JEMALLOC_RESTRICT_RETURN

@@ -141,6 +141,7 @@ void zfree_with_flags(void *ptr, int flags);
 #if (defined(USE_JEMALLOC) && defined(HAVE_DEFRAG))
 void zfree_no_tcache(void *ptr);
 __attribute__((malloc)) void *zmalloc_no_tcache(size_t size);
+__attribute__((malloc)) void *zmalloc_no_tcache_arena(size_t size, unsigned arena_ind);
 #endif
 
 #ifndef HAVE_MALLOC_SIZE

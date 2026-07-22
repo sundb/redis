@@ -139,9 +139,21 @@ typedef struct {
     unsigned long cursor;
 } defragModuleCtx;
 
-/* this method was added to jemalloc in order to help us understand which
- * pointers are worthwhile moving and which aren't */
-int je_get_defrag_hint(void* ptr);
+/* These methods were added to jemalloc in order to help us understand which
+ * pointers are worthwhile moving and which aren't.
+ * je_defrag_init_step() incrementally computes, for every allocator bin, the
+ * threshold separating the slabs that should be retained (and filled up) from
+ * the slabs whose allocations should be moved away; je_get_defrag_hint() then
+ * reports whether a pointer lives in one of the latter. je_defrag_finish()
+ * invalidates the thresholds when the scan ends. */
+int je_get_defrag_hint(void* ptr, unsigned *arena_ind);
+int je_defrag_init_step(long long max_time_us);
+void je_defrag_finish(void);
+
+/* Forward declarations for the jemalloc defrag lifecycle helpers defined in
+ * the allocator-specific sections below. */
+static doneStatus defragStageJemallocInit(void *ctx, monotime endtime);
+static void defragJemallocFinish(void);
 
 #if !defined(DEBUG_DEFRAG_FORCE)
 /* Defrag helper for generic allocations without freeing old pointer.
@@ -151,18 +163,36 @@ int je_get_defrag_hint(void* ptr);
 void* activeDefragAllocWithoutFree(void *ptr) {
     size_t size;
     void *newptr;
-    if(!je_get_defrag_hint(ptr)) {
+    unsigned arena_ind;
+    if(!je_get_defrag_hint(ptr, &arena_ind)) {
         server.stat_active_defrag_misses++;
         return NULL;
     }
     /* move this allocation to a new allocation.
-     * make sure not to use the thread cache. so that we don't get back the same
-     * pointers we try to free */
+     * keep it in the arena it came from, so that non-main arenas (I/O threads,
+     * modules) get defragmented too, and make sure not to use the thread
+     * cache, so that we don't get back the same pointers we try to free */
     size = zmalloc_usable_size(ptr);
-    newptr = zmalloc_no_tcache(size);
+    newptr = zmalloc_no_tcache_arena(size, arena_ind);
     memcpy(newptr, ptr, size);
     server.stat_active_defrag_hits++;
     return newptr;
+}
+
+/* Stage function (run before any scanning stage): incrementally compute the
+ * per-bin defrag thresholds inside jemalloc. Until a bin's threshold is ready
+ * je_get_defrag_hint() safely reports 0 for its allocations. */
+static doneStatus defragStageJemallocInit(void *ctx, monotime endtime) {
+    UNUSED(ctx);
+    monotime now = getMonotonicUs();
+    if (now >= endtime) return DEFRAG_NOT_DONE;
+    /* jemalloc tracks the budget itself with the raw monotonic clock, which
+     * may differ from our monotime source, so pass a duration. */
+    return je_defrag_init_step(endtime - now) ? DEFRAG_NOT_DONE : DEFRAG_DONE;
+}
+
+static void defragJemallocFinish(void) {
+    je_defrag_finish();
 }
 
 void activeDefragFree(void *ptr) {
@@ -221,6 +251,15 @@ void activeDefragFreeRaw(void *ptr) {
     zfree(ptr);
     server.stat_active_defrag_hits++;
 }
+
+/* Without the modified jemalloc there are no per-bin thresholds to compute. */
+static doneStatus defragStageJemallocInit(void *ctx, monotime endtime) {
+    UNUSED(ctx);
+    UNUSED(endtime);
+    return DEFRAG_DONE;
+}
+
+static void defragJemallocFinish(void) {}
 #endif
 
 /*Defrag helper for sds strings
@@ -1724,6 +1763,10 @@ static void updateDefragDecayRate(float frag_pct) {
 
 /* Called at the end of a complete defrag cycle, or when defrag is terminated */
 static void endDefragCycle(int normal_termination) {
+    /* Invalidate the allocator's per-bin defrag thresholds; they are
+     * recomputed at the start of the next cycle. */
+    defragJemallocFinish();
+
     if (normal_termination) {
         /* For normal termination, we expect... */
         serverAssert(!defrag.current_stage);
@@ -1935,6 +1978,10 @@ static void beginDefragCycle(void) {
     serverAssert(defrag.remaining_stages == NULL);
     defrag.remaining_stages = listCreate();
     listSetFreeMethod(defrag.remaining_stages, freeDefragContext);
+
+    /* First stage: compute the allocator's per-bin defrag thresholds, so that
+     * the scanning stages get meaningful defrag hints. */
+    addDefragStage(defragStageJemallocInit, NULL, NULL);
 
     for (int dbid = 0; dbid < server.dbnum; dbid++) {
         redisDb *db = &server.db[dbid];
