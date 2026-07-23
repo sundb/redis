@@ -189,6 +189,9 @@ def find_test_classes(primary_port, replica_port):
                     if inspect.isclass(obj) and obj.__name__ != 'TestCase' and hasattr(obj, 'test'):
                         # Create test instance with specified ports
                         test_instance = obj(primary_port,replica_port)
+                        # Remember the source file (without .py) so --test can
+                        # also match by file name, not just class/display name.
+                        test_instance._source_file = file[:-3]
                         test_classes.append(test_instance)
             except Exception as e:
                 print(f"Error loading {file}: {e}")
@@ -223,6 +226,8 @@ def run_tests():
     parser = argparse.ArgumentParser(description='Run Redis vector tests.')
     parser.add_argument('--primary-port', type=int, default=6379, help='Primary Redis instance port (default: 6379)')
     parser.add_argument('--replica-port', type=int, default=6380, help='Replica Redis instance port (default: 6380)')
+    parser.add_argument('--test', '-t', default=None,
+                        help='Only run tests whose name or class matches this substring (case-insensitive)')
     args = parser.parse_args()
 
     print("================================================")
@@ -247,6 +252,17 @@ def run_tests():
     if not tests:
         print("No tests found!")
         return
+
+    # Optionally keep only the tests matching --test.
+    if args.test:
+        needle = args.test.lower()
+        tests = [t for t in tests
+                 if needle in t.getname().lower()
+                 or needle in type(t).__name__.lower()
+                 or needle in getattr(t, '_source_file', '').lower()]
+        if not tests:
+            print(colored(f"No test matches --test '{args.test}'", "red"))
+            sys.exit(1)
 
     # Sort tests by estimated runtime
     tests.sort(key=lambda t: t.estimated_runtime())
