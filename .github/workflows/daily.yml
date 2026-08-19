@@ -38,6 +38,31 @@ jobs:
           echo "This job was triggered by PR https://github.com/redis/redis/pull/${{github.event.inputs.pr}}"
           echo "PR: ${{github.event.inputs.pr_title}}"
           nproc
+      - name: Add note to summary
+        env:
+          PR: ${{github.event.inputs.pr}}
+          PR_TITLE: ${{github.event.inputs.pr_title}}
+          USE_REPO: ${{github.event.inputs.use_repo}}
+          USE_GIT_REF: ${{github.event.inputs.use_git_ref}}
+          SKIPJOBS: ${{github.event.inputs.skipjobs}}
+          SKIPTESTS: ${{github.event.inputs.skiptests}}
+          TEST_ARGS: ${{github.event.inputs.test_args}}
+          CLUSTER_TEST_ARGS: ${{github.event.inputs.cluster_test_args}}
+        run: |
+          {
+            echo "## Daily Run Summary"
+            echo
+            if [ -n "$PR" ]; then
+              echo "- **PR:** [#${PR}](https://github.com/redis/redis/pull/${PR}) ${PR_TITLE}"
+            fi
+            echo "- **Repo:** ${USE_REPO:-${{github.repository}}}"
+            echo "- **Git Ref:** ${USE_GIT_REF:-${{github.ref_name}}}"
+            echo "- **Skipped Jobs:** \`${SKIPJOBS:-none}\`"
+            echo "- **Skipped Tests:** \`${SKIPTESTS:-none}\`"
+            echo "- **Test Args:** \`${TEST_ARGS:-none}\`"
+            echo "- **Cluster Test Args:** \`${CLUSTER_TEST_ARGS:-none}\`"
+            echo "- **Triggered By:** ${{github.actor}} (${{github.event_name}})"
+          } >> $GITHUB_STEP_SUMMARY
 
   test-ubuntu-jemalloc:
     runs-on: ubuntu-latest
@@ -1479,3 +1504,4 @@ jobs:
     - name: test
       if: true && !contains(github.event.inputs.skiptests, 'redis')
       run: ./runtest --accurate --verbose --dump-logs --single vectorset/vectorset ${{github.event.inputs.test_args}}
+
