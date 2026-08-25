@@ -1,6 +1,6 @@
 # Manual takeover test
 
-start_cluster 5 5 {tags {external:skip cluster valgrind:skip}} {
+start_cluster 5 5 {tags {external:skip cluster}} {
 
 test "Cluster is up" {
     wait_for_cluster_state ok
@@ -22,10 +22,6 @@ test "Killing majority of master nodes" {
     cluster_kill_node 0
     cluster_kill_node 1
     cluster_kill_node 2
-}
-
-foreach id $replica_ids {
-    R $id config set cluster-replica-no-failover no
 }
 
 test "Cluster should eventually be down" {
