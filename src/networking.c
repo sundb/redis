@@ -218,6 +218,12 @@ client *createClient(connection *conn) {
     c->obuf_soft_limit_reached_time = 0;
     listSetFreeMethod(c->reply,freeClientReplyValue);
     listSetDupMethod(c->reply,dupClientReplyValue);
+    c->sync_pending_replies = NULL;
+    c->sync_pending_bytes = 0;
+    c->sync_pending_overhead = 0;
+    c->sync_rep_force_new_block = 0;
+    c->sync_clients_with_pending_node = NULL;
+    c->sync_pre_command_repl_offset = 0;
     initClientBlockingState(c);
     c->woff = 0;
     c->watched_keys = listCreate();
@@ -271,7 +277,14 @@ void installClientWriteHandler(client *c) {
      * served for reading and writing in the same event loop iteration,
      * so that in the middle of receiving the query, and serving it
      * to the client, we'll call beforeSleep() that will do the
-     * actual fsync of AOF to disk. the write barrier ensures that. */
+     * actual fsync of AOF to disk. the write barrier ensures that.
+     *
+     * bgalways deliberately does NOT set the barrier: unlike `always`, which
+     * keeps the not-yet-fsynced reply in c->reply and relies on this ordering
+     * to fsync before the write handler can flush it, bgalways parks the reply
+     * outside c->reply (sync_pending_replies) until fsynced_reploff covers its
+     * woff, so a not-yet-durable reply can never reach the socket regardless of
+     * read/write interleaving. See docs/appendfsync-bgalways.md. */
     if (server.aof_state == AOF_ON &&
         server.aof_fsync == AOF_FSYNC_ALWAYS)
     {
@@ -403,6 +416,17 @@ static void _addReplyPayloadToList(client *c, list *reply_list, const char *payl
     /* Note that 'tail' may be NULL even if we have a tail node, because when
      * addReplyDeferredLen() is used, it sets a dummy node to NULL just
      * to fill it later, when the size of the bulk length is set. */
+
+    /* Reply holding: if a previous non-chunked command left nodes in c->reply,
+     * we must NOT in-place-extend its tail block — that would leak this
+     * command's bytes into the prior reply and bypass chunking. Force a
+     * fresh node allocation by clearing 'tail'. One-shot flag — cleared
+     * after first use so subsequent appends within the same command can
+     * in-place-extend the new node. */
+    if (unlikely(c->sync_rep_force_new_block) && reply_list == c->reply) {
+        tail = NULL;
+        c->sync_rep_force_new_block = 0;
+    }
 
     /* Append to tail node when possible. */
     if (tail) {
@@ -2369,6 +2393,7 @@ void freeClient(client *c) {
     dictRelease(c->pubsubshard_channels);
 
     /* Free data structures. */
+    freeSyncPendingReplies(c);
     releaseAllBufReferences(c); /* Release all references to string objects in encoded buffers before freeing */
     listRelease(c->reply);
     zfree(c->buf);
@@ -5342,7 +5367,8 @@ static size_t getClientOutputBufferAllocSize(client *c) {
         return repl_buf_size + (repl_node_size*repl_node_num);
     } else { 
         size_t list_item_size = sizeof(listNode) + sizeof(clientReplyBlock);
-        return c->reply_bytes + (list_item_size*listLength(c->reply));
+        return c->reply_bytes + (list_item_size*listLength(c->reply))
+               + c->sync_pending_bytes + c->sync_pending_overhead;
     }
 }
 
@@ -5373,6 +5399,346 @@ size_t getNormalClientPendingReplyBytes(client *c) {
     clientReplyBlock *block = listNodeValue(listLast(c->reply));
     return (c->reply_bytes + c->reply_bytes_shared - block->size + block->used) + c->bufpos;
 }
+
+/* ----------------------------------------------------------------------------
+ * Reply holding: per-command reply chunking until the data is durable.
+ *
+ * Engaged by `appendfsync bgalways`: the AOF fsync runs on the bio thread, so a
+ * command's reply must not reach the socket until server.fsynced_reploff covers
+ * the offset that command wrote. Instead of blocking the client, the bytes the
+ * command already produced are moved out of c->buf / c->reply into a chunk
+ * parked on c->sync_pending_replies, and spliced back once the durable offset
+ * passes the chunk's woff. See docs/appendfsync-bgalways.md.
+ *
+ * The chunk owns moved listNodes from c->reply (zero-copy preserved for
+ * BULK_STR_REF refs) plus optionally one freshly-allocated block holding
+ * the inline-buf delta this command produced. When a chunk is enqueued,
+ * those bytes are moved OUT of c->reply_bytes into c->sync_pending_bytes;
+ * on drain they move back. The two per-client fields together cover all
+ * unsent bytes, and getClientOutputBufferMemoryUsage sums both, so OBL limit
+ * checks remain correct regardless of which field currently holds a given byte.
+ * The per-chunk and per-listNode overhead is tracked separately in
+ * sync_pending_overhead and added by getClientOutputBufferMemoryUsage.
+ * -------------------------------------------------------------------------- */
+
+/* True when held replies must wait for the LOCAL AOF to fsync the write's woff.
+ * Engaged by appendfsync bgalways. Guarded by aof_enabled (no AOF => nothing to
+ * wait for, so we never hang) and by fsynced_reploff != -1 (do not engage during
+ * the initial AOF rewrite, where the offset is pinned at -1 and every client
+ * would otherwise be held until the rewrite completes). Shared by
+ * clientSyncRepActive and drainSyncPendingReplies so the two stay in lockstep. */
+int syncReplWaitLocalAof(void) {
+    return server.aof_fsync == AOF_FSYNC_BGALWAYS &&
+           server.aof_enabled && server.fsynced_reploff != -1;
+}
+
+/* True iff this client's replies should be chunked-and-held.
+ * - Excludes fake clients (no conn), replicas, masters.
+ * - Engages if EITHER holding is currently enabled by config, OR the client
+ *   still has pending chunks from earlier commands. The second condition
+ *   preserves RESP reply ordering: once a chunk is parked, any subsequent reply
+ *   on the same client must queue behind it, even a non-propagating one (a pure
+ *   read, CLIENT REPLY SKIP, etc.), or the client would observe replies out of
+ *   command order. */
+int clientSyncRepActive(client *c) {
+    if (c->conn == NULL) return 0;
+    if (c->flags & (CLIENT_SLAVE | CLIENT_MASTER)) return 0;
+    if (syncReplWaitLocalAof()) return 1;
+    if (c->sync_pending_replies &&
+        listLength(c->sync_pending_replies) > 0) return 1;
+    return 0;
+}
+
+static inline size_t syncReplyChunkOverhead(syncReplyChunk *chunk) {
+    return sizeof(listNode) + sizeof(syncReplyChunk) +
+           listLength(chunk->reply_list) *
+               (sizeof(listNode) + sizeof(clientReplyBlock));
+}
+
+static void linkClientToSyncPending(client *c) {
+    if (c->sync_clients_with_pending_node) return;
+    listAddNodeTail(server.sync_clients_with_pending, c);
+    c->sync_clients_with_pending_node = listLast(server.sync_clients_with_pending);
+}
+
+static void unlinkClientFromSyncPending(client *c) {
+    if (!c->sync_clients_with_pending_node) return;
+    listDelNode(server.sync_clients_with_pending, c->sync_clients_with_pending_node);
+    c->sync_clients_with_pending_node = NULL;
+}
+
+/* Sum block->size across all blocks held by a chunk. */
+static size_t syncReplyChunkBytes(syncReplyChunk *chunk) {
+    size_t total = 0;
+    listIter li;
+    listNode *ln;
+    listRewind(chunk->reply_list, &li);
+    while ((ln = listNext(&li))) {
+        clientReplyBlock *o = listNodeValue(ln);
+        if (o) total += o->size;
+    }
+    return total;
+}
+
+/* Free a chunk's contents: releases BULK_STR_REF refcounts and decrements
+ * the chunk-side accounting. Bytes here never went through c->reply, so we
+ * touch c->sync_pending_bytes directly (not c->reply_bytes). Does NOT touch
+ * sync_pending_overhead or the chunk struct itself; callers handle that. */
+static void freeSyncReplyChunkContents(client *c, syncReplyChunk *chunk) {
+    listIter li;
+    listNode *ln;
+    size_t total = 0;
+    listRewind(chunk->reply_list, &li);
+    while ((ln = listNext(&li))) {
+        clientReplyBlock *o = listNodeValue(ln);
+        if (o) {
+            if (o->buf_encoded) releaseBufReferences(c, o->buf, o->used);
+            total += o->size;
+        }
+    }
+    if (total > 0) c->sync_pending_bytes -= total;
+    /* listRelease will zfree blocks via the listFree callback set on creation. */
+    listRelease(chunk->reply_list);
+}
+
+/* Called at the start of call(). Captures where this command's reply will
+ * begin in c->buf and c->reply, and sets the force-new-block flag if needed
+ * (see below) to prevent in-place tail-extension from leaking this command's
+ * bytes into a prior command's reply block. */
+void syncReplStartCommand(client *c, size_t *inline_start, listNode **list_tail_start) {
+    *inline_start = c->bufpos;
+    *list_tail_start = listLast(c->reply);
+    /* If c->reply already has nodes when this command starts, this command's
+     * first _addReplyPayloadToList() would extend that prior tail node in place.
+     * If this command's reply is then chunked, syncReplFinishCommand() only
+     * moves nodes *after* list_tail_start into the chunk — so the leading bytes
+     * that extended the prior tail node are LEFT BEHIND, glued to the prior
+     * reply, while the rest of this command's reply lands in the chunk. That
+     * splits the reply and corrupts the RESP stream (e.g. a held write's "+OK"
+     * block, drained into c->reply with only a few spare bytes, gets a later
+     * read's "$32" glued onto it). Force a fresh node so all of this command's
+     * bytes are captured together.
+     *
+     * We can't always know at command start whether the reply will be chunked
+     * (propagation is decided during call()), and forcing a fresh node when
+     * c->reply is non-empty is always correct (the reply is just appended in a
+     * new node, preserving RESP order) and only matters in the transient window
+     * where drained/overflow nodes still sit in c->reply. So set the flag
+     * whenever c->reply is non-empty. */
+    if (listLength(c->reply) > 0)
+        c->sync_rep_force_new_block = 1;
+}
+
+/* Called at the end of call() once c->woff has been set. Slices everything
+ * appended between (inline_start, c->bufpos) and after list_tail_start in
+ * c->reply into a new chunk tagged with woff.
+ *
+ * The in-place tail-block extension case is handled at command start: when
+ * c->reply was non-empty and the command might chunk, syncReplStartCommand
+ * sets c->sync_rep_force_new_block so the first _addReplyPayloadToList call
+ * forces a fresh node instead of extending the prior tail's spare bytes —
+ * so all of this command's listNodes are properly captured here.
+ *
+ * Always creates a chunk if called (the caller's gate at server.c decides
+ * whether to call). An empty reply_list is legal (zero-byte chunks for
+ * CLIENT REPLY OFF/SKIP and other empty-reply chunked commands): the chunk's
+ * presence at the queue head still gates subsequent replies on its woff.
+ *
+ * woff is the offset that must be durable before this chunk may drain:
+ *   - a write chunk carries the write's replication offset;
+ *   - a passthrough chunk carries 0 — a non-propagating reply queued behind an
+ *     earlier pending chunk to preserve RESP order, released as soon as the
+ *     chunk ahead of it is. */
+void syncReplFinishCommand(client *c, long long woff, size_t inline_start, listNode *list_tail_start) {
+    /* Clear the force-new-block flag for safety: if the command produced no
+     * bytes, _addReplyPayloadToList was never called and the flag would stick
+     * into the next command. */
+    c->sync_rep_force_new_block = 0;
+
+    size_t inline_delta = ((size_t)c->bufpos > inline_start)
+        ? (size_t)c->bufpos - inline_start : 0;
+    listNode *new_first = list_tail_start ? list_tail_start->next : listFirst(c->reply);
+
+    syncReplyChunk *chunk = zmalloc(sizeof(*chunk));
+    chunk->woff = woff;
+    chunk->enqueue_us = ustime();
+    chunk->reply_list = listCreate();
+    listSetFreeMethod(chunk->reply_list, freeClientReplyValue);
+    listSetDupMethod(chunk->reply_list, dupClientReplyValue);
+
+    /* 1. Promote inline-buf delta into a fresh clientReplyBlock.
+     *    The bytes carry their typed records (PLAIN_REPLY / BULK_STR_REF
+     *    headers); memcpy preserves the bulkStrRef pointer+refcount
+     *    structure, so robj refcounts remain held by the moved bytes.
+     *    Accounting: bytes go directly into c->sync_pending_bytes (and the
+     *    global counter) — they never lived in c->reply_bytes. */
+    if (inline_delta > 0) {
+        size_t usable_size;
+        clientReplyBlock *block = zmalloc_usable(inline_delta + sizeof(clientReplyBlock), &usable_size);
+        block->size = usable_size - sizeof(clientReplyBlock);
+        block->used = inline_delta;
+        block->buf_encoded = c->buf_encoded;
+        memcpy(block->buf, c->buf + inline_start, inline_delta);
+        listAddNodeTail(chunk->reply_list, block);
+        c->sync_pending_bytes += block->size;
+
+        /* Shrink the inline buf back: the bytes now live in the chunk. */
+        c->bufpos = (int)inline_start;
+        /* If the inline buf is now empty, allow future commands to start
+         * fresh (avoid spurious encoded-mode allocations for plain replies). */
+        if (c->bufpos == 0) c->buf_encoded = 0;
+    }
+
+    /* 2. Move newly-appended listNodes from c->reply to chunk->reply_list.
+     *    Plain pointer surgery; no deep copy of the underlying blocks, so
+     *    BULK_STR_REF zero-copy refs and their robj refcounts stay intact.
+     *    Accounting: shift each block's bytes from c->reply_bytes to
+     *    c->sync_pending_bytes. This keeps the invariant
+     *    "c->reply empty => c->reply_bytes == 0". */
+    listNode *ln = new_first;
+    while (ln) {
+        listNode *next = ln->next;
+        clientReplyBlock *block = listNodeValue(ln);
+        size_t bsize = block ? block->size : 0;
+        listUnlinkNode(c->reply, ln);
+        listLinkNodeTail(chunk->reply_list, ln);
+        if (bsize > 0) {
+            c->reply_bytes -= bsize;
+            c->sync_pending_bytes += bsize;
+        }
+        ln = next;
+    }
+
+    /* 3. Park the chunk on the client and bump bookkeeping. */
+    if (c->sync_pending_replies == NULL)
+        c->sync_pending_replies = listCreate();
+    int was_empty = (listLength(c->sync_pending_replies) == 0);
+    listAddNodeTail(c->sync_pending_replies, chunk);
+    server.sync_repl_pending_commands++; /* gauge: one more chunk parked */
+    c->sync_pending_overhead += syncReplyChunkOverhead(chunk);
+    if (was_empty) linkClientToSyncPending(c);
+    server.sync_repl_hold_count++;
+    /* Depth seen by this command on arrival, including itself (the chunk is
+     * already linked above). hold_depth_sum/hold_count gives the saturation-safe
+     * "avg commands blocked together". */
+    server.sync_repl_hold_depth_sum += listLength(c->sync_pending_replies);
+
+    /* Apply existing output-buffer-limit policy now that we've grown
+     * the client's pending bytes. getClientOutputBufferMemoryUsage
+     * already accounts for sync_pending_bytes + sync_pending_overhead. */
+    closeClientOnOutputBufferLimitReached(c, 1);
+}
+
+/* Splice one releasable pending chunk's blocks back into c->reply (head-of-
+ * pending to tail-of-reply, preserving command order) and free the chunk,
+ * updating all bookkeeping. The caller has already decided this chunk may be
+ * released. */
+static void syncReplReleaseChunk(client *c, listNode *ln) {
+    syncReplyChunk *chunk = listNodeValue(ln);
+
+    /* Transfer chunk bytes back into the c->reply accounting domain before
+     * splicing nodes. Capture the overhead too: it is derived from
+     * listLength(chunk->reply_list), and listJoin() below empties that list —
+     * computing it afterwards would drop the per-block term (listNode +
+     * clientReplyBlock per block) and leak that overhead in
+     * c->sync_pending_overhead on every drained chunk, slowly inflating
+     * mem_clients_normal. */
+    size_t chunk_bytes = syncReplyChunkBytes(chunk);
+    size_t chunk_overhead = syncReplyChunkOverhead(chunk);
+    if (chunk_bytes > 0) {
+        c->sync_pending_bytes -= chunk_bytes;
+        c->reply_bytes += chunk_bytes;
+    }
+
+    listJoin(c->reply, chunk->reply_list);
+
+    /* Metric: accumulate hold time before freeing. */
+    server.sync_repl_hold_latency_usec += ustime() - chunk->enqueue_us;
+
+    c->sync_pending_overhead -= chunk_overhead;
+    listRelease(chunk->reply_list); /* now empty after listJoin */
+    zfree(chunk);
+    listDelNode(c->sync_pending_replies, ln);
+    server.sync_repl_pending_commands--; /* gauge: one chunk released */
+
+    if (listLength(c->sync_pending_replies) == 0)
+        unlinkClientFromSyncPending(c);
+}
+
+/* Drain chunks whose durability condition is satisfied back into c->reply.
+ * Invoked from processClientsWaitingReplicas(), which beforeSleep and the
+ * bio fsync-completion callback both drive. The condition is evaluated against
+ * the CURRENT config, not captured at enqueue, so switching appendfsync away
+ * from bgalways releases whatever is still parked. */
+void drainSyncPendingReplies(client *c) {
+    if (!c->sync_pending_replies) return;
+
+    listNode *ln;
+    while ((ln = listFirst(c->sync_pending_replies)) != NULL) {
+        syncReplyChunk *chunk = listNodeValue(ln);
+
+        /* Head-of-queue only: a chunk that cannot be released blocks every
+         * chunk behind it, or the client would observe replies out of command
+         * order. A passthrough chunk (woff 0) always passes this test and so
+         * drains together with the chunk it queued behind. */
+        if (syncReplWaitLocalAof() && server.fsynced_reploff < chunk->woff) break;
+
+        syncReplReleaseChunk(c, ln);
+    }
+
+    if (c->conn && listLength(c->reply) > 0)
+        installClientWriteHandler(c);
+}
+
+/* Tear down every client currently holding pending chunks. Used when their
+ * data can never become durable (an AOF write/fsync error) or when the offset
+ * they are waiting on stops being meaningful (demotion to replica), where
+ * chunks could otherwise hang forever. */
+void disconnectAllSyncRepPendingClients(const char *reason) {
+    listIter li;
+    listNode *ln;
+    int n = 0;
+    listRewind(server.sync_clients_with_pending, &li);
+    while ((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);
+        n++;
+        freeClientAsync(c);
+    }
+    if (n > 0) {
+        server.sync_repl_pending_disconnects += n;
+        serverLog(LL_NOTICE,
+            "Disconnecting %d client(s) with pending replies: %s", n, reason);
+    }
+}
+
+/* Called from freeClient(): release any unsent chunks. Must release
+ * BULK_STR_REF refcounts and adjust reply_bytes the same way the
+ * normal send path does. */
+void freeSyncPendingReplies(client *c) {
+    if (!c->sync_pending_replies) return;
+
+    listIter li;
+    listNode *ln;
+    ustime_t now = ustime();
+    listRewind(c->sync_pending_replies, &li);
+    while ((ln = listNext(&li))) {
+        syncReplyChunk *chunk = listNodeValue(ln);
+        /* Count the wait time of disconnected pending chunks too so the
+         * hold-latency metric isn't undercounted for OBL/error kills. */
+        server.sync_repl_hold_latency_usec += now - chunk->enqueue_us;
+        freeSyncReplyChunkContents(c, chunk);
+        zfree(chunk);
+    }
+    /* gauge: drop all still-parked chunks at once (O(1), listLength is cached) */
+    server.sync_repl_pending_commands -= listLength(c->sync_pending_replies);
+    listRelease(c->sync_pending_replies);
+    c->sync_pending_replies = NULL;
+    c->sync_pending_bytes = 0;
+    c->sync_rep_force_new_block = 0;
+    c->sync_pending_overhead = 0;
+    unlinkClientFromSyncPending(c);
+}
+
 
 /* Returns the total client's memory usage. */
 size_t getClientMemoryUsage(client *c) {
@@ -5529,7 +5895,11 @@ int closeClientOnOutputBufferLimitReached(client *c, int async) {
     serverAssert(c->reply_bytes < SIZE_MAX-(1024*64)); /* actual memory only, logical memory may exceed SIZE_MAX */
     /* Note that c->reply_bytes is irrelevant for replica clients
      * (they use the global repl buffers). */
-    if ((c->reply_bytes == 0 && c->reply_bytes_shared == 0 && !clientTypeIsSlave(c)) ||
+    /* "Nothing pending" early-out must include parked chunk bytes, otherwise a
+     * client whose only pending bytes live in chunks would never get
+     * OBL-disconnected. */
+    if ((c->reply_bytes == 0 && c->reply_bytes_shared == 0 &&
+         c->sync_pending_bytes == 0 && !clientTypeIsSlave(c)) ||
         c->flags & CLIENT_CLOSE_ASAP) return 0;
     if (checkClientOutputBufferLimits(c)) {
         sds client = catClientInfoString(sdsempty(),c);

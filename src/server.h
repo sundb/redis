@@ -666,6 +666,9 @@ typedef enum {
 #define AOF_FSYNC_NO 0
 #define AOF_FSYNC_ALWAYS 1
 #define AOF_FSYNC_EVERYSEC 2
+#define AOF_FSYNC_BGALWAYS 3 /* Like ALWAYS, but fsync runs in the bio thread and
+                              * client replies are held until durable (see
+                              * docs/appendfsync-bgalways.md). */
 
 /* Replication diskless load defines */
 #define REPL_DISKLESS_LOAD_DISABLED 0
@@ -1176,6 +1179,17 @@ typedef struct clientReplyBlock {
     char buf[];
 } clientReplyBlock;
 
+/* A reply chunk parked until the data the command wrote is durable.
+ * The chunk owns a list of clientReplyBlock* with the same node format as
+ * c->reply; moving nodes between c->reply and chunk->reply_list preserves
+ * BULK_STR_REF zero-copy refs (no deep copy). Used by appendfsync bgalways —
+ * see docs/appendfsync-bgalways.md. */
+typedef struct syncReplyChunk {
+    long long woff;            /* min offset that must be fsynced before drain */
+    ustime_t  enqueue_us;      /* timestamp at enqueue, for hold-latency metric */
+    list     *reply_list;      /* list of clientReplyBlock*, same format as c->reply */
+} syncReplyChunk;
+
 /* Replication buffer blocks is the list of replBufBlock.
  *
  * +--------------+       +--------------+       +--------------+
@@ -1551,6 +1565,18 @@ typedef struct client {
     unsigned long long reply_bytes; /* Tot bytes of objects in reply list. */
     unsigned long long reply_bytes_shared; /* Bytes shared with keyspace objects in reply list. */
     unsigned long long reply_bytes_unshared; /* Cached subset of reply_bytes_shared solely owned by this client. */
+    /* Replies parked until durable. See syncReplyChunk above. When a chunk is
+     * enqueued, bytes are moved OUT of reply_bytes into sync_pending_bytes; on
+     * drain they move back. getClientOutputBufferMemoryUsage sums both fields so
+     * OBL/INFO accounting remains correct regardless of which field currently
+     * holds a given byte. sync_pending_overhead covers the extra per-chunk and
+     * per-listNode overhead and is added by getClientOutputBufferMemoryUsage. */
+    list *sync_pending_replies;       /* syncReplyChunk*, head drains first */
+    size_t sync_pending_bytes;        /* clientReplyBlock->size summed across chunk blocks */
+    size_t sync_pending_overhead;     /* listNode + chunk + per-block-node bytes for OBL */
+    listNode *sync_clients_with_pending_node; /* node in server.sync_clients_with_pending, NULL if not linked */
+    int sync_rep_force_new_block; /* If set, _addReplyPayloadToList must allocate a new node instead of in-place extending the tail of c->reply. Cleared on first use within the command. Set by syncReplStartCommand when reply-holding is engaged AND c->reply was non-empty at command start. */
+    long long sync_pre_command_repl_offset; /* server.master_repl_offset captured at processCommand entry (before performEvictions) so call() can detect propagation that started before its own scope — e.g. eviction DELs */
     list *deferred_reply_errors;    /* Used for module thread safe contexts. */
     size_t sentlen;         /* Amount of bytes already sent in the current
                                buffer or object being sent. */
@@ -2339,6 +2365,8 @@ struct redisServer {
     off_t aof_last_incr_fsync_offset; /* AOF offset which is already requested to be synced to disk.
                                        * Compare with the aof_last_incr_size. */
     int aof_flush_sleep;            /* Micros to sleep before flush. (used by tests) */
+    int aof_flush_force_stall;      /* Skip flush so the durable offset stalls. (used by tests) */
+    int aof_flush_force_error;      /* Force flushAppendOnlyFile to fail. (used by tests) */
     int aof_rewrite_scheduled;      /* Rewrite once BGSAVE terminates. */
     sds aof_buf;      /* AOF buffer, written before entering the event loop */
     int aof_fd;       /* File descriptor of currently selected AOF file */
@@ -2516,6 +2544,14 @@ struct redisServer {
     /* Synchronous replication. */
     list *clients_waiting_acks;         /* Clients waiting in WAIT or WAITAOF. */
     int get_ack_from_slaves;            /* If true we send REPLCONF GETACK. */
+    /* Reply holding (appendfsync bgalways): clients with parked reply chunks,
+     * plus the metrics exported in INFO stats. */
+    list *sync_clients_with_pending;         /* clients with >=1 parked chunk */
+    long long sync_repl_pending_commands;    /* gauge: chunks currently parked */
+    long long sync_repl_hold_count;          /* counter: chunks ever parked */
+    long long sync_repl_hold_depth_sum;      /* counter: sum of queue depth at park time */
+    long long sync_repl_hold_latency_usec;   /* counter: total time chunks spent parked */
+    long long sync_repl_pending_disconnects; /* counter: clients dropped while holding chunks */
     long long repl_current_sync_attempts;    /* Number of times in current configuration, the replica attempted to sync since the last success. */
     long long repl_total_sync_attempts;      /* Number of times in current configuration, the replica attempted to sync to a master  */
     time_t repl_disconnect_start_time;       /* Unix time that master disconnection start */
@@ -3443,6 +3479,14 @@ void unlinkClient(client *c);
 void tryUnlinkClientFromPendingRefReply(client *c, int force);
 int writeToClient(client *c, int handler_installed);
 void linkClient(client *c);
+/* Reply holding until the local AOF fsync catches up (appendfsync bgalways). */
+int clientSyncRepActive(client *c);
+int syncReplWaitLocalAof(void);
+void syncReplStartCommand(client *c, size_t *inline_start, listNode **list_tail_start);
+void syncReplFinishCommand(client *c, long long woff, size_t inline_start, listNode *list_tail_start);
+void drainSyncPendingReplies(client *c);
+void freeSyncPendingReplies(client *c);
+void disconnectAllSyncRepPendingClients(const char *reason);
 void protectClient(client *c);
 void unprotectClient(client *c);
 client *lookupClientByID(uint64_t id);
@@ -3645,6 +3689,8 @@ int bg_unlink(const char *filename);
 
 /* AOF persistence */
 void flushAppendOnlyFile(int force);
+void aofAdvanceFsyncedReploff(long long offset);
+long long aofRefreshFsyncedReploff(void);
 void feedAppendOnlyFile(int dictid, robj **argv, int argc);
 void aofRemoveTempFile(pid_t childpid);
 int rewriteAppendOnlyFileBackground(void);

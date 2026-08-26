@@ -83,6 +83,7 @@ configEnum supervised_mode_enum[] = {
 configEnum aof_fsync_enum[] = {
     {"everysec", AOF_FSYNC_EVERYSEC},
     {"always", AOF_FSYNC_ALWAYS},
+    {"bgalways", AOF_FSYNC_BGALWAYS},
     {"no", AOF_FSYNC_NO},
     {NULL, 0}
 };
@@ -2767,10 +2768,12 @@ int updateRequirePass(const char **err) {
 
 int updateAppendFsync(const char **err) {
     UNUSED(err);
-    if (server.aof_fsync == AOF_FSYNC_ALWAYS) {
+    if (server.aof_fsync == AOF_FSYNC_ALWAYS ||
+        server.aof_fsync == AOF_FSYNC_BGALWAYS) {
         /* Wait for all bio jobs related to AOF to drain before proceeding. This prevents a race
          * between updates to `fsynced_reploff_pending` done in the main thread and those done on the
-         * worker thread. */
+         * worker thread. The main thread updates it in the synchronous ALWAYS path and in the
+         * BGALWAYS forced-fsync path. */
         bioDrainWorker(BIO_AOF_FSYNC);
     }
     return 1;

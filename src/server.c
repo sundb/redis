@@ -2072,14 +2072,30 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * If an initial rewrite is in progress then not all data is guaranteed to have actually been
      * persisted to disk yet, so we cannot update the field. We will wait for the rewrite to complete. */
     if (server.aof_state == AOF_ON && server.fsynced_reploff != -1) {
-        long long fsynced_reploff_pending;
-        atomicGet(server.fsynced_reploff_pending, fsynced_reploff_pending);
-        server.fsynced_reploff = fsynced_reploff_pending;
+        aofRefreshFsyncedReploff();
 
-        /* If we have blocked [WAIT]AOF clients, and fsynced_reploff changed, we want to try to
-         * wake them up ASAP. */
-        if (listLength(server.clients_waiting_acks) && prev_fsynced_reploff != server.fsynced_reploff)
+        /* If we have blocked [WAIT]AOF clients or clients holding parked reply
+         * chunks (appendfsync bgalways), and fsynced_reploff changed, we want to
+         * try to wake them up ASAP. */
+        if ((listLength(server.clients_waiting_acks) ||
+             listLength(server.sync_clients_with_pending))
+                && prev_fsynced_reploff != server.fsynced_reploff)
             dont_sleep = 1;
+    }
+
+    /* bgalways soft-fail: if an AOF write/fsync errored, held clients' writes
+     * can never become durable — disconnect them instead of letting them hang.
+     * Both error flags matter: the bio thread sets aof_bio_fsync_status on a
+     * background fsync failure, while a main-thread write() or forced-fsync
+     * failure sets aof_last_write_status. (New writes are already rejected with
+     * -MISCONF via writeCommandsDeniedByDiskError, which checks both.) */
+    if (server.aof_fsync == AOF_FSYNC_BGALWAYS &&
+        listLength(server.sync_clients_with_pending) > 0) {
+        int aof_bio_fsync_status;
+        atomicGet(server.aof_bio_fsync_status, aof_bio_fsync_status);
+        if (aof_bio_fsync_status == C_ERR ||
+            server.aof_last_write_status == C_ERR)
+            disconnectAllSyncRepPendingClients("AOF write/fsync error");
     }
 
     if (server.io_threads_num > 1) {
@@ -2456,6 +2472,8 @@ void initServerConfig(void) {
     server.aof_rewrite_base_size = 0;
     server.aof_rewrite_scheduled = 0;
     server.aof_flush_sleep = 0;
+    server.aof_flush_force_stall = 0;
+    server.aof_flush_force_error = 0;
     server.aof_last_fsync = time(NULL) * 1000;
     server.aof_cur_timestamp = 0;
     atomicSet(server.aof_bio_fsync_status,C_OK);
@@ -2953,6 +2971,15 @@ void resetServerStats(void) {
     server.stat_sync_full = 0;
     server.stat_sync_partial_ok = 0;
     server.stat_sync_partial_err = 0;
+    /* Reply-holding cumulative counters (appendfsync bgalways). These are
+     * statistics (rates and ratios are derived from them), so they belong here —
+     * cleared by CONFIG RESETSTAT — rather than in initServer. The live gauge
+     * (sync_repl_pending_commands) is NOT reset here: zeroing it while commands
+     * are in flight would drive it negative. */
+    server.sync_repl_hold_count = 0;
+    server.sync_repl_hold_depth_sum = 0;
+    server.sync_repl_hold_latency_usec = 0;
+    server.sync_repl_pending_disconnects = 0;
     for (j = 0; j < IO_THREADS_MAX_NUM; j++) {
         atomicSet(IOThreads[j].io_reads_processed, 0);
         atomicSet(IOThreads[j].io_writes_processed, 0);
@@ -3066,6 +3093,11 @@ void initServer(void) {
     server.pending_push_messages = listCreate();
     server.clients_waiting_acks = listCreate();
     server.get_ack_from_slaves = 0;
+    server.sync_clients_with_pending = listCreate();
+    server.sync_repl_pending_commands = 0; /* live gauge — one-time init only.
+        The cumulative counters (hold_count, hold_depth_sum, hold_latency_usec,
+        pending_disconnects) are zeroed by resetServerStats() below, so
+        CONFIG RESETSTAT clears them too. */
     server.paused_actions = 0;
     memset(server.client_pause_per_purpose, 0,
            sizeof(server.client_pause_per_purpose));
@@ -4055,6 +4087,17 @@ void call(client *c, int flags) {
     long long old_master_repl_offset = server.master_repl_offset;
     incrCommandStatsOnError(NULL, 0);
 
+    /* Reply holding (appendfsync bgalways): snapshot reply-buffer positions so
+     * we can later chunk this command's reply. Only meaningful at the outermost
+     * call() for a user connection — nested calls inside MULTI/EXEC, scripts, or
+     * RM_Call are NOT chunked individually; the outer command's chunk captures
+     * the entire reply at once. */
+    int sync_rep_active = (server.execution_nesting == 0) && clientSyncRepActive(c);
+    size_t sync_rep_inline_start = 0;
+    listNode *sync_rep_list_tail_start = NULL;
+    if (sync_rep_active)
+        syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+
     /* Use monotonic clock if available, and update cached time if needed */
     const int use_hw_clock = monotonicGetType() == MONOTONIC_CLOCK_HW;
     monotime monotonic_start = 0;
@@ -4292,6 +4335,43 @@ void call(client *c, int flags) {
     if (old_master_repl_offset != server.master_repl_offset)
         c->woff = server.master_repl_offset;
 
+    /* Reply holding (appendfsync bgalways): park this command's reply until the
+     * data it wrote is fsynced. The propagation window starts at
+     * sync_pre_command_repl_offset (captured in processCommand, before
+     * performEvictions) so DELs propagated by an eviction this command triggered
+     * are covered too — losing them on a crash would resurrect an evicted key
+     * with its old value, so their reply must wait for the same fsync. */
+    if (sync_rep_active && server.execution_nesting == 0 &&
+        (c->flags & CLIENT_BLOCKED)) {
+        /* The command blocked, so its reply has not been produced yet — it will
+         * be generated later in the unblock completion callback, OUTSIDE call()
+         * (e.g. a blocking-async FLUSH replying from unblockClientForAsyncFlush).
+         * The propagation has already happened (master_repl_offset advanced,
+         * c->woff is set), but chunking here would only park an empty
+         * placeholder: the real reply bytes don't exist yet and would still
+         * bypass it. So defer chunking to that callback, which brackets the
+         * reply with syncReplStartCommand/syncReplFinishCommand. Clear the
+         * force-new-block flag set at command entry, since no chunk is produced
+         * here to clear it. */
+        c->sync_rep_force_new_block = 0;
+    } else if (sync_rep_active && server.execution_nesting == 0) {
+        if (server.master_repl_offset > c->sync_pre_command_repl_offset) {
+            /* Propagation happened — chunk the reply on the resulting offset. */
+            c->woff = server.master_repl_offset;
+            server.latest_woff = c->woff;
+            syncReplFinishCommand(c, c->woff, sync_rep_inline_start,
+                                  sync_rep_list_tail_start);
+        } else if (c->sync_pending_replies &&
+                   listLength(c->sync_pending_replies) > 0) {
+            /* Nothing propagated, but the client still has pending chunks from
+             * earlier commands. RESP ordering requires this reply to queue
+             * behind them. Use woff=0 (passthrough — drains as soon as the head
+             * chunk does). */
+            syncReplFinishCommand(c, 0, sync_rep_inline_start,
+                                  sync_rep_list_tail_start);
+        }
+    }
+
     /* Client pause takes effect after a transaction has finished. This needs
      * to be located after everything is propagated. */
     if (!server.in_exec && server.client_pause_in_transaction) {
@@ -4498,6 +4578,12 @@ void preprocessCommand(client *c, pendingCommand *pcmd) {
  * other operations can be performed by the caller. Otherwise
  * if C_ERR is returned the client was destroyed (i.e. after QUIT). */
 int processCommand(client *c) {
+    /* Reply holding (appendfsync bgalways): snapshot master_repl_offset BEFORE
+     * performEvictions (and any other pre-call() logic) so call() can detect
+     * propagation that happened before its own scope started — e.g. eviction
+     * DELs triggered by this command. */
+    c->sync_pre_command_repl_offset = server.master_repl_offset;
+
     if (!scriptIsTimedout()) {
         /* Both EXEC and scripts call call() directly so there should be
          * no way in_exec or scriptIsRunning() is 1.
@@ -6863,7 +6949,13 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "slowlog_commands_time_ms_max:%.2f\r\n", (double)server.stat_slowlog_time_us_max / 1000,
             "slowlog_commands_time_ms_sum:%.2f\r\n", (double)server.stat_slowlog_time_us_sum / 1000,
             "hash_templates:%zu\r\n", hashTemplateRegistrySize(),
-            "hash_template_keys:%zu\r\n", hashTemplateKeyCount()));
+            "hash_template_keys:%zu\r\n", hashTemplateKeyCount(),
+            "sync_repl_pending_clients:%lu\r\n", listLength(server.sync_clients_with_pending),
+            "sync_repl_pending_commands:%lld\r\n", server.sync_repl_pending_commands,
+            "sync_repl_hold_count:%lld\r\n", server.sync_repl_hold_count,
+            "sync_repl_hold_depth_sum:%lld\r\n", server.sync_repl_hold_depth_sum,
+            "sync_repl_hold_latency_usec:%lld\r\n", server.sync_repl_hold_latency_usec,
+            "sync_repl_pending_disconnects:%lld\r\n", server.sync_repl_pending_disconnects));
         info = genRedisInfoStringACLStats(info);
         if (!server.cluster_enabled && server.cluster_compatibility_sample_ratio) {
             info = sdscatprintf(info, "cluster_incompatible_ops:%lld\r\n", server.stat_cluster_incompatible_ops);

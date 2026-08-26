@@ -1234,6 +1234,47 @@ void aof_background_fsync(int fd) {
     bioCreateFsyncJob(fd, server.master_repl_offset, 1);
 }
 
+/* Monotonically advance server.fsynced_reploff_pending to `offset` (never
+ * backwards) using an atomic compare-exchange max. Used by the bio fsync worker
+ * and by the BGALWAYS forced (synchronous) fsync path, so that an in-flight bio
+ * job completing after a synchronous fsync cannot regress the durable offset.
+ * Initialization/reset of fsynced_reploff_pending (e.g. the -1 pin in
+ * startAppendOnly) deliberately keeps using a plain atomicSet. */
+void aofAdvanceFsyncedReploff(long long offset) {
+    long long cur;
+    atomicGet(server.fsynced_reploff_pending, cur);
+    while (offset > cur) {
+        if (atomicCompareExchange(long long, server.fsynced_reploff_pending, cur, offset))
+            break;
+        /* CAS failed: `cur` was reloaded with the current value, retry. */
+    }
+}
+
+/* Copy the bio-advanced pending fsync offset (fsynced_reploff_pending) into
+ * server.fsynced_reploff. No-op during the initial AOF rewrite (fsynced_reploff
+ * pinned at -1) or when AOF is off. Returns the previous fsynced_reploff so
+ * callers can detect a change. Shared by beforeSleep and the bio-completion
+ * wakeup callback (aofBioFsyncNotify) so both apply the offset identically. */
+long long aofRefreshFsyncedReploff(void) {
+    long long prev = server.fsynced_reploff;
+    if (server.aof_state == AOF_ON && server.fsynced_reploff != -1) {
+        long long pending;
+        atomicGet(server.fsynced_reploff_pending, pending);
+        server.fsynced_reploff = pending;
+    }
+    return prev;
+}
+
+/* Bio-completion callback (runs on the main thread via the bio job_comp_pipe)
+ * after a BGALWAYS background fsync. Refresh fsynced_reploff and release held
+ * clients immediately, instead of waiting for the next beforeSleep/cron tick. */
+static void aofBioFsyncNotify(uint64_t arg, void *ptr) {
+    UNUSED(arg);
+    UNUSED(ptr);
+    aofRefreshFsyncedReploff();
+    processClientsWaitingReplicas();
+}
+
 /* Close the fd on the basis of aof_background_fsync. */
 void aof_background_fsync_and_close(int fd) {
     bioCreateCloseAofJob(fd, server.master_repl_offset, 1);
@@ -1401,6 +1442,25 @@ void flushAppendOnlyFile(int force) {
     int sync_in_progress = 0;
     mstime_t latency;
 
+    /* Test-only fault injection: simulate a main-thread AOF write/fsync failure
+     * (e.g. ENOSPC). We set the error status and bail before writing/fsyncing,
+     * so fsynced_reploff stalls and any held bgalways clients stay held — the
+     * production soft-fail scenario. Clearing the flag lets the next flush write
+     * the buffered data and recover to C_OK. */
+    if (server.aof_flush_force_error) {
+        if (server.aof_last_write_status == C_OK)
+            serverLog(LL_WARNING,"Simulating an AOF write error (debug aof-flush-force-error).");
+        server.aof_last_write_status = C_ERR;
+        server.aof_last_write_errno = ENOSPC;
+        return;
+    }
+
+    /* Test-only: stall the durable offset (skip write+fsync) without flagging an
+     * error, so a bgalways client's reply stays held while new writes are still
+     * accepted — used to set up the held-then-error scenario above. */
+    if (server.aof_flush_force_stall)
+        return;
+
     if (sdslen(server.aof_buf) == 0) {
         if (server.aof_last_incr_fsync_offset == server.aof_last_incr_size) {
             /* All data is fsync'd already: Update fsynced_reploff_pending just in case.
@@ -1428,14 +1488,19 @@ void flushAppendOnlyFile(int force) {
              * aof_fsync is changed from everysec to always. */
             if (server.aof_fsync == AOF_FSYNC_ALWAYS)
                 goto try_fsync;
+
+            if (server.aof_fsync == AOF_FSYNC_BGALWAYS)
+                goto try_fsync;
         }
         return;
     }
 
-    if (server.aof_fsync == AOF_FSYNC_EVERYSEC)
+    if (server.aof_fsync == AOF_FSYNC_EVERYSEC ||
+        server.aof_fsync == AOF_FSYNC_BGALWAYS)
         sync_in_progress = aofFsyncInProgress();
 
-    if (server.aof_fsync == AOF_FSYNC_EVERYSEC && !force) {
+    if ((server.aof_fsync == AOF_FSYNC_EVERYSEC ||
+         server.aof_fsync == AOF_FSYNC_BGALWAYS) && !force) {
         /* With this append fsync policy we do background fsyncing.
          * If the fsync is still in progress we can try to delay
          * the write for a couple of seconds. */
@@ -1575,7 +1640,8 @@ void flushAppendOnlyFile(int force) {
 try_fsync:
     /* Don't fsync if no-appendfsync-on-rewrite is set to yes and there are
      * children doing I/O in the background. */
-    if (server.aof_no_fsync_on_rewrite && hasActiveChildProcess())
+    if (server.aof_no_fsync_on_rewrite && hasActiveChildProcess() &&
+        server.aof_fsync != AOF_FSYNC_BGALWAYS)
         return;
 
     /* Perform the fsync if needed. */
@@ -1596,6 +1662,36 @@ try_fsync:
         server.aof_last_incr_fsync_offset = server.aof_last_incr_size;
         server.aof_last_fsync = server.mstime;
         atomicSet(server.fsynced_reploff_pending, server.master_repl_offset);
+    } else if (server.aof_fsync == AOF_FSYNC_BGALWAYS) {
+        if (force) {
+            /* Forced durability (shutdown / stopAppendOnly / rewrite-done): drain
+             * any in-flight bio fsync first so it can't regress the durable offset,
+             * then fsync synchronously. Soft-fail (no exit) so the everysec-style
+             * disk-error path can surface -MISCONF. */
+            bioDrainWorker(BIO_AOF_FSYNC);
+            if (redis_fsync(server.aof_fd) == -1) {
+                serverLog(LL_WARNING, "Can't persist AOF for fsync error when the "
+                    "AOF fsync policy is 'bgalways': %s.", strerror(errno));
+                server.aof_last_write_status = C_ERR;
+                server.aof_last_write_errno = errno;
+            } else {
+                server.aof_last_incr_fsync_offset = server.aof_last_incr_size;
+                server.aof_last_fsync = server.mstime;
+                aofAdvanceFsyncedReploff(server.master_repl_offset);
+            }
+        } else if (!aofFsyncInProgress() &&
+                   server.aof_last_incr_fsync_offset != server.aof_last_incr_size) {
+            /* Fire a background fsync after every flush (no 1s interval). The bio
+             * worker advances fsynced_reploff_pending; replies are gated on it. */
+            aof_background_fsync(server.aof_fd);
+            server.aof_last_incr_fsync_offset = server.aof_last_incr_size;
+            server.aof_last_fsync = server.mstime;
+            /* Wake the event loop when the fsync completes so held clients release
+             * promptly even with no other traffic (FIFO: this comp-rq runs after
+             * the fsync job on the same worker). Skip if nobody is waiting. */
+            if (listLength(server.sync_clients_with_pending) > 0)
+                bioCreateCompRq(BIO_WORKER_AOF_FSYNC, aofBioFsyncNotify, 0, NULL);
+        }
     } else if (server.aof_fsync == AOF_FSYNC_EVERYSEC &&
                server.mstime - server.aof_last_fsync >= 1000) {
         if (!sync_in_progress) {
