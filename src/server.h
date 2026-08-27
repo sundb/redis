@@ -3484,6 +3484,7 @@ int clientSyncRepActive(client *c);
 int syncReplWaitLocalAof(void);
 void syncReplStartCommand(client *c, size_t *inline_start, listNode **list_tail_start);
 void syncReplFinishCommand(client *c, long long woff, size_t inline_start, listNode *list_tail_start);
+void syncReplFinishOrDeferChunk(client *c, size_t sync_rep_inline_start, listNode *sync_rep_list_tail_start);
 void drainSyncPendingReplies(client *c);
 void freeSyncPendingReplies(client *c);
 void disconnectAllSyncRepPendingClients(const char *reason);

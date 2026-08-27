@@ -74,6 +74,25 @@ differs from classic `always`, where data is on disk before it is ever observabl
 - **Blocking-async FLUSH.** A SYNC `FLUSHALL`/`FLUSHDB` that runs as a blocking-async flush produces
   its `+OK` in the bio completion callback, outside `call()`; that reply is bracketed and chunked
   there (`unblockClientForAsyncFlush`) so it is held like any other write.
+- **Blocked-on-keys commands (BLPOP/BRPOPLPUSH/BLMOVE/BZPOPMIN/BZMPOP, blocking XREADGROUP).**
+  `unblockClientOnKey` (`blocked.c`) reissues the command by wrapping its own `call()` in an
+  `enterExecutionUnit`, so that reissued `call()` sees `execution_nesting != 0` and skips its usual
+  `syncReplStartCommand`/`syncReplFinishCommand` bracketing — and, more importantly, the reissue's own
+  propagation flush (`afterCommandEx` → `postExecutionUnitOperationsEx`, itself gated on
+  `execution_nesting == 0`) doesn't happen until `unblockClientOnKey`'s own `exitExecutionUnit()` +
+  `afterCommand()` run, i.e. strictly after that inner `call()` has already returned. So `call()` can
+  never correctly decide "did this propagate" for a reissue. `unblockClientOnKey` therefore does its
+  own `syncReplStartCommand`/… bracketing around the *whole* reissue (command + unblock handler),
+  finishing it (via the shared `syncReplFinishOrDeferChunk`) only after its own `afterCommand()` call —
+  the same "bracket outside `call()`" pattern as the blocking-async FLUSH case above. Without this, a
+  reissued command's reply is delivered as soon as it's produced, unheld, breaking "ack ⇒ durable" for
+  this entire command class (see `tests/integration/appendfsync-bgalways.tcl`, "a blocked command's
+  reply is held until its pop is durable").
+- **Not covered yet: module clients blocked on keys.** `moduleUnblockClientOnKey` /
+  `moduleHandleBlockedClients` (`module.c`) deliver a module's blocked-command reply straight from its
+  `reply_callback`, entirely outside `call()`, with no equivalent bracketing — so a module command that
+  blocks via `RM_BlockClientOnKeys` (or blocks generically) and propagates a write from its callback is
+  **not** held under `bgalways`. This is a known gap, tracked separately from the fix above.
 - **Not gated:** keyspace notifications, pub/sub messages, and client-side-caching invalidations are
   pushed outside the command reply path and are not held; under `bgalways` they may be emitted
   slightly before the corresponding write is durable.

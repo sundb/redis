@@ -5629,6 +5629,45 @@ void syncReplFinishCommand(client *c, long long woff, size_t inline_start, listN
     closeClientOnOutputBufferLimitReached(c, 1);
 }
 
+/* Reply holding (appendfsync bgalways): common tail end of a
+ * syncReplStartCommand/...(work)/finish bracket, once it is known that any
+ * propagation the bracketed work triggered has already been flushed into
+ * server.master_repl_offset (i.e. execution_nesting was back to 0 at the
+ * relevant afterCommand() call). Decides whether to chunk the accumulated
+ * reply on the resulting offset, queue it passthrough behind existing
+ * chunks, or defer to a later out-of-call() callback because the client
+ * blocked again. Shared by call() (top-level dispatch, where nesting is 0
+ * throughout so the flush already happened by the time this runs) and
+ * unblockClientOnKey (blocked.c; a blocked command's reissue wraps call() in
+ * its own enterExecutionUnit, so call() itself can't observe the flush —
+ * blocked.c calls this only after its own afterCommand()). */
+void syncReplFinishOrDeferChunk(client *c, size_t sync_rep_inline_start,
+                                 listNode *sync_rep_list_tail_start) {
+    if (c->flags & CLIENT_BLOCKED) {
+        /* The command blocked again, so its reply has not been produced yet —
+         * it will be generated later in the unblock completion callback,
+         * OUTSIDE call() (e.g. a blocking-async FLUSH replying from
+         * unblockClientForAsyncFlush). Chunking here would only park an empty
+         * placeholder, so defer to that callback, which brackets the reply
+         * itself. Clear the force-new-block flag set at command entry, since
+         * no chunk is produced here to clear it. */
+        c->sync_rep_force_new_block = 0;
+        return;
+    }
+    if (server.master_repl_offset > c->sync_pre_command_repl_offset) {
+        /* Propagation happened — chunk the reply on the resulting offset. */
+        c->woff = server.master_repl_offset;
+        server.latest_woff = c->woff;
+        syncReplFinishCommand(c, c->woff, sync_rep_inline_start, sync_rep_list_tail_start);
+    } else if (c->sync_pending_replies && listLength(c->sync_pending_replies) > 0) {
+        /* Nothing propagated, but the client still has pending chunks from
+         * earlier commands. RESP ordering requires this reply to queue behind
+         * them. Use woff=0 (passthrough — drains as soon as the head chunk
+         * does). */
+        syncReplFinishCommand(c, 0, sync_rep_inline_start, sync_rep_list_tail_start);
+    }
+}
+
 /* Splice one releasable pending chunk's blocks back into c->reply (head-of-
  * pending to tail-of-reply, preserving command order) and free the chunk,
  * updating all bookkeeping. The caller has already decided this chunk may be

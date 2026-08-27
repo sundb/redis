@@ -743,6 +743,21 @@ static void unblockClientOnKey(client *c, robj *key) {
     if (c->flags & CLIENT_PENDING_COMMAND) {
         c->flags &= ~CLIENT_PENDING_COMMAND;
         c->flags |= CLIENT_REEXECUTING_COMMAND;
+
+        /* Reply holding (appendfsync bgalways): this reissue's own call() runs
+         * with execution_nesting == 1 (the enterExecutionUnit below), so call()
+         * skips its usual syncReplStartCommand/syncReplFinishCommand bracketing
+         * (see the comment on sync_rep_active in call()) — that bracketing must
+         * happen here instead, around the whole reissue, so it can be finished
+         * only after propagation has actually flushed (which itself waits for
+         * execution_nesting == 0, i.e. after this function's own afterCommand()
+         * call below). */
+        int sync_rep_active = clientSyncRepActive(c);
+        size_t sync_rep_inline_start = 0;
+        listNode *sync_rep_list_tail_start = NULL;
+        if (sync_rep_active)
+            syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+
         /* We want the command processing and the unblock handler (see RM_Call 'K' option)
          * to run atomically, this is why we must enter the execution unit here before
          * running the command, and exit the execution unit after calling the unblock handler (if exists).
@@ -767,6 +782,10 @@ static void unblockClientOnKey(client *c, robj *key) {
         }
         exitExecutionUnit();
         afterCommand(c);
+
+        if (sync_rep_active)
+            syncReplFinishOrDeferChunk(c, sync_rep_inline_start, sync_rep_list_tail_start);
+
         /* Clear the CLIENT_REEXECUTING_COMMAND flag after the proc is executed. */
         c->flags &= ~CLIENT_REEXECUTING_COMMAND;
         server.current_client = old_client;

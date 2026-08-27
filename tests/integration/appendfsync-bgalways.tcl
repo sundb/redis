@@ -283,6 +283,79 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         }
     }
 
+    # A blocking command (BLPOP et al.) that wakes up on another client's write
+    # is reprocessed via unblockClientOnKey (blocked.c), which wraps the
+    # reissued call() in its own enterExecutionUnit so call()'s usual
+    # syncReplStartCommand/syncReplFinishCommand bracketing is skipped; the
+    # reissue's reply must still be held until durable, or a crash after the
+    # pop is acked but before it's fsynced would let the client believe it
+    # consumed data that the AOF never recorded.
+    test {bgalways: a blocked command's reply is held until its pop is durable} {
+        $r del bgk_blist
+        $r set bgk_blist_warm v
+        assert_equal [$r waitaof 1 0 5000] {1 0}
+
+        $r debug aof-flush-force-stall 1
+
+        set rd_blpop [redis_deferring_client]
+        $rd_blpop blpop bgk_blist 0
+        wait_for_condition 100 20 {
+            [s blocked_clients] >= 1
+        } else {
+            $rd_blpop close
+            $r debug aof-flush-force-stall 0
+            fail "BLPOP did not block"
+        }
+
+        set rd_lpush [redis_deferring_client]
+        set before [s sync_repl_hold_count]
+        $rd_lpush lpush bgk_blist v1
+        wait_for_condition 100 20 {
+            [s sync_repl_pending_clients] == 2 &&
+            [s sync_repl_hold_count] - $before == 2
+        } else {
+            $rd_blpop close
+            $rd_lpush close
+            $r debug aof-flush-force-stall 0
+            fail "LPUSH and the woken BLPOP's reissue were not both held\
+                (pending_clients=[s sync_repl_pending_clients]\
+                hold_delta=[expr {[s sync_repl_hold_count] - $before}])"
+        }
+
+        # The pop already happened locally (another client sees the list
+        # emptied) even though neither client has received its reply yet.
+        assert_equal [$r exists bgk_blist] 0
+
+        # Prove BLPOP's reply is really held: poll its socket for 100ms and
+        # verify no bytes arrive while the pop is not yet durable.
+        set fd [$rd_blpop channel]
+        set ::__bg_blpop_sig 0
+        fileevent $fd readable [list set ::__bg_blpop_sig data]
+        set timer [after 100 [list set ::__bg_blpop_sig timeout]]
+        vwait ::__bg_blpop_sig
+        after cancel $timer
+        fileevent $fd readable {}
+        if {$::__bg_blpop_sig ne "timeout"} {
+            $rd_blpop close
+            $rd_lpush close
+            $r debug aof-flush-force-stall 0
+            fail "BLPOP reply arrived before its pop was durable"
+        }
+
+        # Release the stall -> the pop's AOF write is fsynced -> both replies
+        # arrive.
+        $r debug aof-flush-force-stall 0
+        assert_equal {bgk_blist v1} [$rd_blpop read]
+        assert_equal 1 [$rd_lpush read]
+        $rd_blpop close
+        $rd_lpush close
+        wait_for_condition 50 20 {
+            [s sync_repl_pending_clients] == 0
+        } else {
+            fail "pending clients did not drain after the pop became durable"
+        }
+    }
+
     test {bgalways: held client is disconnected on a main-thread AOF error} {
         # A held reply whose data can never become durable must be disconnected,
         # not left to hang forever. A main-thread write /

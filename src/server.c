@@ -4091,7 +4091,15 @@ void call(client *c, int flags) {
      * we can later chunk this command's reply. Only meaningful at the outermost
      * call() for a user connection — nested calls inside MULTI/EXEC, scripts, or
      * RM_Call are NOT chunked individually; the outer command's chunk captures
-     * the entire reply at once. */
+     * the entire reply at once. A blocked command being reprocessed after unblock
+     * is deliberately NOT chunked here even though it's conceptually the top-level
+     * command: unblockClientOnKey's own enterExecutionUnit wrapper (blocked.c) keeps
+     * execution_nesting at 1 for its whole duration, which defers this command's
+     * propagation flush (afterCommandEx -> postExecutionUnitOperationsEx, itself
+     * gated on execution_nesting == 0) until AFTER call() returns to blocked.c — so
+     * "did this propagate" can't be answered from in here. blocked.c does its own
+     * syncReplStartCommand/syncReplFinishCommand bracketing around the whole
+     * reissue instead, once nesting is truly back to 0. */
     int sync_rep_active = (server.execution_nesting == 0) && clientSyncRepActive(c);
     size_t sync_rep_inline_start = 0;
     listNode *sync_rep_list_tail_start = NULL;
@@ -4341,36 +4349,8 @@ void call(client *c, int flags) {
      * performEvictions) so DELs propagated by an eviction this command triggered
      * are covered too — losing them on a crash would resurrect an evicted key
      * with its old value, so their reply must wait for the same fsync. */
-    if (sync_rep_active && server.execution_nesting == 0 &&
-        (c->flags & CLIENT_BLOCKED)) {
-        /* The command blocked, so its reply has not been produced yet — it will
-         * be generated later in the unblock completion callback, OUTSIDE call()
-         * (e.g. a blocking-async FLUSH replying from unblockClientForAsyncFlush).
-         * The propagation has already happened (master_repl_offset advanced,
-         * c->woff is set), but chunking here would only park an empty
-         * placeholder: the real reply bytes don't exist yet and would still
-         * bypass it. So defer chunking to that callback, which brackets the
-         * reply with syncReplStartCommand/syncReplFinishCommand. Clear the
-         * force-new-block flag set at command entry, since no chunk is produced
-         * here to clear it. */
-        c->sync_rep_force_new_block = 0;
-    } else if (sync_rep_active && server.execution_nesting == 0) {
-        if (server.master_repl_offset > c->sync_pre_command_repl_offset) {
-            /* Propagation happened — chunk the reply on the resulting offset. */
-            c->woff = server.master_repl_offset;
-            server.latest_woff = c->woff;
-            syncReplFinishCommand(c, c->woff, sync_rep_inline_start,
-                                  sync_rep_list_tail_start);
-        } else if (c->sync_pending_replies &&
-                   listLength(c->sync_pending_replies) > 0) {
-            /* Nothing propagated, but the client still has pending chunks from
-             * earlier commands. RESP ordering requires this reply to queue
-             * behind them. Use woff=0 (passthrough — drains as soon as the head
-             * chunk does). */
-            syncReplFinishCommand(c, 0, sync_rep_inline_start,
-                                  sync_rep_list_tail_start);
-        }
-    }
+    if (sync_rep_active && server.execution_nesting == 0)
+        syncReplFinishOrDeferChunk(c, sync_rep_inline_start, sync_rep_list_tail_start);
 
     /* Client pause takes effect after a transaction has finished. This needs
      * to be located after everything is propagated. */
