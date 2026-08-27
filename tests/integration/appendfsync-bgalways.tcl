@@ -159,6 +159,66 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         assert_equal [$r waitaof 1 0 5000] {1 0}
     }
 
+    # aofRefreshFsyncedReploff() only advances fsynced_reploff once aof_state is
+    # back to AOF_ON, so while a background AOFRW (triggered here by re-enabling
+    # appendonly on a running server, via startAppendOnly ->
+    # rewriteAppendOnlyFileBackground) is in AOF_WAIT_REWRITE, fsynced_reploff
+    # must be pinned at -1 -- the sentinel syncReplWaitLocalAof() checks to
+    # suppress gating -- or every write issued during the rewrite would sit
+    # below any write's offset and get held until the whole rewrite finishes,
+    # contradicting docs/appendfsync-bgalways.md's "gating is suppressed for
+    # the whole rewrite".
+    test {bgalways: gating is suppressed for the whole initial AOF rewrite} {
+        $r config set appendonly no
+        # Control the dataset size so the artificial per-key rewrite delay
+        # below adds a bounded, predictable amount of time regardless of how
+        # many keys earlier tests in this file left behind.
+        $r flushall
+        $r set bgk_rw_seed v
+        ;# Slow the (forked) rewrite down so we have a reliable window in
+        ;# which aof_state is AOF_WAIT_REWRITE to probe.
+        $r config set rdb-key-save-delay 500000
+
+        $r config set appendonly yes
+        wait_for_condition 100 20 {
+            [s aof_rewrite_in_progress] == 1
+        } else {
+            $r config set rdb-key-save-delay 0
+            fail "AOF rewrite did not start"
+        }
+
+        set before [s sync_repl_hold_count]
+        set rd [redis_deferring_client]
+        $rd set bgk_during_rw v
+        assert_equal [$rd read] OK
+        set hold_delta [expr {[s sync_repl_hold_count] - $before}]
+        $rd close
+
+        # If the write's reply was wrongly held (gating not suppressed), $rd
+        # read above only returned because it waited out the whole slowed-down
+        # rewrite -- by which point aof_rewrite_in_progress has already
+        # dropped back to 0, which would otherwise mask the bug as a timing
+        # flake. Check the hold counter (unambiguous either way) first.
+        if {$hold_delta != 0} {
+            $r config set rdb-key-save-delay 0
+            fail "write issued during the initial AOF rewrite was held\
+                (hold_delta=$hold_delta) instead of having gating suppressed"
+        }
+        if {[s aof_rewrite_in_progress] != 1} {
+            $r config set rdb-key-save-delay 0
+            fail "rewrite already finished by the time the write returned;\
+                rdb-key-save-delay was not slow enough to exercise the gap"
+        }
+
+        $r config set rdb-key-save-delay 0
+        wait_for_condition 100 50 {
+            [s aof_rewrite_in_progress] == 0
+        } else {
+            fail "AOF rewrite did not finish"
+        }
+        assert_equal [$r waitaof 1 0 5000] {1 0}
+    }
+
     test {classic appendfsync always: writes are NOT chunked (stays synchronous)} {
         $r config set appendfsync always
         set before [s sync_repl_hold_count]

@@ -3327,7 +3327,18 @@ int rewriteAppendOnlyFileBackground(void) {
         /* Set the initial repl_offset, which will be applied to fsynced_reploff
          * when AOFRW finishes (after possibly being updated by a bio thread) */
         atomicSet(server.fsynced_reploff_pending, server.master_repl_offset);
-        server.fsynced_reploff = 0;
+
+        /* Pin fsynced_reploff at -1 (not 0) for the duration of the rewrite:
+         * aofRefreshFsyncedReploff() only advances it once aof_state is back to
+         * AOF_ON, so a plain 0 here would sit below every write's offset until
+         * the rewrite completes — under appendfsync bgalways that gates every
+         * write's reply (syncReplWaitLocalAof() checks fsynced_reploff != -1),
+         * holding all of them for the whole rewrite instead of the intended
+         * "gating suppressed during the initial rewrite" (see beforeSleep's
+         * matching fsynced_reploff != -1 check and docs/appendfsync-bgalways.md).
+         * -1 is the same "not yet trustworthy" sentinel already used for a full
+         * resync (replicationSetMaster). */
+        server.fsynced_reploff = -1;
     }
 
     server.stat_aof_rewrites++;
