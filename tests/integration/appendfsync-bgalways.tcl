@@ -467,6 +467,62 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         $r set recovered v
         assert_equal [$r waitaof 1 0 5000] {1 0}
     }
+
+    test {bgalways: FLUSHALL blocked in BLOCKED_LAZYFREE is disconnected (not acked) on demotion to replica} {
+        # A default (SYNC) FLUSHALL already propagated (forceCommandPropagation
+        # runs before blockClientForAsyncFlush() suspends the client) while it
+        # sits in BLOCKED_LAZYFREE waiting for the BIO lazyfree completion. If a
+        # REPLICAOF demotes this instance to a replica while that client is
+        # still blocked, disconnectAllBlockedClients() must not unconditionally
+        # answer +OK for a write that disconnectAllSyncRepPendingClients()
+        # (called right after, in replicationSetMaster()) is specifically
+        # designed to avoid acking.
+        $r debug aof-flush-force-stall 1
+
+        # A big keyspace makes the BIO job that frees the old dict take long
+        # enough to reliably observe the client still blocked.
+        r debug populate 1000000
+
+        set rd [redis_deferring_client]
+        set before_disc [s sync_repl_pending_disconnects]
+        $rd flushall
+        wait_for_condition 200 20 {
+            [s lazyfree_pending_objects] > 0 &&
+            [s blocked_clients] >= 1
+        } else {
+            $rd close
+            $r debug aof-flush-force-stall 0
+            fail "FLUSHALL did not block in BLOCKED_LAZYFREE with a pending lazyfree job"
+        }
+
+        # Demote to replica while the FLUSHALL client is still blocked. The
+        # replicaof handshake itself doesn't need to succeed for
+        # replicationSetMaster()'s synchronous demotion bookkeeping to run.
+        $r replicaof 127.0.0.1 1
+
+        # The FLUSHALL client must be disconnected, not answered with +OK.
+        set got_ok 0
+        catch {
+            if {[$rd read] eq {OK}} { set got_ok 1 }
+        }
+        assert_equal 0 $got_ok
+        $rd close
+
+        wait_for_condition 100 20 {
+            [s sync_repl_pending_disconnects] > $before_disc
+        } else {
+            fail "FLUSHALL client held on a since-demoted write was not\
+                disconnected via disconnectAllSyncRepPendingClients"
+        }
+
+        $r debug aof-flush-force-stall 0
+        $r replicaof no one
+        wait_for_condition 100 20 {
+            [s lazyfree_pending_objects] == 0
+        } else {
+            fail "lazyfree did not finish draining"
+        }
+    }
 }
 
 # Module clients unblocked via RM_BlockClientOnKeys() reply straight from their

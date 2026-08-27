@@ -69,11 +69,21 @@ differs from classic `always`, where data is on disk before it is ever observabl
 - **Config switching.** Switching `appendfsync` into/out of `always`/`bgalways` drains the bio AOF
   worker first. Switching away from `bgalways` releases held replies under the new policy's
   semantics.
-- **Demotion to replica.** `REPLICAOF` disconnects clients still holding chunks: the offset they wait
-  on belongs to the old primary's offset space and the write may be rolled back by the new master.
+- **Demotion to replica.** `REPLICAOF` disconnects clients still holding chunks
+  (`disconnectAllSyncRepPendingClients`): the offset they wait on belongs to the old primary's offset
+  space and the write may be rolled back by the new master. This must also catch a blocking-async
+  FLUSH client still sitting in `BLOCKED_LAZYFREE` when the demotion happens, i.e. before the BIO
+  lazyfree job has completed and produced that reply — `disconnectAllBlockedClients()`'s
+  `BLOCKED_LAZYFREE` branch (`blocked.c`) brackets that `+OK`/empty-array the same way
+  `unblockClientForAsyncFlush` does (gated on `c->woff`, the offset the FLUSH already propagated
+  before blocking), so if the reply ends up chunked, the `disconnectAllSyncRepPendingClients` sweep
+  right after (in `replicationSetMaster`) catches this client too, instead of unconditionally
+  answering `+OK` for a write that is about to vanish.
 - **Blocking-async FLUSH.** A SYNC `FLUSHALL`/`FLUSHDB` that runs as a blocking-async flush produces
   its `+OK` in the bio completion callback, outside `call()`; that reply is bracketed and chunked
-  there (`unblockClientForAsyncFlush`) so it is held like any other write.
+  there (`unblockClientForAsyncFlush`) so it is held like any other write. See "Demotion to replica"
+  above for the same reply produced instead by `disconnectAllBlockedClients()`, on the still-blocked
+  path.
 - **Blocked-on-keys commands (BLPOP/BRPOPLPUSH/BLMOVE/BZPOPMIN/BZMPOP, blocking XREADGROUP).**
   `unblockClientOnKey` (`blocked.c`) reissues the command by wrapping its own `call()` in an
   `enterExecutionUnit`, so that reissued `call()` sees `execution_nesting != 0` and skips its usual

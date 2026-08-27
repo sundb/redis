@@ -304,11 +304,34 @@ void disconnectAllBlockedClients(void) {
                 continue;
 
             if (c->bstate.btype == BLOCKED_LAZYFREE) {
+                /* Reply holding (appendfsync bgalways): the FLUSH already
+                 * propagated and advanced master_repl_offset (captured in
+                 * c->woff) before this client blocked (forceCommandPropagation()
+                 * runs inside the original call(), before
+                 * blockClientForAsyncFlush() suspends it) — same situation as
+                 * the normal completion path in unblockClientForAsyncFlush(),
+                 * so gate this reply on c->woff the same way. Without this, the
+                 * client would get an unconditional +OK for a write that
+                 * disconnectAllSyncRepPendingClients() (called right after this
+                 * loop, in replicationSetMaster()) is specifically trying to
+                 * avoid acking. If the reply does end up chunked here, that
+                 * call picks this client up via server.sync_clients_with_pending
+                 * and disconnects it instead of letting the +OK go out. */
+                size_t sync_rep_inline_start = 0;
+                listNode *sync_rep_list_tail_start = NULL;
+                int sync_rep_active = clientSyncRepActive(c);
+                if (sync_rep_active)
+                    syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+
                 /* SFLUSH: reply with empty array, FLUSH*: reply with OK */
                 if (c->cmd && c->cmd->proc == sflushCommand)
                     addReplyArrayLen(c, 0);
                 else
                     addReply(c, shared.ok);
+
+                if (sync_rep_active)
+                    syncReplFinishCommand(c, c->woff, sync_rep_inline_start, sync_rep_list_tail_start);
+
                 updateStatsOnUnblock(c, 0, 0, 0);
                 c->flags &= ~CLIENT_PENDING_COMMAND;
                 unblockClient(c, 1);
