@@ -96,9 +96,12 @@ differs from classic `always`, where data is on disk before it is ever observabl
 - **Not gated:** keyspace notifications, pub/sub messages, and client-side-caching invalidations are
   pushed outside the command reply path and are not held; under `bgalways` they may be emitted
   slightly before the corresponding write is durable.
-- **Pipelines / io-threads.** Every write goes through reply chunking, so the
-  `sync_rep_force_new_block` RESP-ordering guard is exercised on the hot path; mixed read/write
-  pipelines with `io-threads > 1` are part of the test matrix.
+- **Pipelines / io-threads.** Every write goes through reply chunking, so the RESP-ordering guards
+  are exercised on the hot path: `sync_rep_force_new_block` forces a fresh node instead of
+  in-place-extending a prior reply's tail block, and `sync_rep_boundary_node` (same lifetime, but not
+  one-shot) stops `setDeferredReply()` from merging a deferred header — e.g. `KEYS`/`SCAN`'s array
+  length, filled in only after the array's elements were already appended — backward into that same
+  prior block. Mixed read/write pipelines with `io-threads > 1` are part of the test matrix.
 
 ## Configuration
 - `appendfsync bgalways` — enable. Default remains `everysec`; classic `always` is unchanged.

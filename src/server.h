@@ -1576,6 +1576,7 @@ typedef struct client {
     size_t sync_pending_overhead;     /* listNode + chunk + per-block-node bytes for OBL */
     listNode *sync_clients_with_pending_node; /* node in server.sync_clients_with_pending, NULL if not linked */
     int sync_rep_force_new_block; /* If set, _addReplyPayloadToList must allocate a new node instead of in-place extending the tail of c->reply. Cleared on first use within the command. Set by syncReplStartCommand when reply-holding is engaged AND c->reply was non-empty at command start. */
+    listNode *sync_rep_boundary_node; /* The c->reply tail node (if any) that existed before the current command started, captured by syncReplStartCommand. setDeferredReply must not backward-merge a deferred header into this node, since it belongs to a prior command's reply and may already be unheld/in flight. Unlike sync_rep_force_new_block this is not one-shot: it stays valid for the whole command, since the deferred header is typically filled in only after this command's own elements were appended (which already consumes sync_rep_force_new_block for unrelated reasons). Cleared alongside sync_rep_force_new_block. */
     long long sync_pre_command_repl_offset; /* server.master_repl_offset captured at processCommand entry (before performEvictions) so call() can detect propagation that started before its own scope — e.g. eviction DELs */
     list *deferred_reply_errors;    /* Used for module thread safe contexts. */
     size_t sentlen;         /* Amount of bytes already sent in the current

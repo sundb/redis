@@ -222,6 +222,7 @@ client *createClient(connection *conn) {
     c->sync_pending_bytes = 0;
     c->sync_pending_overhead = 0;
     c->sync_rep_force_new_block = 0;
+    c->sync_rep_boundary_node = NULL;
     c->sync_clients_with_pending_node = NULL;
     c->sync_pre_command_repl_offset = 0;
     initClientBlockingState(c);
@@ -1028,7 +1029,13 @@ void setDeferredReply(client *c, void *node, const char *s, size_t length) {
      * - The next node is non-NULL,
      * - It has enough room already allocated
      * - And not too large (avoid large memmove) */
-    if (ln->prev != NULL && (prev = listNodeValue(ln->prev)) &&
+    /* Reply holding: never merge backward into the boundary node captured at
+     * this command's start — that node belongs to a prior command's reply
+     * and may already be unheld/in flight, so splicing this command's bytes
+     * onto it would send them out ahead of the fsync gating this command's
+     * own reply. */
+    if (ln->prev != c->sync_rep_boundary_node && ln->prev != NULL &&
+        (prev = listNodeValue(ln->prev)) &&
         prev->used < prev->size && !prev->buf_encoded)
     {
         size_t len_to_copy = prev->size - prev->used;
@@ -5508,6 +5515,15 @@ static void freeSyncReplyChunkContents(client *c, syncReplyChunk *chunk) {
 void syncReplStartCommand(client *c, size_t *inline_start, listNode **list_tail_start) {
     *inline_start = c->bufpos;
     *list_tail_start = listLast(c->reply);
+    /* Remembered for the whole command (unlike sync_rep_force_new_block,
+     * which is one-shot): guards setDeferredReply's backward-merge path.
+     * addReplyDeferredLen() leaves a NULL placeholder node in c->reply, so
+     * the very first _addReplyPayloadToList() call for this command's own
+     * elements (e.g. KEYS' matched keys) already sees tail==NULL and
+     * consumes/clears sync_rep_force_new_block without needing it — leaving
+     * it unset by the time setDeferredReply() later backfills the
+     * placeholder's header bytes. A persistent node pointer survives that. */
+    c->sync_rep_boundary_node = *list_tail_start;
     /* If c->reply already has nodes when this command starts, this command's
      * first _addReplyPayloadToList() would extend that prior tail node in place.
      * If this command's reply is then chunked, syncReplFinishCommand() only
@@ -5552,8 +5568,10 @@ void syncReplStartCommand(client *c, size_t *inline_start, listNode **list_tail_
 void syncReplFinishCommand(client *c, long long woff, size_t inline_start, listNode *list_tail_start) {
     /* Clear the force-new-block flag for safety: if the command produced no
      * bytes, _addReplyPayloadToList was never called and the flag would stick
-     * into the next command. */
+     * into the next command. Also clear the boundary node so it doesn't stick
+     * into the next command's setDeferredReply calls. */
     c->sync_rep_force_new_block = 0;
+    c->sync_rep_boundary_node = NULL;
 
     size_t inline_delta = ((size_t)c->bufpos > inline_start)
         ? (size_t)c->bufpos - inline_start : 0;
@@ -5649,9 +5667,10 @@ void syncReplFinishOrDeferChunk(client *c, size_t sync_rep_inline_start,
          * OUTSIDE call() (e.g. a blocking-async FLUSH replying from
          * unblockClientForAsyncFlush). Chunking here would only park an empty
          * placeholder, so defer to that callback, which brackets the reply
-         * itself. Clear the force-new-block flag set at command entry, since
-         * no chunk is produced here to clear it. */
+         * itself. Clear the force-new-block flag and boundary node set at
+         * command entry, since no chunk is produced here to clear them. */
         c->sync_rep_force_new_block = 0;
+        c->sync_rep_boundary_node = NULL;
         return;
     }
     if (server.master_repl_offset > c->sync_pre_command_repl_offset) {
@@ -5774,6 +5793,7 @@ void freeSyncPendingReplies(client *c) {
     c->sync_pending_replies = NULL;
     c->sync_pending_bytes = 0;
     c->sync_rep_force_new_block = 0;
+    c->sync_rep_boundary_node = NULL;
     c->sync_pending_overhead = 0;
     unlinkClientFromSyncPending(c);
 }
