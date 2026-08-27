@@ -109,6 +109,24 @@ differs from classic `always`, where data is on disk before it is ever observabl
   half of `syncReplFinishOrDeferChunk`, extracted so both share the chunk-vs-passthrough logic without
   the `CLIENT_BLOCKED` gate), using a locally captured pre-callback `server.master_repl_offset` in place
   of `call()`'s `sync_pre_command_repl_offset`.
+- **Module clients replying via a thread-safe context.** A module can also reply to a blocked client
+  from a background thread via `RM_GetThreadSafeContext(bc)` + `RM_ReplyWith*()` — e.g. run a write
+  through `RM_Call()` while holding the GIL, release it, then reply — instead of (or as well as) using
+  `bc->reply_callback`. `RM_ReplyWith*()` in that mode writes into a separate fake client
+  (`bc->reply_client`), which `moduleHandleBlockedClients()` splices into the real client with
+  `AddReplyFromClient()` once the module unblocks it — a second, distinct reply path in the same
+  function as the `reply_callback` case above, and the one place that generic-path module clients
+  reaching this function without a `reply_callback` (the common background-thread pattern) actually get
+  their reply delivered. Unlike the `reply_callback` case, there is no callback boundary here to snapshot
+  a "before" replication offset around — by the time this splice runs, the background thread's
+  `RM_Call()` (if any) has already completed and already advanced `server.master_repl_offset`, and the
+  module API has no way to tell us whether it did. This function already assumes the worst case for a
+  different reason a few lines later (`c->woff = server.master_repl_offset; /* we don't know if this
+  blocked client propagated anything ... assume it did */`); the splice is bracketed
+  (`syncReplStartCommand`/`syncReplFinishCommand`) on that same current-offset assumption, but only when
+  `bc->reply_client` actually accumulated bytes — a keys-blocked client that already replied via
+  `reply_callback` reaches this same splice with an empty `reply_client`, and bracketing that
+  unconditionally would park a superfluous empty chunk on every module unblock.
 - **Not gated:** keyspace notifications, pub/sub messages, and client-side-caching invalidations are
   pushed outside the command reply path and are not held; under `bgalways` they may be emitted
   slightly before the corresponding write is durable.

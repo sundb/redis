@@ -9029,7 +9029,42 @@ void moduleHandleBlockedClients(void) {
          * replies to send to the client in a thread safe context.
          * We need to glue such replies to the client output buffer and
          * free the temporary client we just used for the replies. */
-        if (c) AddReplyFromClient(c, bc->reply_client);
+        if (c) {
+            /* Reply holding (appendfsync bgalways): bytes in bc->reply_client
+             * come from RM_ReplyWith*() calls made through a thread-safe
+             * context, typically from a background thread that already ran
+             * RM_Call() (propagating a write) before RM_UnblockClient() --
+             * unlike bc->reply_callback above, there's no callback boundary
+             * here to bracket with a "before" offset snapshot, and the
+             * module API doesn't tell us whether this blocked client
+             * propagated anything. Matching the same "we don't know, so
+             * assume it did" call a few lines below (c->woff =
+             * server.master_repl_offset), gate this splice on the current
+             * offset too, so a write this bc did isn't acked before it's
+             * durable.
+             *
+             * Only bracket when reply_client actually accumulated something:
+             * a keys-blocked client already replied via reply_callback above
+             * (bracketed there) and reply_client is empty here, so
+             * unconditionally bracketing would park a superfluous empty
+             * chunk on every module unblock, not just the thread-safe-context
+             * reply case this is for. */
+            int reply_client_has_data = bc->reply_client->bufpos > 0 ||
+                                         listLength(bc->reply_client->reply) > 0;
+            size_t sync_rep_inline_start = 0;
+            listNode *sync_rep_list_tail_start = NULL;
+            int sync_rep_active = reply_client_has_data && clientSyncRepActive(c);
+            if (sync_rep_active)
+                syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+
+            AddReplyFromClient(c, bc->reply_client);
+
+            if (sync_rep_active) {
+                c->woff = server.master_repl_offset;
+                server.latest_woff = c->woff;
+                syncReplFinishCommand(c, c->woff, sync_rep_inline_start, sync_rep_list_tail_start);
+            }
+        }
         moduleReleaseTempClient(bc->reply_client);
         moduleReleaseTempClient(bc->thread_safe_ctx_client);
 

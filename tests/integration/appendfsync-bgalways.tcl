@@ -602,3 +602,72 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
         }
     }
 }
+
+# Modules also reply to a blocked client from a background thread via a
+# thread-safe context (RM_GetThreadSafeContext + RM_ReplyWith*), writing into
+# a separate fake client (bc->reply_client) instead of through
+# bc->reply_callback. moduleHandleBlockedClients() splices that accumulated
+# reply into the real client with AddReplyFromClient() -- a distinct code
+# path from the reply_callback case above, and one with no callback boundary
+# to bracket a "before propagation" offset snapshot around, since the
+# background thread's RM_Call (and the RM_ReplyWith*() that follows it) both
+# already ran by the time the main thread gets around to this splice.
+# blockedclient.so's do_bg_rm_call_format is a ready-made example: its worker
+# thread runs RM_Call with the caller-supplied format (so "!" forces
+# replication) and then replies via RM_ReplyWithCallReply on the thread-safe
+# context, with reply_callback left NULL.
+set testmodule2 [file normalize tests/modules/blockedclient.so]
+start_server [list tags {"aof bgalways modules external:skip"} overrides [list appendonly yes appendfsync bgalways auto-aof-rewrite-percentage 0 loadmodule "$testmodule2"]] {
+    set r [srv 0 client]
+
+    test {bgalways: a module's thread-safe-context blocked reply is held until its propagated write is durable} {
+        $r del bgk_thrd
+        $r set bgk_thrd_warm v
+        assert_equal [$r waitaof 1 0 5000] {1 0}
+
+        $r debug aof-flush-force-stall 1
+
+        set rd [redis_deferring_client]
+        set before [s sync_repl_hold_count]
+        $rd do_bg_rm_call_format ! set bgk_thrd v1
+        wait_for_condition 100 20 {
+            [s sync_repl_pending_clients] == 1 &&
+            [s sync_repl_hold_count] > $before
+        } else {
+            $rd close
+            $r debug aof-flush-force-stall 0
+            fail "do_bg_rm_call_format's reply was not routed through the\
+                reply-holding path"
+        }
+
+        # The SET already took effect locally even though the calling client
+        # hasn't received its reply yet.
+        assert_equal {v1} [$r get bgk_thrd]
+
+        # Prove the reply is really held: poll its socket for 100ms and
+        # verify no bytes arrive while the write is not yet durable.
+        set fd [$rd channel]
+        set ::__bg_thrd_sig 0
+        fileevent $fd readable [list set ::__bg_thrd_sig data]
+        set timer [after 100 [list set ::__bg_thrd_sig timeout]]
+        vwait ::__bg_thrd_sig
+        after cancel $timer
+        fileevent $fd readable {}
+        if {$::__bg_thrd_sig ne "timeout"} {
+            $rd close
+            $r debug aof-flush-force-stall 0
+            fail "thread-safe-context reply arrived while the write was not\
+                yet durable"
+        }
+
+        # Release the stall -> the write is durable -> the reply arrives.
+        $r debug aof-flush-force-stall 0
+        assert_equal {OK} [$rd read]
+        $rd close
+        wait_for_condition 50 20 {
+            [s sync_repl_pending_clients] == 0
+        } else {
+            fail "pending clients did not drain after the write became durable"
+        }
+    }
+}
