@@ -8664,9 +8664,38 @@ int moduleTryServeClientBlockedOnKey(client *c, robj *key) {
     ctx.blocked_privdata = bc->privdata;
     ctx.client = bc->client;
     ctx.blocked_client = bc;
+
+    /* Reply holding (appendfsync bgalways): reply_callback writes straight
+     * into c's reply buffer and may itself propagate a write (RM_Call or
+     * RM_Replicate*), but this whole unblock path never goes through call(),
+     * so none of call()'s own syncReplStartCommand/syncReplFinishCommand
+     * bracketing applies here. Without this, a module command that
+     * propagates from its callback would have its reply reach the client
+     * before that write is durable. Bracket the callback and decide the
+     * chunk from whether it advanced server.master_repl_offset, mirroring
+     * call()'s own decision.
+     *
+     * moduleCreateContext() above already called enterExecutionUnit(1,0), so
+     * any propagation reply_callback queues (e.g. via RM_ReplicateVerbatim)
+     * is only actually flushed into server.master_repl_offset by
+     * moduleFreeContext()'s matching exitExecutionUnit()+
+     * postExecutionUnitOperations() once nesting drops back to 0 — which
+     * must therefore run *before* we compare offsets, not after. */
+    int sync_rep_active = clientSyncRepActive(c);
+    size_t sync_rep_inline_start = 0;
+    listNode *sync_rep_list_tail_start = NULL;
+    long long pre_repl_offset = server.master_repl_offset;
+    if (sync_rep_active)
+        syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+
     if (bc->reply_callback(&ctx,(void**)c->argv,c->argc) == REDISMODULE_OK)
         served = 1;
+
     moduleFreeContext(&ctx);
+
+    if (sync_rep_active)
+        syncReplFinishByOffset(c, pre_repl_offset, sync_rep_inline_start, sync_rep_list_tail_start);
+
     return served;
 }
 
@@ -8958,9 +8987,30 @@ void moduleHandleBlockedClients(void) {
             ctx.blocked_client = bc;
             monotime replyTimer;
             elapsedStart(&replyTimer);
+
+            /* Reply holding (appendfsync bgalways): see the matching bracket
+             * in moduleTryServeClientBlockedOnKey() — this callback also
+             * writes straight into c's reply buffer outside call(), so it
+             * needs its own bracketing rather than relying on call()'s.
+             * moduleFreeContext() must run before syncReplFinishByOffset():
+             * moduleCreateContext() above already incremented execution
+             * nesting, so any propagation reply_callback queues is only
+             * flushed into server.master_repl_offset by moduleFreeContext()'s
+             * matching exitExecutionUnit()+postExecutionUnitOperations(). */
+            int sync_rep_active = clientSyncRepActive(c);
+            size_t sync_rep_inline_start = 0;
+            listNode *sync_rep_list_tail_start = NULL;
+            long long pre_repl_offset = server.master_repl_offset;
+            if (sync_rep_active)
+                syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+
             bc->reply_callback(&ctx,(void**)c->argv,c->argc);
             reply_us = elapsedUs(replyTimer);
+
             moduleFreeContext(&ctx);
+
+            if (sync_rep_active)
+                syncReplFinishByOffset(c, pre_repl_offset, sync_rep_inline_start, sync_rep_list_tail_start);
         }
         if (c && bc->blocked_on_keys_explicit_unblock) {
             serverAssert(bc->blocked_on_keys);

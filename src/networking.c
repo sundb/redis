@@ -5647,15 +5647,42 @@ void syncReplFinishCommand(client *c, long long woff, size_t inline_start, listN
     closeClientOnOutputBufferLimitReached(c, 1);
 }
 
+/* Reply holding (appendfsync bgalways): decides, once it is known whether the
+ * bracketed work propagated anything (by comparing server.master_repl_offset
+ * against the offset captured before that work ran), whether to chunk the
+ * accumulated reply on the resulting offset, or queue it passthrough behind
+ * existing chunks. Shared tail end of any syncReplStartCommand/...(work)/
+ * finish bracket where the caller already knows a reply was actually
+ * produced (i.e. it isn't guarded by a CLIENT_BLOCKED check — see
+ * syncReplFinishOrDeferChunk below for that case). Used directly by callers
+ * whose "work" is not call() itself and so has no natural pre-work offset
+ * field to read (e.g. module.c's blocked-client reply callbacks, which pass
+ * their own locally captured pre-callback offset). */
+void syncReplFinishByOffset(client *c, long long pre_work_repl_offset,
+                             size_t sync_rep_inline_start, listNode *sync_rep_list_tail_start) {
+    if (server.master_repl_offset > pre_work_repl_offset) {
+        /* Propagation happened — chunk the reply on the resulting offset. */
+        c->woff = server.master_repl_offset;
+        server.latest_woff = c->woff;
+        syncReplFinishCommand(c, c->woff, sync_rep_inline_start, sync_rep_list_tail_start);
+    } else if (c->sync_pending_replies && listLength(c->sync_pending_replies) > 0) {
+        /* Nothing propagated, but the client still has pending chunks from
+         * earlier commands. RESP ordering requires this reply to queue behind
+         * them. Use woff=0 (passthrough — drains as soon as the head chunk
+         * does). */
+        syncReplFinishCommand(c, 0, sync_rep_inline_start, sync_rep_list_tail_start);
+    }
+}
+
 /* Reply holding (appendfsync bgalways): common tail end of a
- * syncReplStartCommand/...(work)/finish bracket, once it is known that any
- * propagation the bracketed work triggered has already been flushed into
- * server.master_repl_offset (i.e. execution_nesting was back to 0 at the
- * relevant afterCommand() call). Decides whether to chunk the accumulated
- * reply on the resulting offset, queue it passthrough behind existing
- * chunks, or defer to a later out-of-call() callback because the client
- * blocked again. Shared by call() (top-level dispatch, where nesting is 0
- * throughout so the flush already happened by the time this runs) and
+ * syncReplStartCommand/...(work)/finish bracket around call(), once it is
+ * known that any propagation the bracketed work triggered has already been
+ * flushed into server.master_repl_offset (i.e. execution_nesting was back to
+ * 0 at the relevant afterCommand() call). Defers to a later out-of-call()
+ * callback if the client blocked again; otherwise delegates the chunk
+ * decision to syncReplFinishByOffset() using the offset captured at
+ * processCommand entry. Shared by call() (top-level dispatch, where nesting
+ * is 0 throughout so the flush already happened by the time this runs) and
  * unblockClientOnKey (blocked.c; a blocked command's reissue wraps call() in
  * its own enterExecutionUnit, so call() itself can't observe the flush —
  * blocked.c calls this only after its own afterCommand()). */
@@ -5673,18 +5700,7 @@ void syncReplFinishOrDeferChunk(client *c, size_t sync_rep_inline_start,
         c->sync_rep_boundary_node = NULL;
         return;
     }
-    if (server.master_repl_offset > c->sync_pre_command_repl_offset) {
-        /* Propagation happened — chunk the reply on the resulting offset. */
-        c->woff = server.master_repl_offset;
-        server.latest_woff = c->woff;
-        syncReplFinishCommand(c, c->woff, sync_rep_inline_start, sync_rep_list_tail_start);
-    } else if (c->sync_pending_replies && listLength(c->sync_pending_replies) > 0) {
-        /* Nothing propagated, but the client still has pending chunks from
-         * earlier commands. RESP ordering requires this reply to queue behind
-         * them. Use woff=0 (passthrough — drains as soon as the head chunk
-         * does). */
-        syncReplFinishCommand(c, 0, sync_rep_inline_start, sync_rep_list_tail_start);
-    }
+    syncReplFinishByOffset(c, c->sync_pre_command_repl_offset, sync_rep_inline_start, sync_rep_list_tail_start);
 }
 
 /* Splice one releasable pending chunk's blocks back into c->reply (head-of-

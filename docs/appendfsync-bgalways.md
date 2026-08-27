@@ -88,11 +88,17 @@ differs from classic `always`, where data is on disk before it is ever observabl
   reissued command's reply is delivered as soon as it's produced, unheld, breaking "ack ⇒ durable" for
   this entire command class (see `tests/integration/appendfsync-bgalways.tcl`, "a blocked command's
   reply is held until its pop is durable").
-- **Not covered yet: module clients blocked on keys.** `moduleUnblockClientOnKey` /
-  `moduleHandleBlockedClients` (`module.c`) deliver a module's blocked-command reply straight from its
-  `reply_callback`, entirely outside `call()`, with no equivalent bracketing — so a module command that
-  blocks via `RM_BlockClientOnKeys` (or blocks generically) and propagates a write from its callback is
-  **not** held under `bgalways`. This is a known gap, tracked separately from the fix above.
+- **Module clients blocked on keys.** `moduleTryServeClientBlockedOnKey` (keys path) and
+  `moduleHandleBlockedClients` (generic path, `module.c`) both deliver a module's blocked-command reply
+  straight from `bc->reply_callback`, entirely outside `call()`. Unlike the blocked-on-keys case above,
+  `CLIENT_BLOCKED` is cleared *asynchronously* here (only once `moduleHandleBlockedClients` later drains
+  `moduleUnblockedClients`), so it's still set at the moment the reply is produced — the shared
+  `syncReplFinishOrDeferChunk` can't be reused as-is, since its `CLIENT_BLOCKED` check would read that as
+  "reply not produced yet, defer" and never chunk it. Both call sites instead bracket the
+  `reply_callback` call directly with `syncReplStartCommand`/`syncReplFinishByOffset` (the offset-decision
+  half of `syncReplFinishOrDeferChunk`, extracted so both share the chunk-vs-passthrough logic without
+  the `CLIENT_BLOCKED` gate), using a locally captured pre-callback `server.master_repl_offset` in place
+  of `call()`'s `sync_pre_command_repl_offset`.
 - **Not gated:** keyspace notifications, pub/sub messages, and client-side-caching invalidations are
   pushed outside the command reply path and are not held; under `bgalways` they may be emitted
   slightly before the corresponding write is durable.

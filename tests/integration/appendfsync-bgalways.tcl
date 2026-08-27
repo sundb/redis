@@ -408,3 +408,81 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         assert_equal [$r waitaof 1 0 5000] {1 0}
     }
 }
+
+# Module clients unblocked via RM_BlockClientOnKeys() reply straight from their
+# reply_callback, entirely outside call() (see moduleTryServeClientBlockedOnKey
+# in module.c), so they need their own syncReplStartCommand/syncReplFinishByOffset
+# bracketing rather than relying on call()'s. blockonkeys.so's FSL.BPOP is a
+# ready-made example: its reply_callback pops an element and then calls
+# RedisModule_ReplicateVerbatim(), i.e. it propagates a write from inside the
+# callback, exactly the case that must be held.
+set testmodule [file normalize tests/modules/blockonkeys.so]
+start_server [list tags {"aof bgalways modules external:skip"} overrides [list appendonly yes appendfsync bgalways auto-aof-rewrite-percentage 0 loadmodule "$testmodule"]] {
+    set r [srv 0 client]
+
+    test {bgalways: a module's blocked-on-keys reply is held until its propagated write is durable} {
+        $r del bgk_fsl
+        $r set bgk_fsl_warm v
+        assert_equal [$r waitaof 1 0 5000] {1 0}
+
+        $r debug aof-flush-force-stall 1
+
+        set rd_bpop [redis_deferring_client]
+        $rd_bpop fsl.bpop bgk_fsl 0
+        wait_for_condition 100 20 {
+            [s blocked_clients] >= 1
+        } else {
+            $rd_bpop close
+            $r debug aof-flush-force-stall 0
+            fail "FSL.BPOP did not block"
+        }
+
+        set rd_push [redis_deferring_client]
+        set before [s sync_repl_hold_count]
+        $rd_push fsl.push bgk_fsl 1
+        wait_for_condition 100 20 {
+            [s sync_repl_pending_clients] == 2 &&
+            [s sync_repl_hold_count] - $before == 2
+        } else {
+            $rd_bpop close
+            $rd_push close
+            $r debug aof-flush-force-stall 0
+            fail "FSL.PUSH and the woken FSL.BPOP reply_callback's reply were not\
+                both held (pending_clients=[s sync_repl_pending_clients]\
+                hold_delta=[expr {[s sync_repl_hold_count] - $before}])"
+        }
+
+        # The pop already happened locally even though neither client has
+        # received its reply yet.
+        assert_equal {} [$r fsl.getall bgk_fsl]
+
+        # Prove FSL.BPOP's reply is really held: poll its socket for 100ms and
+        # verify no bytes arrive while the pop is not yet durable.
+        set fd [$rd_bpop channel]
+        set ::__bg_fslbpop_sig 0
+        fileevent $fd readable [list set ::__bg_fslbpop_sig data]
+        set timer [after 100 [list set ::__bg_fslbpop_sig timeout]]
+        vwait ::__bg_fslbpop_sig
+        after cancel $timer
+        fileevent $fd readable {}
+        if {$::__bg_fslbpop_sig ne "timeout"} {
+            $rd_bpop close
+            $rd_push close
+            $r debug aof-flush-force-stall 0
+            fail "FSL.BPOP reply arrived before its pop was durable"
+        }
+
+        # Release the stall -> the pop's AOF write is fsynced -> both replies
+        # arrive.
+        $r debug aof-flush-force-stall 0
+        assert_equal 1 [$rd_bpop read]
+        assert_equal {OK} [$rd_push read]
+        $rd_bpop close
+        $rd_push close
+        wait_for_condition 50 20 {
+            [s sync_repl_pending_clients] == 0
+        } else {
+            fail "pending clients did not drain after the pop became durable"
+        }
+    }
+}
