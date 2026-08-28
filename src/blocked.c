@@ -238,6 +238,33 @@ int blockedClientMayTimeout(client *c) {
  * send it a reply of some kind. After this function is called,
  * unblockClient() will be called with the same client as argument. */
 void replyToBlockedClientTimedOut(client *c) {
+    /* Reply holding (appendfsync bgalways): every branch below writes a
+     * reply straight into c's reply buffer, entirely outside call() -- the
+     * same situation as unblockClientOnKey()/disconnectAllBlockedClients().
+     * None of these branches propagate a write themselves (a genuine pop
+     * would have been served by the normal ready-key path, not a timeout),
+     * except BLOCKED_LAZYFREE, whose underlying FLUSH already propagated
+     * before it blocked (c->woff holds that offset, same as
+     * unblockClientForAsyncFlush()/disconnectAllBlockedClients() use it) --
+     * so the other branches only need ordering (passthrough) protection,
+     * gated on whether anything propagated since entry, while
+     * BLOCKED_LAZYFREE is gated directly on c->woff.
+     *
+     * BLOCKED_MODULE delegates to moduleBlockedClientTimedOut(), which
+     * already brackets itself, so it's excluded here to avoid a nested,
+     * redundant bracket. */
+    if (c->bstate.btype == BLOCKED_MODULE) {
+        moduleBlockedClientTimedOut(c);
+        return;
+    }
+
+    int sync_rep_active = clientSyncRepActive(c);
+    size_t sync_rep_inline_start = 0;
+    listNode *sync_rep_list_tail_start = NULL;
+    long long pre_repl_offset = server.master_repl_offset;
+    if (sync_rep_active)
+        syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+
     if (c->bstate.btype == BLOCKED_LAZYFREE) {
         /* SFLUSH: reply with empty array, FLUSH*: reply with OK */
         if (c->cmd && c->cmd->proc == sflushCommand)
@@ -256,10 +283,15 @@ void replyToBlockedClientTimedOut(client *c) {
         addReplyArrayLen(c,2);
         addReplyLongLong(c,server.fsynced_reploff >= c->bstate.reploffset);
         addReplyLongLong(c,replicationCountAOFAcksByOffset(c->bstate.reploffset));
-    } else if (c->bstate.btype == BLOCKED_MODULE) {
-        moduleBlockedClientTimedOut(c);
     } else {
         serverPanic("Unknown btype in replyToBlockedClientTimedOut().");
+    }
+
+    if (sync_rep_active) {
+        if (c->bstate.btype == BLOCKED_LAZYFREE)
+            syncReplFinishCommand(c, c->woff, sync_rep_inline_start, sync_rep_list_tail_start);
+        else
+            syncReplFinishByOffset(c, pre_repl_offset, sync_rep_inline_start, sync_rep_list_tail_start);
     }
 }
 
@@ -856,8 +888,25 @@ void unblockClientOnTimeout(client *c) {
 /* Unblock a client which is currently Blocked with error.
  * If err_str is provided it will be used to reply to the blocked client */
 void unblockClientOnError(client *c, const char *err_str) {
-    if (err_str)
+    if (err_str) {
+        /* Reply holding (appendfsync bgalways): this writes straight into
+         * c's reply buffer, entirely outside call(). An error reply never
+         * propagates a write itself, so this only needs ordering
+         * (passthrough) protection against an earlier, still-parked reply
+         * on the same connection -- same reasoning as
+         * replyToBlockedClientTimedOut(). */
+        int sync_rep_active = clientSyncRepActive(c);
+        size_t sync_rep_inline_start = 0;
+        listNode *sync_rep_list_tail_start = NULL;
+        long long pre_repl_offset = server.master_repl_offset;
+        if (sync_rep_active)
+            syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+
         addReplyError(c, err_str);
+
+        if (sync_rep_active)
+            syncReplFinishByOffset(c, pre_repl_offset, sync_rep_inline_start, sync_rep_list_tail_start);
+    }
     updateStatsOnUnblock(c, 0, 0, 1);
     if (c->flags & CLIENT_PENDING_COMMAND)
         c->flags &= ~CLIENT_PENDING_COMMAND;

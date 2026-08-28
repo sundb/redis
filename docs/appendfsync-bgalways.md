@@ -184,6 +184,21 @@ differs from classic `always`, where data is on disk before it is ever observabl
   runs again then. `tryUnlinkClientFromPendingRefReply()`'s `force` path has the same guard, for the
   same reason `protectClientReplyObjects()` needs one: a parked chunk can still hold a `BULK_STR_REF`
   reference that isn't safe to consider "gone" yet.
+- **Blocked-command timeout/error replies.** `replyToBlockedClientTimedOut()` (BLPOP/BZPOPMIN/etc.
+  timing out, WAIT/WAITAOF's own reply, BLOCKED_LAZYFREE's timeout) and `unblockClientOnError()`
+  (`CLIENT UNBLOCK ... ERROR`) write straight into `c->reply`, entirely outside `call()` — the same
+  shape as `unblockClientOnKey()`/`disconnectAllBlockedClients()` above, but for the timeout/error
+  completion instead of the successful one. None of these propagate a write themselves (a genuine pop
+  is served by the ready-key path, not a timeout), so the risk isn't durability — it's RESP ordering:
+  `syncReplReleaseChunk()` appends a drained chunk's bytes to the *tail* of `c->reply` (`listJoin`), so
+  a reply written directly into `c->reply` while an earlier command's chunk is still parked on the same
+  connection ends up ahead of that chunk's bytes once it drains. Both are bracketed with
+  `syncReplStartCommand`/`syncReplFinishByOffset`, the same passthrough-on-ordering mechanism `call()`
+  uses for a non-propagating reply that finds a chunk already queued ahead of it. `BLOCKED_LAZYFREE`'s
+  timeout is the one branch that *does* have a real offset to gate on (the FLUSH already propagated
+  before it blocked, same as `unblockClientForAsyncFlush()`), so it uses `c->woff` via
+  `syncReplFinishCommand` directly instead. `BLOCKED_MODULE` delegates to the already-bracketed
+  `moduleBlockedClientTimedOut()`.
 - **Not gated:** keyspace notifications, pub/sub messages, and client-side-caching invalidations are
   pushed outside the command reply path and are not held; under `bgalways` they may be emitted
   slightly before the corresponding write is durable.

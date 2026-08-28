@@ -792,6 +792,58 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
                 simulated write error"
         }
     }
+
+    test {bgalways: a blocked command's timeout reply is routed through reply-holding too} {
+        # replyToBlockedClientTimedOut() writes straight into c->reply,
+        # entirely outside call(). It doesn't propagate anything itself, so
+        # the risk isn't durability -- it's that this reply can bypass the
+        # ordering (passthrough) protection every other reply-holding path
+        # already gets, since it never calls syncReplStartCommand(). When an
+        # earlier command's reply is still parked on the same connection,
+        # this timeout reply must also be routed through the chunk
+        # machinery (as a woff=0 passthrough) to stay in order behind it,
+        # not skip straight into c->reply. BLPOP's timeout clock and the
+        # earlier SET's fsync are on entirely independent clocks, so this
+        # doesn't need any unusual timing to reproduce.
+        r del bgk_order_list
+        r set bgk_order_warm v
+        assert_equal [r waitaof 1 0 5000] {1 0}
+
+        r debug aof-flush-force-stall 1
+
+        set rd [redis_deferring_client]
+        $rd set bgk_order v1
+        wait_for_condition 100 20 {
+            [s sync_repl_pending_clients] == 1
+        } else {
+            $rd close
+            r debug aof-flush-force-stall 0
+            fail "SET did not park a chunk while fsync was stalled"
+        }
+
+        # BLPOP's own 100ms timeout fires independently of the stall. Its
+        # reply must get routed through the same chunking path (parking as
+        # a second, passthrough chunk on the same client) rather than
+        # bypassing it straight into c->reply.
+        set before [s sync_repl_hold_count]
+        $rd blpop bgk_order_list 0.1
+        wait_for_condition 100 20 {
+            [s blocked_clients] == 0 &&
+            [s sync_repl_hold_count] > $before
+        } else {
+            $rd close
+            r debug aof-flush-force-stall 0
+            fail "BLPOP's timeout reply was not routed through the\
+                reply-holding path (hold_delta=[expr {[s sync_repl_hold_count] - $before}])"
+        }
+
+        # Release the stall -> both replies drain/arrive, in the order they
+        # were actually produced.
+        r debug aof-flush-force-stall 0
+        assert_equal {OK} [$rd read]
+        assert_equal {} [$rd read]
+        $rd close
+    }
 }
 
 # Module clients unblocked via RM_BlockClientOnKeys() reply straight from their
