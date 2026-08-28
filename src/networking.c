@@ -2074,7 +2074,17 @@ void unlinkClient(client *c) {
  * This should only be used when we are certain that the replies no longer
  * contain any referenced robj. */
 void tryUnlinkClientFromPendingRefReply(client *c, int force) {
-    if (clientIsInPendingRefReplyList(c) && (force || !clientHasPendingReplies(c))) {
+    if (!clientIsInPendingRefReplyList(c)) return;
+    /* A parked appendfsync bgalways chunk (c->sync_pending_replies) can still
+     * hold a BULK_STR_REF reference moved there verbatim by
+     * syncReplFinishCommand() -- freeClient() already frees those chunks
+     * (and releases their refs) before calling us with force=1, but
+     * writeToClient() calls us with force=1 too, as soon as c->reply/bufpos
+     * are drained, which can happen while a chunk from an earlier command is
+     * still parked. Bail out in that case: this isn't "certain that the
+     * replies no longer contain any referenced robj" yet. */
+    if (c->sync_pending_replies && listLength(c->sync_pending_replies) > 0) return;
+    if (force || !clientHasPendingReplies(c)) {
         listUnlinkNode(server.clients_with_pending_ref_reply, &c->pending_ref_reply_node);
     }
 }
@@ -3039,8 +3049,17 @@ int writeToClient(client *c, int handler_installed) {
             connSetWriteHandler(c->conn, NULL);
         }
 
-        /* Close connection after entire reply has been sent. */
-        if (c->flags & CLIENT_CLOSE_AFTER_REPLY) {
+        /* Close connection after entire reply has been sent -- but not while
+         * appendfsync bgalways still has a chunk parked on this client
+         * (c->reply/bufpos being empty only means those specific bytes were
+         * moved out to a chunk by syncReplFinishCommand(), not that nothing
+         * remains to send). freeClientAsync() -> freeClient() would tear the
+         * chunk down via freeSyncPendingReplies() without ever sending it.
+         * drainSyncPendingReplies() re-arms the write handler once the chunk
+         * actually drains, so this check will run again then. */
+        if ((c->flags & CLIENT_CLOSE_AFTER_REPLY) &&
+            !(c->sync_pending_replies && listLength(c->sync_pending_replies) > 0))
+        {
             freeClientAsync(c);
             return C_ERR;
         }

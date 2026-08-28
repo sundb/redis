@@ -166,6 +166,18 @@ differs from classic `always`, where data is on disk before it is ever observabl
   it now also walks each parked chunk's `reply_list` (`protectReplyBlockList()`, shared with the
   `c->reply` scan), not just `c->buf`/`c->reply`. Without that, the bio thread and the eventual chunk
   drain/send would `decrRefCount()` the same object without synchronization.
+- **`CLIENT_CLOSE_AFTER_REPLY` (QUIT, protocol errors) vs. a still-parked chunk.** `c->reply`/`c->bufpos`
+  being empty only means the *specific bytes appended so far* aren't sitting there — under `bgalways`
+  they may instead be parked in `c->sync_pending_replies`, not yet durable. `clientHasPendingReplies()`
+  intentionally doesn't look there (it's also used by the active write loop, where that would spin
+  re-checking a chunk it can't do anything with). `writeToClient()`'s own `CLIENT_CLOSE_AFTER_REPLY`
+  check does look at `c->sync_pending_replies` directly, so a `QUIT` (or protocol-error) reply following
+  a still-held write on the same connection doesn't get `freeClientAsync()`'d — which would tear the
+  parked chunk down via `freeSyncPendingReplies()` (a pure discard, never sent) — before it drains.
+  `drainSyncPendingReplies()` re-arms the write handler once the chunk actually releases, so the check
+  runs again then. `tryUnlinkClientFromPendingRefReply()`'s `force` path has the same guard, for the
+  same reason `protectClientReplyObjects()` needs one: a parked chunk can still hold a `BULK_STR_REF`
+  reference that isn't safe to consider "gone" yet.
 - **Not gated:** keyspace notifications, pub/sub messages, and client-side-caching invalidations are
   pushed outside the command reply path and are not held; under `bgalways` they may be emitted
   slightly before the corresponding write is durable.

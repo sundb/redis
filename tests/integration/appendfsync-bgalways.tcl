@@ -671,6 +671,58 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         assert_equal {PONG} [r ping]
         assert_equal {} [r get bgk_uaf_big]
     }
+
+    test {bgalways: QUIT does not drop a still-parked reply out from under the client} {
+        # clientHasPendingReplies() only looks at c->reply/c->bufpos. Once
+        # syncReplFinishCommand() moves a command's reply bytes out into a
+        # parked chunk, c->reply/bufpos go back to empty even though the
+        # bytes are still sitting unsent. If a CLIENT_CLOSE_AFTER_REPLY
+        # command (QUIT, or a protocol error) reaches writeToClient() while
+        # that chunk is still parked, it must not be treated as "nothing
+        # left to send, close now" -- freeClientAsync()'s eventual
+        # freeSyncPendingReplies() discards the chunk's contents without
+        # ever sending them.
+        r set bgk_quit_warm v
+        assert_equal [r waitaof 1 0 5000] {1 0}
+
+        r debug aof-flush-force-stall 1
+
+        set rd [redis_deferring_client]
+        set before [s sync_repl_hold_count]
+        $rd set bgk_quit v1
+        $rd quit
+        wait_for_condition 100 20 {
+            [s sync_repl_hold_count] - $before >= 2
+        } else {
+            $rd close
+            r debug aof-flush-force-stall 0
+            fail "SET and QUIT's own +OK were not both routed through the\
+                reply-holding path (hold_delta=[expr {[s sync_repl_hold_count] - $before}])"
+        }
+
+        # Prove the connection is not being torn down early: poll its
+        # socket for 150ms and verify neither data nor a close arrives
+        # while the fsync is still stalled.
+        set fd [$rd channel]
+        set ::__bg_quit_sig 0
+        fileevent $fd readable [list set ::__bg_quit_sig data]
+        set timer [after 150 [list set ::__bg_quit_sig timeout]]
+        vwait ::__bg_quit_sig
+        after cancel $timer
+        fileevent $fd readable {}
+        if {$::__bg_quit_sig ne "timeout"} {
+            $rd close
+            r debug aof-flush-force-stall 0
+            fail "client was disconnected (or sent data) before its held\
+                replies were durable"
+        }
+
+        # Release the stall -> both replies actually arrive, in order.
+        r debug aof-flush-force-stall 0
+        assert_equal {OK} [$rd read]
+        assert_equal {OK} [$rd read]
+        $rd close
+    }
 }
 
 # Module clients unblocked via RM_BlockClientOnKeys() reply straight from their
