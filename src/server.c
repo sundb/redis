@@ -2474,6 +2474,7 @@ void initServerConfig(void) {
     server.aof_flush_sleep = 0;
     server.aof_flush_force_stall = 0;
     server.aof_flush_force_error = 0;
+    server.aof_flush_force_fsync_error = 0;
     server.aof_last_fsync = time(NULL) * 1000;
     server.aof_cur_timestamp = 0;
     atomicSet(server.aof_bio_fsync_status,C_OK);
@@ -3228,6 +3229,7 @@ void initServer(void) {
     server.lastbgsave_status = C_OK;
     server.aof_last_write_status = C_OK;
     server.aof_last_write_errno = 0;
+    server.aof_force_fsync_fail_offset = -1;
     server.repl_good_slaves_count = 0;
     server.last_sig_received = 0;
     memset(server.io_threads_clients_num, 0, sizeof(server.io_threads_clients_num));

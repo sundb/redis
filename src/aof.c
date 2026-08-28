@@ -1262,6 +1262,29 @@ long long aofRefreshFsyncedReploff(void) {
         atomicGet(server.fsynced_reploff_pending, pending);
         server.fsynced_reploff = pending;
     }
+
+    /* Self-heal a BGALWAYS forced-fsync failure (see flushAppendOnlyFile())
+     * once the durable offset has actually caught up past the point that
+     * failed: writeCommandsDeniedByDiskError() would otherwise deny writes
+     * forever, since aof_last_write_status is only ever cleared by a
+     * successful write() of leftover aof_buf bytes, and this failure mode
+     * leaves aof_buf empty -- the retry-on-next-write path this field
+     * normally relies on never gets anything to retry. The periodic
+     * run_with_period(1000) retry in serverCron() (gated on
+     * aof_last_write_status == C_ERR) keeps firing background fsyncs in the
+     * meantime; once one actually succeeds, fsynced_reploff advances past
+     * the failure point and this clears the flag. */
+    if (server.aof_last_write_status == C_ERR &&
+        server.aof_force_fsync_fail_offset != -1 &&
+        server.fsynced_reploff != -1 &&
+        server.fsynced_reploff >= server.aof_force_fsync_fail_offset)
+    {
+        serverLog(LL_NOTICE,
+            "AOF forced-fsync error looks solved, Redis can write again.");
+        server.aof_last_write_status = C_OK;
+        server.aof_force_fsync_fail_offset = -1;
+    }
+
     return prev;
 }
 
@@ -1376,6 +1399,7 @@ int startAppendOnly(void) {
     if (server.aof_last_write_status == C_ERR) {
         serverLog(LL_WARNING,"AOF reopen, just ignore the last error.");
         server.aof_last_write_status = C_OK;
+        server.aof_force_fsync_fail_offset = -1;
     }
     return C_OK;
 }
@@ -1463,6 +1487,28 @@ void flushAppendOnlyFile(int force) {
             serverLog(LL_WARNING,"Simulating an AOF write error (debug aof-flush-force-error).");
         server.aof_last_write_status = C_ERR;
         server.aof_last_write_errno = ENOSPC;
+        return;
+    }
+
+    /* Test-only fault injection: simulate the BGALWAYS forced (synchronous)
+     * fsync path failing while the write() itself still succeeds (see
+     * DEBUG AOF-FLUSH-FORCE-FSYNC-ERROR). Intercepted here, ahead of
+     * aof_flush_force_stall and the empty-buffer/gap-detection logic below,
+     * so a caller of a forced flush (shutdown / stopAppendOnly /
+     * rewrite-done) hits this deterministically -- including while
+     * aof_flush_force_stall is also set to hold a write's bytes unflushed,
+     * which tests use to set up a genuine outstanding gap before forcing
+     * this failure. */
+    if (force && server.aof_fsync == AOF_FSYNC_BGALWAYS &&
+        server.aof_flush_force_fsync_error)
+    {
+        serverLog(LL_WARNING, "Can't persist AOF for fsync error when the "
+            "AOF fsync policy is 'bgalways': Simulated (debug "
+            "aof-flush-force-fsync-error).");
+        server.aof_last_write_status = C_ERR;
+        server.aof_last_write_errno = EIO;
+        if (server.aof_force_fsync_fail_offset == -1)
+            server.aof_force_fsync_fail_offset = server.master_repl_offset;
         return;
     }
 
@@ -1634,6 +1680,7 @@ void flushAppendOnlyFile(int force) {
             serverLog(LL_NOTICE,
                 "AOF write error looks solved, Redis can write again.");
             server.aof_last_write_status = C_OK;
+            server.aof_force_fsync_fail_offset = -1;
         }
     }
     server.aof_current_size += nwritten;
@@ -1685,10 +1732,26 @@ try_fsync:
                     "AOF fsync policy is 'bgalways': %s.", strerror(errno));
                 server.aof_last_write_status = C_ERR;
                 server.aof_last_write_errno = errno;
+                /* Unlike a write() failure, aof_buf is already empty at this
+                 * point (the write() above already succeeded), so there's no
+                 * leftover data for the next flushAppendOnlyFile() retry to
+                 * write -- the retry-on-next-write self-heal at the top of
+                 * this function (which cleared aof_last_write_status on a
+                 * successful write()) never runs for this failure. Remember
+                 * the offset so aofRefreshFsyncedReploff() can self-heal once
+                 * a later fsync (forced or background) actually covers it. */
+                if (server.aof_force_fsync_fail_offset == -1)
+                    server.aof_force_fsync_fail_offset = server.master_repl_offset;
             } else {
                 server.aof_last_incr_fsync_offset = server.aof_last_incr_size;
                 server.aof_last_fsync = server.mstime;
                 aofAdvanceFsyncedReploff(server.master_repl_offset);
+                if (server.aof_last_write_status == C_ERR) {
+                    serverLog(LL_NOTICE,
+                        "AOF write error looks solved, Redis can write again.");
+                    server.aof_last_write_status = C_OK;
+                }
+                server.aof_force_fsync_fail_offset = -1;
             }
         } else if (!aofFsyncInProgress() &&
                    server.aof_last_incr_fsync_offset != server.aof_last_incr_size) {

@@ -567,6 +567,37 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         $r debug aof-flush-force-stall 0
         $r config set appendonly yes
     }
+
+    test {bgalways: a transient forced-fsync failure during BGREWRITEAOF self-heals instead of permanently denying writes} {
+        # A classic appendfsync always exits(1) on a synchronous fsync
+        # failure rather than continuing degraded, so it never has to
+        # self-heal aof_last_write_status from a fsync-only failure.
+        # bgalways's forced (synchronous) fsync path -- used at the start of
+        # BGREWRITEAOF to flush the current INCR AOF before forking -- is
+        # the first mode that can set aof_last_write_status from a fsync-only
+        # failure while the write() itself already succeeded (so there's no
+        # leftover aof_buf data for the classic retry-on-next-write path to
+        # ever see). Without a self-heal keyed off fsynced_reploff actually
+        # catching up, this wedges -MISCONF forever even after the disk
+        # recovers.
+        r set bgk_wedge_warm v
+        assert_equal [r waitaof 1 0 5000] {1 0}
+
+        r debug aof-flush-force-fsync-error 1
+        r bgrewriteaof
+
+        wait_for_condition 50 20 {
+            [catch {r set bgk_wedge v1}] == 0 &&
+            [s aof_last_write_status] eq {ok}
+        } else {
+            r debug aof-flush-force-fsync-error 0
+            fail "aof_last_write_status did not self-heal after the\
+                simulated forced-fsync failure -- writes stayed denied"
+        }
+
+        r debug aof-flush-force-fsync-error 0
+        assert_equal {v1} [r get bgk_wedge]
+    }
 }
 
 # Module clients unblocked via RM_BlockClientOnKeys() reply straight from their

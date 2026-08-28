@@ -64,6 +64,20 @@ differs from classic `always`, where data is on disk before it is ever observabl
   (`writeCommandsDeniedByDiskError`), and held clients are disconnected (their data can no longer be
   made durable). This covers both a background bio-thread fsync failure (`aof_bio_fsync_status`) and
   a main-thread write/forced-fsync failure (`aof_last_write_status`). No `exit(1)`.
+  - Classic `always` never has to self-heal `aof_last_write_status` from a *fsync-only* failure: it
+    `exit(1)`s on one instead of continuing degraded. A write() failure (the only way classic `always`
+    or `everysec` sets this field) leaves the unwritten bytes in `aof_buf`, so the existing
+    retry-on-next-flush logic naturally clears the flag once a later write() succeeds.
+    `bgalways`'s forced (synchronous) fsync path — used at the start of BGREWRITEAOF to flush the
+    current INCR AOF before forking, as well as at shutdown/`stopAppendOnly` — is the first mode that
+    can set this field from a fsync-only failure *after* the write() already succeeded, leaving
+    `aof_buf` empty with nothing for that retry path to ever see again. Without a dedicated self-heal,
+    this would deny writes with `-MISCONF` forever, even once the underlying disk recovers.
+    `aofRefreshFsyncedReploff()` (called every `beforeSleep`/bio-completion tick) tracks the offset
+    that failed (`aof_force_fsync_fail_offset`) and clears `aof_last_write_status` once
+    `fsynced_reploff` actually catches up past it — via the periodic `run_with_period(1000)`
+    background-fsync retry in `serverCron()`, a later successful forced fsync, or (as in the common
+    BGREWRITEAOF case) the rewrite's own subsequent file-close fsync.
 - **Forced fsync (shutdown / stopAppendOnly / rewrite-done).** Done synchronously after draining the
   bio AOF worker, so a late bio completion cannot regress the durable offset.
 - **Config switching.** Switching `appendfsync` into/out of `always`/`bgalways` drains the bio AOF

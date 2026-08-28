@@ -426,6 +426,9 @@ void debugCommand(client *c) {
 "    Force the AOF flush to fail (set the AOF write error status), used for testing.",
 "AOF-FLUSH-FORCE-STALL <0|1>",
 "    Skip the AOF flush so the durable offset stalls (no error), used for testing.",
+"AOF-FLUSH-FORCE-FSYNC-ERROR <0|1>",
+"    Force the BGALWAYS forced (synchronous) fsync path to fail while the write()",
+"    itself still succeeds, used for testing.",
 "ASSERT",
 "    Crash by assertion failed.",
 "CHANGE-REPL-ID",
@@ -998,6 +1001,11 @@ NULL
                c->argc == 3)
     {
         server.aof_flush_force_stall = atoi(c->argv[2]->ptr);
+        addReply(c,shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr,"aof-flush-force-fsync-error") &&
+               c->argc == 3)
+    {
+        server.aof_flush_force_fsync_error = atoi(c->argv[2]->ptr);
         addReply(c,shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr,"replicate") && c->argc >= 3) {
         replicationFeedSlaves(server.slaves, -1,
