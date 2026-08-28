@@ -156,6 +156,16 @@ differs from classic `always`, where data is on disk before it is ever observabl
   `moduleCreateContext()`/`moduleFreeContext()` nesting consideration: propagation from inside
   `timeout_callback` is only flushed into `server.master_repl_offset` once `moduleFreeContext()`'s
   matching `exitExecutionUnit()` runs, so the offset comparison happens after that call returns.
+- **Zero-copy replies parked across an async FLUSHALL/FLUSHDB.** A `BULK_STR_REF` zero-copy reply
+  (`tryAvoidBulkStrCopyToReply()`) can end up parked in `c->sync_pending_replies` instead of `c->reply`
+  — either because the command itself propagated, or because a chunk was already parked ahead of it
+  and it gets queued as a `woff = 0` passthrough purely to preserve RESP ordering. `syncReplFinishCommand()`
+  moves/splices these nodes verbatim (no deep copy), so the reference and its `incrRefCount()` travel
+  with the node into the chunk. `protectClientReplyObjects()` (`lazyfree.c`) exists to duplicate any such
+  reference still outstanding before an async `FLUSHALL`/`FLUSHDB` frees the object in a bio thread —
+  it now also walks each parked chunk's `reply_list` (`protectReplyBlockList()`, shared with the
+  `c->reply` scan), not just `c->buf`/`c->reply`. Without that, the bio thread and the eventual chunk
+  drain/send would `decrRefCount()` the same object without synchronization.
 - **Not gated:** keyspace notifications, pub/sub messages, and client-side-caching invalidations are
   pushed outside the command reply path and are not held; under `bgalways` they may be emitted
   slightly before the corresponding write is durable.

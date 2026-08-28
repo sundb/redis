@@ -598,6 +598,79 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         r debug aof-flush-force-fsync-error 0
         assert_equal {v1} [r get bgk_wedge]
     }
+
+    test {bgalways: FLUSHALL ASYNC doesn't race a zero-copy reply sitting in a parked chunk} {
+        # protectClientReplyObjects() duplicates any zero-copy BULK_STR_REF
+        # reference still sitting in a client's pending reply before an
+        # async FLUSHALL/FLUSHDB frees the underlying object in a bio
+        # thread, to avoid the main thread and the bio thread doing a
+        # non-atomic decrRefCount on the same object. Under bgalways, that
+        # reference can also be sitting in an already-parked
+        # c->sync_pending_replies chunk instead of c->reply -- reads get
+        # chunked as a woff=0 passthrough purely to preserve RESP ordering
+        # behind an earlier held write. If protectClientReplyObjects()
+        # doesn't know to look there too, the bio thread frees/decrefs the
+        # object while the parked chunk still holds a reference to it,
+        # which is later sent to the client -- a use-after-free.
+        set bigval [string repeat x 20000]
+        r set bgk_uaf_big $bigval
+        r set bgk_uaf_warm v
+        assert_equal [r waitaof 1 0 5000] {1 0}
+
+        r debug aof-flush-force-stall 1
+
+        set rd [redis_deferring_client]
+        $rd set bgk_uaf_k1 v1
+        wait_for_condition 100 20 {
+            [s sync_repl_pending_clients] == 1
+        } else {
+            $rd close
+            r debug aof-flush-force-stall 0
+            fail "SET did not park a chunk while fsync was stalled"
+        }
+
+        # This GET's zero-copy reply gets chunked too (passthrough, to
+        # preserve ordering behind the still-parked SET), landing its
+        # BULK_STR_REF in c->sync_pending_replies instead of c->reply.
+        $rd get bgk_uaf_big
+        set before_hold [s sync_repl_hold_count]
+        wait_for_condition 100 20 {
+            [s sync_repl_hold_count] > $before_hold
+        } else {
+            $rd close
+            r debug aof-flush-force-stall 0
+            fail "GET's zero-copy reply was not routed through the\
+                reply-holding path behind the still-parked SET"
+        }
+
+        # Concurrently free the underlying object via an async flush. Its
+        # own +OK also propagates a write, so it parks behind the still-held
+        # chunks too -- use a deferring client so this doesn't block waiting
+        # for a reply that can't arrive until the stall is released below.
+        set rd_flush [redis_deferring_client]
+        $rd_flush flushall async
+        wait_for_condition 100 20 {
+            [s lazyfree_pending_objects] == 0
+        } else {
+            $rd close
+            $rd_flush close
+            r debug aof-flush-force-stall 0
+            fail "lazyfree did not finish draining"
+        }
+
+        # Release the stall so all parked replies drain and get sent.
+        r debug aof-flush-force-stall 0
+        assert_equal {OK} [$rd read]
+        assert_equal $bigval [$rd read]
+        $rd close
+        assert_equal {OK} [$rd_flush read]
+        $rd_flush close
+
+        # The race (if unprotected) corrupts/frees shared object memory --
+        # confirm the server is still alive and coherent afterward.
+        assert_equal {PONG} [r ping]
+        assert_equal {} [r get bgk_uaf_big]
+    }
 }
 
 # Module clients unblocked via RM_BlockClientOnKeys() reply straight from their
