@@ -601,6 +601,58 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
             fail "pending clients did not drain after the pop became durable"
         }
     }
+
+    test {bgalways: a module's timeout_callback reply is held until its propagated write is durable} {
+        $r del bgk_fsl_to
+        $r del bgk_module_timeout_marker
+        $r set bgk_fsl_to_warm v
+        assert_equal [$r waitaof 1 0 5000] {1 0}
+
+        $r debug aof-flush-force-stall 1
+
+        set rd_to [redis_deferring_client]
+        set before [s sync_repl_hold_count]
+        $rd_to fsl.bpop_to_propagate bgk_fsl_to 100
+        wait_for_condition 100 20 {
+            [s sync_repl_pending_clients] == 1 &&
+            [s sync_repl_hold_count] > $before
+        } else {
+            $rd_to close
+            $r debug aof-flush-force-stall 0
+            fail "fsl.bpop_to_propagate's timeout reply was not routed through\
+                the reply-holding path"
+        }
+
+        # The timeout callback's INCR already took effect locally even though
+        # the calling client hasn't received its reply yet.
+        assert_equal {1} [$r get bgk_module_timeout_marker]
+
+        # Prove the reply is really held: poll its socket for 100ms and
+        # verify no bytes arrive while the write is not yet durable.
+        set fd [$rd_to channel]
+        set ::__bg_to_sig 0
+        fileevent $fd readable [list set ::__bg_to_sig data]
+        set timer [after 100 [list set ::__bg_to_sig timeout]]
+        vwait ::__bg_to_sig
+        after cancel $timer
+        fileevent $fd readable {}
+        if {$::__bg_to_sig ne "timeout"} {
+            $rd_to close
+            $r debug aof-flush-force-stall 0
+            fail "timeout_callback's reply arrived while its write was not yet\
+                durable"
+        }
+
+        # Release the stall -> the write is durable -> the reply arrives.
+        $r debug aof-flush-force-stall 0
+        assert_equal {Request timedout} [$rd_to read]
+        $rd_to close
+        wait_for_condition 50 20 {
+            [s sync_repl_pending_clients] == 0
+        } else {
+            fail "pending clients did not drain after the write became durable"
+        }
+    }
 }
 
 # Modules also reply to a blocked client from a background thread via a

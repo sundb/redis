@@ -9146,12 +9146,37 @@ void moduleBlockedClientTimedOut(client *c) {
     long long prev_error_replies = server.stat_total_error_replies;
 
     if (bc->timeout_callback) {
+        /* Reply holding (appendfsync bgalways): timeout_callback writes
+         * straight into c's reply buffer and may itself propagate a write
+         * (RM_Call or RM_Replicate*), entirely outside call() -- the same
+         * situation as bc->reply_callback in moduleTryServeClientBlockedOnKey/
+         * moduleHandleBlockedClients above, just on the timeout path instead
+         * of the normal-completion path. Bracket it the same way.
+         *
+         * moduleCreateContext() above already called enterExecutionUnit(1,0),
+         * so any propagation timeout_callback queues is only actually
+         * flushed into server.master_repl_offset by moduleFreeContext()'s
+         * matching exitExecutionUnit()+postExecutionUnitOperations() once
+         * nesting drops back to 0 -- which must therefore run *before* we
+         * compare offsets, not after. */
+        int sync_rep_active = clientSyncRepActive(c);
+        size_t sync_rep_inline_start = 0;
+        listNode *sync_rep_list_tail_start = NULL;
+        long long pre_repl_offset = server.master_repl_offset;
+        if (sync_rep_active)
+            syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+
         /* In theory, the user should always pass the timeout handler as an
          * argument, but better to be safe than sorry. */
         bc->timeout_callback(&ctx,(void**)c->argv,c->argc);
-    }
 
-    moduleFreeContext(&ctx);
+        moduleFreeContext(&ctx);
+
+        if (sync_rep_active)
+            syncReplFinishByOffset(c, pre_repl_offset, sync_rep_inline_start, sync_rep_list_tail_start);
+    } else {
+        moduleFreeContext(&ctx);
+    }
 
     updateStatsOnUnblock(c, bc->background_duration, 0, server.stat_total_error_replies != prev_error_replies);
 

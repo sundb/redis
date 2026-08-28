@@ -127,6 +127,14 @@ differs from classic `always`, where data is on disk before it is ever observabl
   `bc->reply_client` actually accumulated bytes — a keys-blocked client that already replied via
   `reply_callback` reaches this same splice with an empty `reply_client`, and bracketing that
   unconditionally would park a superfluous empty chunk on every module unblock.
+- **Module clients replying from `timeout_callback`.** `moduleBlockedClientTimedOut()` delivers a
+  module's timeout reply straight from `bc->timeout_callback`, entirely outside `call()` — the same
+  situation as `bc->reply_callback` above, just on the timeout path (reached from a normal block timeout
+  via `replyToBlockedClientTimedOut()`, or from an explicit `RM_UnblockClient()` on a keys-blocked client,
+  which reuses the timeout handler). Bracketed the same way, with the same
+  `moduleCreateContext()`/`moduleFreeContext()` nesting consideration: propagation from inside
+  `timeout_callback` is only flushed into `server.master_repl_offset` once `moduleFreeContext()`'s
+  matching `exitExecutionUnit()` runs, so the offset comparison happens after that call returns.
 - **Not gated:** keyspace notifications, pub/sub messages, and client-side-caching invalidations are
   pushed outside the command reply path and are not held; under `bgalways` they may be emitted
   slightly before the corresponding write is durable.
