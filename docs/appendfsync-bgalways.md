@@ -69,6 +69,13 @@ differs from classic `always`, where data is on disk before it is ever observabl
 - **Config switching.** Switching `appendfsync` into/out of `always`/`bgalways` drains the bio AOF
   worker first. Switching away from `bgalways` releases held replies under the new policy's
   semantics.
+- **`CONFIG SET appendonly no`.** `stopAppendOnly()` pins `fsynced_reploff` to `-1`, which disarms
+  `syncReplWaitLocalAof()`'s gate — without disconnecting first, the very next `drainSyncPendingReplies()`
+  would release every still-parked chunk unconditionally, even one whose data `stopAppendOnly()`'s own
+  best-effort flush+fsync never actually made durable (e.g. AOF was already erroring, or a test/fault
+  hook skipped the flush outright). `stopAppendOnly()` therefore calls `disconnectAllSyncRepPendingClients`
+  before pinning the offset — the same protection `replicationSetMaster`'s demotion handling and the
+  `beforeSleep` AOF-error check give their own respective triggers.
 - **Demotion to replica.** `REPLICAOF` disconnects clients still holding chunks
   (`disconnectAllSyncRepPendingClients`): the offset they wait on belongs to the old primary's offset
   space and the write may be rolled back by the new master. This must also catch a blocking-async

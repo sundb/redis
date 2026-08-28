@@ -523,6 +523,50 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             fail "lazyfree did not finish draining"
         }
     }
+
+    test {bgalways: a client held on a not-yet-durable write is disconnected (not acked) by CONFIG SET appendonly no} {
+        $r set bgk_cfgoff_warm v
+        assert_equal [$r waitaof 1 0 5000] {1 0}
+
+        # aof-flush-force-stall makes flushAppendOnlyFile() a no-op
+        # unconditionally (even with force=1), so stopAppendOnly()'s own
+        # forced flush+fsync below won't actually make this write durable
+        # either.
+        $r debug aof-flush-force-stall 1
+
+        set rd [redis_deferring_client]
+        set before_disc [s sync_repl_pending_disconnects]
+        $rd set bgk_cfgoff v1
+        wait_for_condition 100 20 {
+            [s sync_repl_pending_clients] == 1
+        } else {
+            $rd close
+            $r debug aof-flush-force-stall 0
+            fail "SET did not park a chunk while fsync was stalled"
+        }
+
+        # Disabling AOF must not silently release this client's held reply:
+        # the write it's waiting on was never actually made durable.
+        $r config set appendonly no
+
+        set got_ok 0
+        catch {
+            if {[$rd read] eq {OK}} { set got_ok 1 }
+        }
+        assert_equal 0 $got_ok
+        $rd close
+
+        wait_for_condition 100 20 {
+            [s sync_repl_pending_disconnects] > $before_disc
+        } else {
+            fail "client held on a write left non-durable by CONFIG SET\
+                appendonly no was not disconnected via\
+                disconnectAllSyncRepPendingClients"
+        }
+
+        $r debug aof-flush-force-stall 0
+        $r config set appendonly yes
+    }
 }
 
 # Module clients unblocked via RM_BlockClientOnKeys() reply straight from their

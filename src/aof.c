@@ -1315,6 +1315,17 @@ void stopAppendOnly(void) {
     server.aof_rewrite_scheduled = 0;
     server.aof_last_incr_size = 0;
     server.aof_last_incr_fsync_offset = 0;
+
+    /* Reply holding (appendfsync bgalways): pinning fsynced_reploff to -1
+     * below disarms syncReplWaitLocalAof()'s gate, so on the very next
+     * drainSyncPendingReplies() every chunk still parked on
+     * server.sync_clients_with_pending would be released unconditionally --
+     * acking a write whose durability the flush/fsync above may not have
+     * actually secured (e.g. AOF was already erroring). Disconnect those
+     * clients first instead, the same way replicationSetMaster()'s demotion
+     * handling and beforeSleep's AOF-error check both do. */
+    disconnectAllSyncRepPendingClients("AOF disabled");
+
     server.fsynced_reploff = -1;
     atomicSet(server.fsynced_reploff_pending, 0);
     killAppendOnlyChild();
