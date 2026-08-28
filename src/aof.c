@@ -1487,6 +1487,12 @@ void flushAppendOnlyFile(int force) {
             serverLog(LL_WARNING,"Simulating an AOF write error (debug aof-flush-force-error).");
         server.aof_last_write_status = C_ERR;
         server.aof_last_write_errno = ENOSPC;
+        /* This simulates a real write() failure, the same distinct failure
+         * mode as the production write()-failure branch below -- clear any
+         * stale offset left over from an unrelated, already-superseded
+         * BGALWAYS forced-fsync-only failure, for the same reason that
+         * branch does. */
+        server.aof_force_fsync_fail_offset = -1;
         return;
     }
 
@@ -1663,6 +1669,16 @@ void flushAppendOnlyFile(int force) {
              * set an error to stop accepting writes as long as the error
              * condition is not cleared. */
             server.aof_last_write_status = C_ERR;
+
+            /* This is a distinct failure from a BGALWAYS forced-fsync-only
+             * failure (see below): a stale aof_force_fsync_fail_offset left
+             * over from an earlier, already-superseded forced-fsync failure
+             * must not let aofRefreshFsyncedReploff()'s self-heal declare
+             * *this* write failure resolved just because fsynced_reploff
+             * happens to catch up past that old offset -- this failure's own
+             * bytes are stuck unwritten in aof_buf and need a real write()
+             * retry, not an offset comparison, to clear. */
+            server.aof_force_fsync_fail_offset = -1;
 
             /* Trim the sds buffer if there was a partial write, and there
              * was no way to undo it with ftruncate(2). */

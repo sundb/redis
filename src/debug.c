@@ -429,6 +429,11 @@ void debugCommand(client *c) {
 "AOF-FLUSH-FORCE-FSYNC-ERROR <0|1>",
 "    Force the BGALWAYS forced (synchronous) fsync path to fail while the write()",
 "    itself still succeeds, used for testing.",
+"AOF-SIMULATE-FORCE-FSYNC-FAILURE",
+"    Directly simulate a BGALWAYS forced-fsync-only failure without an actual",
+"    forced flush call, used for testing.",
+"AOF-FORCE-FSYNC-FAIL-OFFSET",
+"    Return the current server.aof_force_fsync_fail_offset value, used for testing.",
 "ASSERT",
 "    Crash by assertion failed.",
 "CHANGE-REPL-ID",
@@ -1007,6 +1012,29 @@ NULL
     {
         server.aof_flush_force_fsync_error = atoi(c->argv[2]->ptr);
         addReply(c,shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr,"aof-simulate-force-fsync-failure") &&
+               c->argc == 2)
+    {
+        /* Test-only: directly simulate a BGALWAYS forced-fsync-only failure
+         * (see flushAppendOnlyFile()'s AOF_FSYNC_BGALWAYS force branch)
+         * without an actual forced flush call, so tests can set up this
+         * exact state deterministically -- e.g. to test its interaction
+         * with a later, unrelated aof_last_write_status failure without
+         * racing the real forced-fsync callers' own side effects (like
+         * BGREWRITEAOF's file-close fsync). */
+        server.aof_last_write_status = C_ERR;
+        server.aof_last_write_errno = EIO;
+        if (server.aof_force_fsync_fail_offset == -1)
+            server.aof_force_fsync_fail_offset = server.master_repl_offset;
+        addReply(c,shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr,"aof-force-fsync-fail-offset") &&
+               c->argc == 2)
+    {
+        /* Test-only introspection: read server.aof_force_fsync_fail_offset
+         * directly, so tests can assert it was reset by an unrelated later
+         * write failure without depending on real fsync/bio timing to
+         * observe the effect indirectly through aof_last_write_status. */
+        addReplyLongLong(c, server.aof_force_fsync_fail_offset);
     } else if (!strcasecmp(c->argv[1]->ptr,"replicate") && c->argc >= 3) {
         replicationFeedSlaves(server.slaves, -1,
                 c->argv + 2, c->argc - 2);

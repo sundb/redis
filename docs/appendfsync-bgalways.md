@@ -78,6 +78,12 @@ differs from classic `always`, where data is on disk before it is ever observabl
     `fsynced_reploff` actually catches up past it — via the periodic `run_with_period(1000)`
     background-fsync retry in `serverCron()`, a later successful forced fsync, or (as in the common
     BGREWRITEAOF case) the rewrite's own subsequent file-close fsync.
+    Every site that can set `aof_last_write_status = C_ERR` for a *different* reason (the plain
+    `write()`-failure branch, and its `DEBUG AOF-FLUSH-FORCE-ERROR` test-only equivalent) also resets
+    `aof_force_fsync_fail_offset` back to `-1` — otherwise a still-outstanding, unrelated write failure
+    could get silently (and wrongly) reported as resolved the moment `fsynced_reploff` happens to
+    catch up past a stale, already-superseded forced-fsync-only offset from earlier, even though that
+    failure's own bytes are still stuck unwritten in `aof_buf`.
 - **Forced fsync (shutdown / stopAppendOnly / rewrite-done).** Done synchronously after draining the
   bio AOF worker, so a late bio completion cannot regress the durable offset.
 - **Config switching.** Switching `appendfsync` into/out of `always`/`bgalways` drains the bio AOF

@@ -723,6 +723,75 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         assert_equal {OK} [$rd read]
         $rd close
     }
+
+    test {bgalways: a stale forced-fsync self-heal offset must not survive a later, unrelated write failure} {
+        # aof_force_fsync_fail_offset (added to self-heal the BGALWAYS
+        # forced-fsync-only failure -- see the previous BGREWRITEAOF test)
+        # is only reset by the handful of places that also clear
+        # aof_last_write_status back to C_OK. If a genuinely separate,
+        # later write() failure sets aof_last_write_status = C_ERR again
+        # without also resetting that stale offset, aofRefreshFsyncedReploff()
+        # could wrongly declare the *new* failure resolved the moment
+        # fsynced_reploff catches up past the *old* one -- even though the
+        # new failure's own bytes are still stuck unwritten. Checking the
+        # field directly (DEBUG AOF-FORCE-FSYNC-FAIL-OFFSET) verifies the
+        # reset itself deterministically, without depending on real
+        # fsync/bio timing to observe it indirectly through
+        # aof_last_write_status.
+        r set bgk_stale_warm v
+        assert_equal [r waitaof 1 0 5000] {1 0}
+
+        # Create a genuine gap: park a write while fsync is stalled, so the
+        # offset the simulated failure below captures is strictly ahead of
+        # what's currently durable -- otherwise it would self-heal trivially
+        # on its own, before this test ever gets to check anything.
+        r debug aof-flush-force-stall 1
+        set rd [redis_deferring_client]
+        $rd set bgk_stale v1
+        wait_for_condition 100 20 {
+            [s sync_repl_pending_clients] == 1
+        } else {
+            $rd close
+            r debug aof-flush-force-stall 0
+            fail "SET did not park a chunk while fsync was stalled"
+        }
+
+        r debug aof-simulate-force-fsync-failure
+        assert {[r debug aof-force-fsync-fail-offset] != -1}
+
+        # The still-parked client gets disconnected by the existing
+        # AOF-error protection (its held write can't be trusted durable) --
+        # expected, and not what this test is checking.
+        catch {$rd read}
+        $rd close
+
+        # Arm a genuinely separate write failure (Y), strictly after the
+        # forced-fsync-only one (X) above, and let the server's own flush
+        # retries drive it -- deliberately not using BGREWRITEAOF here,
+        # since its unconditional file-close fsync would race a legitimate
+        # resolution of X independently of Y, muddying which one actually
+        # cleared the offset. The stall from above stays in effect
+        # throughout, so nothing else can independently advance
+        # fsynced_reploff past X while waiting.
+        r debug aof-flush-force-error 1
+        wait_for_condition 30 100 {
+            [r debug aof-force-fsync-fail-offset] eq {-1}
+        } else {
+            r debug aof-flush-force-error 0
+            r debug aof-flush-force-stall 0
+            fail "aof_force_fsync_fail_offset was not reset by the later,\
+                unrelated write failure (stayed stale)"
+        }
+
+        r debug aof-flush-force-error 0
+        r debug aof-flush-force-stall 0
+        wait_for_condition 50 20 {
+            [catch {r set bgk_stale2 v2}] == 0
+        } else {
+            fail "aof_last_write_status did not clear after disarming the\
+                simulated write error"
+        }
+    }
 }
 
 # Module clients unblocked via RM_BlockClientOnKeys() reply straight from their
