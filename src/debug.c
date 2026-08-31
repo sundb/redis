@@ -997,24 +997,16 @@ NULL
     {
         server.aof_flush_sleep = atoi(c->argv[2]->ptr);
         addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"aof-flush-force-error") &&
-               c->argc == 3)
-    {
+    } else if (!strcasecmp(c->argv[1]->ptr,"aof-flush-force-error") && c->argc == 3) {
         server.aof_flush_force_error = atoi(c->argv[2]->ptr);
         addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"aof-flush-force-stall") &&
-               c->argc == 3)
-    {
+    } else if (!strcasecmp(c->argv[1]->ptr,"aof-flush-force-stall") && c->argc == 3) {
         server.aof_flush_force_stall = atoi(c->argv[2]->ptr);
         addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"aof-flush-force-fsync-error") &&
-               c->argc == 3)
-    {
+    } else if (!strcasecmp(c->argv[1]->ptr,"aof-flush-force-fsync-error") && c->argc == 3) {
         server.aof_flush_force_fsync_error = atoi(c->argv[2]->ptr);
         addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"aof-simulate-force-fsync-failure") &&
-               c->argc == 2)
-    {
+    } else if (!strcasecmp(c->argv[1]->ptr,"aof-simulate-force-fsync-failure") && c->argc == 2) {
         /* Test-only: directly simulate a BGALWAYS forced-fsync-only failure
          * (see flushAppendOnlyFile()'s AOF_FSYNC_BGALWAYS force branch)
          * without an actual forced flush call, so tests can set up this
@@ -1027,9 +1019,7 @@ NULL
         if (server.aof_force_fsync_fail_offset == -1)
             server.aof_force_fsync_fail_offset = server.master_repl_offset;
         addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"aof-force-fsync-fail-offset") &&
-               c->argc == 2)
-    {
+    } else if (!strcasecmp(c->argv[1]->ptr,"aof-force-fsync-fail-offset") && c->argc == 2) {
         /* Test-only introspection: read server.aof_force_fsync_fail_offset
          * directly, so tests can assert it was reset by an unrelated later
          * write failure without depending on real fsync/bio timing to

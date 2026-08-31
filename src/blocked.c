@@ -907,8 +907,7 @@ void blockedBeforeSleep(void) {
     /* Unblock all the clients blocked for synchronous replication
      * in WAIT or WAITAOF. Also drains reply chunks parked by
      * appendfsync bgalways once the durable offset moves. */
-    if (listLength(server.clients_waiting_acks) ||
-        listLength(server.sync_clients_with_pending))
+    if (listLength(server.clients_waiting_acks) || listLength(server.sync_clients_with_pending))
         processClientsWaitingReplicas();
 
     /* Try to process blocked clients every once in while.

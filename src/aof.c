@@ -1568,12 +1568,10 @@ void flushAppendOnlyFile(int force) {
         return;
     }
 
-    if (server.aof_fsync == AOF_FSYNC_EVERYSEC ||
-        server.aof_fsync == AOF_FSYNC_BGALWAYS)
+    if (server.aof_fsync == AOF_FSYNC_EVERYSEC || server.aof_fsync == AOF_FSYNC_BGALWAYS)
         sync_in_progress = aofFsyncInProgress();
 
-    if ((server.aof_fsync == AOF_FSYNC_EVERYSEC ||
-         server.aof_fsync == AOF_FSYNC_BGALWAYS) && !force) {
+    if ((server.aof_fsync == AOF_FSYNC_EVERYSEC || server.aof_fsync == AOF_FSYNC_BGALWAYS) && !force) {
         /* With this append fsync policy we do background fsyncing.
          * If the fsync is still in progress we can try to delay
          * the write for a couple of seconds. */
@@ -1780,7 +1778,8 @@ try_fsync:
                 server.aof_force_fsync_fail_offset = -1;
             }
         } else if (!aofFsyncInProgress() &&
-                   server.aof_last_incr_fsync_offset != server.aof_last_incr_size) {
+                   server.aof_last_incr_fsync_offset != server.aof_last_incr_size)
+        {
             /* Fire a background fsync after every flush (no 1s interval). The bio
              * worker advances fsynced_reploff_pending; replies are gated on it. */
             aof_background_fsync(server.aof_fd);

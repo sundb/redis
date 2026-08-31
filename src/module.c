@@ -9041,8 +9041,7 @@ void moduleHandleBlockedClients(void) {
              * unconditionally bracketing would park a superfluous empty
              * chunk on every module unblock, not just the thread-safe-context
              * reply case this is for. */
-            int reply_client_has_data = bc->reply_client->bufpos > 0 ||
-                                         listLength(bc->reply_client->reply) > 0;
+            int reply_client_has_data = bc->reply_client->bufpos > 0 || listLength(bc->reply_client->reply) > 0;
             syncReplCookie sync_rep = {0, 0, NULL};
             if (reply_client_has_data)
                 sync_rep = syncReplBeginCommand(c);
