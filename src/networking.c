@@ -5466,7 +5466,7 @@ int syncReplWaitLocalAof(void) {
  *   on the same client must queue behind it, even a non-propagating one (a pure
  *   read, CLIENT REPLY SKIP, etc.), or the client would observe replies out of
  *   command order. */
-int clientSyncRepActive(client *c) {
+static int clientSyncRepActive(client *c) {
     if (c->conn == NULL) return 0;
     if (c->flags & (CLIENT_SLAVE | CLIENT_MASTER)) return 0;
     if (syncReplWaitLocalAof()) return 1;
@@ -5531,7 +5531,7 @@ static void freeSyncReplyChunkContents(client *c, syncReplyChunk *chunk) {
  * begin in c->buf and c->reply, and sets the force-new-block flag if needed
  * (see below) to prevent in-place tail-extension from leaking this command's
  * bytes into a prior command's reply block. */
-void syncReplStartCommand(client *c, size_t *inline_start, listNode **list_tail_start) {
+static void syncReplStartCommand(client *c, size_t *inline_start, listNode **list_tail_start) {
     *inline_start = c->bufpos;
     *list_tail_start = listLast(c->reply);
     /* Remembered for the whole command (unlike sync_rep_force_new_block,
@@ -5564,6 +5564,18 @@ void syncReplStartCommand(client *c, size_t *inline_start, listNode **list_tail_
         c->sync_rep_force_new_block = 1;
 }
 
+/* Convenience wrapper combining the clientSyncRepActive() check with
+ * syncReplStartCommand(): every call site needs both together, so this
+ * bundles them into one call and one cookie instead of separate active-flag
+ * and snapshot locals. */
+syncReplCookie syncReplBeginCommand(client *c) {
+    syncReplCookie sr = {0, 0, NULL};
+    sr.active = clientSyncRepActive(c);
+    if (sr.active)
+        syncReplStartCommand(c, &sr.inline_start, &sr.list_tail_start);
+    return sr;
+}
+
 /* Called at the end of call() once c->woff has been set. Slices everything
  * appended between (inline_start, c->bufpos) and after list_tail_start in
  * c->reply into a new chunk tagged with woff.
@@ -5584,7 +5596,9 @@ void syncReplStartCommand(client *c, size_t *inline_start, listNode **list_tail_
  *   - a passthrough chunk carries 0 — a non-propagating reply queued behind an
  *     earlier pending chunk to preserve RESP order, released as soon as the
  *     chunk ahead of it is. */
-void syncReplFinishCommand(client *c, long long woff, size_t inline_start, listNode *list_tail_start) {
+void syncReplFinishCommand(client *c, long long woff, const syncReplCookie *sr) {
+    if (!sr->active) return;
+
     /* Clear the force-new-block flag for safety: if the command produced no
      * bytes, _addReplyPayloadToList was never called and the flag would stick
      * into the next command. Also clear the boundary node so it doesn't stick
@@ -5592,9 +5606,9 @@ void syncReplFinishCommand(client *c, long long woff, size_t inline_start, listN
     c->sync_rep_force_new_block = 0;
     c->sync_rep_boundary_node = NULL;
 
-    size_t inline_delta = ((size_t)c->bufpos > inline_start)
-        ? (size_t)c->bufpos - inline_start : 0;
-    listNode *new_first = list_tail_start ? list_tail_start->next : listFirst(c->reply);
+    size_t inline_delta = ((size_t)c->bufpos > sr->inline_start)
+        ? (size_t)c->bufpos - sr->inline_start : 0;
+    listNode *new_first = sr->list_tail_start ? sr->list_tail_start->next : listFirst(c->reply);
 
     syncReplyChunk *chunk = zmalloc(sizeof(*chunk));
     chunk->woff = woff;
@@ -5615,12 +5629,12 @@ void syncReplFinishCommand(client *c, long long woff, size_t inline_start, listN
         block->size = usable_size - sizeof(clientReplyBlock);
         block->used = inline_delta;
         block->buf_encoded = c->buf_encoded;
-        memcpy(block->buf, c->buf + inline_start, inline_delta);
+        memcpy(block->buf, c->buf + sr->inline_start, inline_delta);
         listAddNodeTail(chunk->reply_list, block);
         c->sync_pending_bytes += block->size;
 
         /* Shrink the inline buf back: the bytes now live in the chunk. */
-        c->bufpos = (int)inline_start;
+        c->bufpos = (int)sr->inline_start;
         /* If the inline buf is now empty, allow future commands to start
          * fresh (avoid spurious encoded-mode allocations for plain replies). */
         if (c->bufpos == 0) c->buf_encoded = 0;
@@ -5677,19 +5691,18 @@ void syncReplFinishCommand(client *c, long long woff, size_t inline_start, listN
  * whose "work" is not call() itself and so has no natural pre-work offset
  * field to read (e.g. module.c's blocked-client reply callbacks, which pass
  * their own locally captured pre-callback offset). */
-void syncReplFinishByOffset(client *c, long long pre_work_repl_offset,
-                             size_t sync_rep_inline_start, listNode *sync_rep_list_tail_start) {
+void syncReplFinishByOffset(client *c, long long pre_work_repl_offset, const syncReplCookie *sr) {
     if (server.master_repl_offset > pre_work_repl_offset) {
         /* Propagation happened — chunk the reply on the resulting offset. */
         c->woff = server.master_repl_offset;
         server.latest_woff = c->woff;
-        syncReplFinishCommand(c, c->woff, sync_rep_inline_start, sync_rep_list_tail_start);
+        syncReplFinishCommand(c, c->woff, sr);
     } else if (c->sync_pending_replies && listLength(c->sync_pending_replies) > 0) {
         /* Nothing propagated, but the client still has pending chunks from
          * earlier commands. RESP ordering requires this reply to queue behind
          * them. Use woff=0 (passthrough — drains as soon as the head chunk
          * does). */
-        syncReplFinishCommand(c, 0, sync_rep_inline_start, sync_rep_list_tail_start);
+        syncReplFinishCommand(c, 0, sr);
     }
 }
 
@@ -5705,8 +5718,7 @@ void syncReplFinishByOffset(client *c, long long pre_work_repl_offset,
  * unblockClientOnKey (blocked.c; a blocked command's reissue wraps call() in
  * its own enterExecutionUnit, so call() itself can't observe the flush —
  * blocked.c calls this only after its own afterCommand()). */
-void syncReplFinishOrDeferChunk(client *c, size_t sync_rep_inline_start,
-                                 listNode *sync_rep_list_tail_start) {
+void syncReplFinishOrDeferChunk(client *c, const syncReplCookie *sr) {
     if (c->flags & CLIENT_BLOCKED) {
         /* The command blocked again, so its reply has not been produced yet —
          * it will be generated later in the unblock completion callback,
@@ -5719,7 +5731,7 @@ void syncReplFinishOrDeferChunk(client *c, size_t sync_rep_inline_start,
         c->sync_rep_boundary_node = NULL;
         return;
     }
-    syncReplFinishByOffset(c, c->sync_pre_command_repl_offset, sync_rep_inline_start, sync_rep_list_tail_start);
+    syncReplFinishByOffset(c, c->sync_pre_command_repl_offset, sr);
 }
 
 /* Splice one releasable pending chunk's blocks back into c->reply (head-of-

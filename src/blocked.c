@@ -258,12 +258,8 @@ void replyToBlockedClientTimedOut(client *c) {
         return;
     }
 
-    int sync_rep_active = clientSyncRepActive(c);
-    size_t sync_rep_inline_start = 0;
-    listNode *sync_rep_list_tail_start = NULL;
     long long pre_repl_offset = server.master_repl_offset;
-    if (sync_rep_active)
-        syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+    syncReplCookie sync_rep = syncReplBeginCommand(c);
 
     if (c->bstate.btype == BLOCKED_LAZYFREE) {
         /* SFLUSH: reply with empty array, FLUSH*: reply with OK */
@@ -287,11 +283,11 @@ void replyToBlockedClientTimedOut(client *c) {
         serverPanic("Unknown btype in replyToBlockedClientTimedOut().");
     }
 
-    if (sync_rep_active) {
+    if (sync_rep.active) {
         if (c->bstate.btype == BLOCKED_LAZYFREE)
-            syncReplFinishCommand(c, c->woff, sync_rep_inline_start, sync_rep_list_tail_start);
+            syncReplFinishCommand(c, c->woff, &sync_rep);
         else
-            syncReplFinishByOffset(c, pre_repl_offset, sync_rep_inline_start, sync_rep_list_tail_start);
+            syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
     }
 }
 
@@ -349,11 +345,7 @@ void disconnectAllBlockedClients(void) {
                  * avoid acking. If the reply does end up chunked here, that
                  * call picks this client up via server.sync_clients_with_pending
                  * and disconnects it instead of letting the +OK go out. */
-                size_t sync_rep_inline_start = 0;
-                listNode *sync_rep_list_tail_start = NULL;
-                int sync_rep_active = clientSyncRepActive(c);
-                if (sync_rep_active)
-                    syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+                syncReplCookie sync_rep = syncReplBeginCommand(c);
 
                 /* SFLUSH: reply with empty array, FLUSH*: reply with OK */
                 if (c->cmd && c->cmd->proc == sflushCommand)
@@ -361,8 +353,8 @@ void disconnectAllBlockedClients(void) {
                 else
                     addReply(c, shared.ok);
 
-                if (sync_rep_active)
-                    syncReplFinishCommand(c, c->woff, sync_rep_inline_start, sync_rep_list_tail_start);
+                if (sync_rep.active)
+                    syncReplFinishCommand(c, c->woff, &sync_rep);
 
                 updateStatsOnUnblock(c, 0, 0, 0);
                 c->flags &= ~CLIENT_PENDING_COMMAND;
@@ -807,11 +799,7 @@ static void unblockClientOnKey(client *c, robj *key) {
          * only after propagation has actually flushed (which itself waits for
          * execution_nesting == 0, i.e. after this function's own afterCommand()
          * call below). */
-        int sync_rep_active = clientSyncRepActive(c);
-        size_t sync_rep_inline_start = 0;
-        listNode *sync_rep_list_tail_start = NULL;
-        if (sync_rep_active)
-            syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+        syncReplCookie sync_rep = syncReplBeginCommand(c);
 
         /* We want the command processing and the unblock handler (see RM_Call 'K' option)
          * to run atomically, this is why we must enter the execution unit here before
@@ -838,8 +826,8 @@ static void unblockClientOnKey(client *c, robj *key) {
         exitExecutionUnit();
         afterCommand(c);
 
-        if (sync_rep_active)
-            syncReplFinishOrDeferChunk(c, sync_rep_inline_start, sync_rep_list_tail_start);
+        if (sync_rep.active)
+            syncReplFinishOrDeferChunk(c, &sync_rep);
 
         /* Clear the CLIENT_REEXECUTING_COMMAND flag after the proc is executed. */
         c->flags &= ~CLIENT_REEXECUTING_COMMAND;
@@ -895,17 +883,13 @@ void unblockClientOnError(client *c, const char *err_str) {
          * (passthrough) protection against an earlier, still-parked reply
          * on the same connection -- same reasoning as
          * replyToBlockedClientTimedOut(). */
-        int sync_rep_active = clientSyncRepActive(c);
-        size_t sync_rep_inline_start = 0;
-        listNode *sync_rep_list_tail_start = NULL;
         long long pre_repl_offset = server.master_repl_offset;
-        if (sync_rep_active)
-            syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+        syncReplCookie sync_rep = syncReplBeginCommand(c);
 
         addReplyError(c, err_str);
 
-        if (sync_rep_active)
-            syncReplFinishByOffset(c, pre_repl_offset, sync_rep_inline_start, sync_rep_list_tail_start);
+        if (sync_rep.active)
+            syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
     }
     updateStatsOnUnblock(c, 0, 0, 1);
     if (c->flags & CLIENT_PENDING_COMMAND)

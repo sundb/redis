@@ -3489,13 +3489,22 @@ void unlinkClient(client *c);
 void tryUnlinkClientFromPendingRefReply(client *c, int force);
 int writeToClient(client *c, int handler_installed);
 void linkClient(client *c);
-/* Reply holding until the local AOF fsync catches up (appendfsync bgalways). */
-int clientSyncRepActive(client *c);
+
+/* Reply holding until the local AOF fsync catches up (appendfsync bgalways).
+ * syncReplBeginCommand() bundles the clientSyncRepActive() check together with
+ * syncReplStartCommand()'s reply-buffer snapshot into one cookie, since every
+ * call site needs both together and would otherwise juggle them as separate
+ * locals. */
+typedef struct syncReplCookie {
+    int active;
+    size_t inline_start;
+    listNode *list_tail_start;
+} syncReplCookie;
 int syncReplWaitLocalAof(void);
-void syncReplStartCommand(client *c, size_t *inline_start, listNode **list_tail_start);
-void syncReplFinishCommand(client *c, long long woff, size_t inline_start, listNode *list_tail_start);
-void syncReplFinishByOffset(client *c, long long pre_work_repl_offset, size_t sync_rep_inline_start, listNode *sync_rep_list_tail_start);
-void syncReplFinishOrDeferChunk(client *c, size_t sync_rep_inline_start, listNode *sync_rep_list_tail_start);
+syncReplCookie syncReplBeginCommand(client *c);
+void syncReplFinishCommand(client *c, long long woff, const syncReplCookie *sr);
+void syncReplFinishByOffset(client *c, long long pre_work_repl_offset, const syncReplCookie *sr);
+void syncReplFinishOrDeferChunk(client *c, const syncReplCookie *sr);
 void drainSyncPendingReplies(client *c);
 void freeSyncPendingReplies(client *c);
 void disconnectAllSyncRepPendingClients(const char *reason);

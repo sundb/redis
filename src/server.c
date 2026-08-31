@@ -4102,11 +4102,9 @@ void call(client *c, int flags) {
      * "did this propagate" can't be answered from in here. blocked.c does its own
      * syncReplStartCommand/syncReplFinishCommand bracketing around the whole
      * reissue instead, once nesting is truly back to 0. */
-    int sync_rep_active = (server.execution_nesting == 0) && clientSyncRepActive(c);
-    size_t sync_rep_inline_start = 0;
-    listNode *sync_rep_list_tail_start = NULL;
-    if (sync_rep_active)
-        syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+    syncReplCookie sync_rep = {0, 0, NULL};
+    if (server.execution_nesting == 0)
+        sync_rep = syncReplBeginCommand(c);
 
     /* Use monotonic clock if available, and update cached time if needed */
     const int use_hw_clock = monotonicGetType() == MONOTONIC_CLOCK_HW;
@@ -4351,8 +4349,8 @@ void call(client *c, int flags) {
      * performEvictions) so DELs propagated by an eviction this command triggered
      * are covered too — losing them on a crash would resurrect an evicted key
      * with its old value, so their reply must wait for the same fsync. */
-    if (sync_rep_active && server.execution_nesting == 0)
-        syncReplFinishOrDeferChunk(c, sync_rep_inline_start, sync_rep_list_tail_start);
+    if (sync_rep.active && server.execution_nesting == 0)
+        syncReplFinishOrDeferChunk(c, &sync_rep);
 
     /* Client pause takes effect after a transaction has finished. This needs
      * to be located after everything is propagated. */

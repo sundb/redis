@@ -8681,20 +8681,16 @@ int moduleTryServeClientBlockedOnKey(client *c, robj *key) {
      * moduleFreeContext()'s matching exitExecutionUnit()+
      * postExecutionUnitOperations() once nesting drops back to 0 — which
      * must therefore run *before* we compare offsets, not after. */
-    int sync_rep_active = clientSyncRepActive(c);
-    size_t sync_rep_inline_start = 0;
-    listNode *sync_rep_list_tail_start = NULL;
     long long pre_repl_offset = server.master_repl_offset;
-    if (sync_rep_active)
-        syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+    syncReplCookie sync_rep = syncReplBeginCommand(c);
 
     if (bc->reply_callback(&ctx,(void**)c->argv,c->argc) == REDISMODULE_OK)
         served = 1;
 
     moduleFreeContext(&ctx);
 
-    if (sync_rep_active)
-        syncReplFinishByOffset(c, pre_repl_offset, sync_rep_inline_start, sync_rep_list_tail_start);
+    if (sync_rep.active)
+        syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
 
     return served;
 }
@@ -8997,20 +8993,16 @@ void moduleHandleBlockedClients(void) {
              * nesting, so any propagation reply_callback queues is only
              * flushed into server.master_repl_offset by moduleFreeContext()'s
              * matching exitExecutionUnit()+postExecutionUnitOperations(). */
-            int sync_rep_active = clientSyncRepActive(c);
-            size_t sync_rep_inline_start = 0;
-            listNode *sync_rep_list_tail_start = NULL;
             long long pre_repl_offset = server.master_repl_offset;
-            if (sync_rep_active)
-                syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+            syncReplCookie sync_rep = syncReplBeginCommand(c);
 
             bc->reply_callback(&ctx,(void**)c->argv,c->argc);
             reply_us = elapsedUs(replyTimer);
 
             moduleFreeContext(&ctx);
 
-            if (sync_rep_active)
-                syncReplFinishByOffset(c, pre_repl_offset, sync_rep_inline_start, sync_rep_list_tail_start);
+            if (sync_rep.active)
+                syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
         }
         if (c && bc->blocked_on_keys_explicit_unblock) {
             serverAssert(bc->blocked_on_keys);
@@ -9051,18 +9043,16 @@ void moduleHandleBlockedClients(void) {
              * reply case this is for. */
             int reply_client_has_data = bc->reply_client->bufpos > 0 ||
                                          listLength(bc->reply_client->reply) > 0;
-            size_t sync_rep_inline_start = 0;
-            listNode *sync_rep_list_tail_start = NULL;
-            int sync_rep_active = reply_client_has_data && clientSyncRepActive(c);
-            if (sync_rep_active)
-                syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+            syncReplCookie sync_rep = {0, 0, NULL};
+            if (reply_client_has_data)
+                sync_rep = syncReplBeginCommand(c);
 
             AddReplyFromClient(c, bc->reply_client);
 
-            if (sync_rep_active) {
+            if (sync_rep.active) {
                 c->woff = server.master_repl_offset;
                 server.latest_woff = c->woff;
-                syncReplFinishCommand(c, c->woff, sync_rep_inline_start, sync_rep_list_tail_start);
+                syncReplFinishCommand(c, c->woff, &sync_rep);
             }
         }
         moduleReleaseTempClient(bc->reply_client);
@@ -9159,12 +9149,8 @@ void moduleBlockedClientTimedOut(client *c) {
          * matching exitExecutionUnit()+postExecutionUnitOperations() once
          * nesting drops back to 0 -- which must therefore run *before* we
          * compare offsets, not after. */
-        int sync_rep_active = clientSyncRepActive(c);
-        size_t sync_rep_inline_start = 0;
-        listNode *sync_rep_list_tail_start = NULL;
         long long pre_repl_offset = server.master_repl_offset;
-        if (sync_rep_active)
-            syncReplStartCommand(c, &sync_rep_inline_start, &sync_rep_list_tail_start);
+        syncReplCookie sync_rep = syncReplBeginCommand(c);
 
         /* In theory, the user should always pass the timeout handler as an
          * argument, but better to be safe than sorry. */
@@ -9172,8 +9158,8 @@ void moduleBlockedClientTimedOut(client *c) {
 
         moduleFreeContext(&ctx);
 
-        if (sync_rep_active)
-            syncReplFinishByOffset(c, pre_repl_offset, sync_rep_inline_start, sync_rep_list_tail_start);
+        if (sync_rep.active)
+            syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
     } else {
         moduleFreeContext(&ctx);
     }
