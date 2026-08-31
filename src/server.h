@@ -2388,11 +2388,11 @@ struct redisServer {
     int aof_last_write_status;      /* C_OK or C_ERR */
     int aof_last_write_errno;       /* Valid if aof write/fsync status is ERR */
     long long aof_force_fsync_fail_offset; /* master_repl_offset at the time a BGALWAYS
-                                             * forced (synchronous) fsync failed and set
-                                             * aof_last_write_status to C_ERR with no
-                                             * leftover unwritten aof_buf bytes to retry;
-                                             * -1 when there's no such failure pending
-                                             * self-heal. See aofRefreshFsyncedReploff(). */
+                                            * forced (synchronous) fsync failed and set
+                                            * aof_last_write_status to C_ERR with no
+                                            * leftover unwritten aof_buf bytes to retry;
+                                            * -1 when there's no such failure pending
+                                            * self-heal. See aofRefreshFsyncedReploff(). */
     int aof_load_truncated;         /* Don't stop on unexpected AOF EOF. */
     off_t aof_load_corrupt_tail_max_size; /* The max size of broken AOF tail than can be ignored. */
     int aof_use_rdb_preamble;       /* Specify base AOF to use RDB encoding on AOF rewrites. */

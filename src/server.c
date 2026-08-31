@@ -2089,12 +2089,10 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * background fsync failure, while a main-thread write() or forced-fsync
      * failure sets aof_last_write_status. (New writes are already rejected with
      * -MISCONF via writeCommandsDeniedByDiskError, which checks both.) */
-    if (server.aof_fsync == AOF_FSYNC_BGALWAYS &&
-        listLength(server.sync_clients_with_pending) > 0) {
+    if (server.aof_fsync == AOF_FSYNC_BGALWAYS && listLength(server.sync_clients_with_pending) > 0) {
         int aof_bio_fsync_status;
         atomicGet(server.aof_bio_fsync_status, aof_bio_fsync_status);
-        if (aof_bio_fsync_status == C_ERR ||
-            server.aof_last_write_status == C_ERR)
+        if (aof_bio_fsync_status == C_ERR || server.aof_last_write_status == C_ERR)
             disconnectAllSyncRepPendingClients("AOF write/fsync error");
     }
 
