@@ -568,6 +568,51 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         $r config set appendonly yes
     }
 
+    test {bgalways: a client held on a not-yet-durable write is disconnected (not acked) by CONFIG SET appendfsync away from bgalways} {
+        # Switching appendfsync away from bgalways (to everysec/always/no)
+        # disarms syncReplWaitLocalAof()'s gate the same way stopAppendOnly()
+        # pinning fsynced_reploff to -1 does. Without disconnecting first, the
+        # very next drainSyncPendingReplies() would release every still-parked
+        # chunk unconditionally, acking a write that was never actually made
+        # durable.
+        $r set bgk_fsyncoff_warm v
+        assert_equal [$r waitaof 1 0 5000] {1 0}
+
+        # Stall the durable offset (no error) so a write stays held.
+        $r debug aof-flush-force-stall 1
+
+        set rd [redis_deferring_client]
+        set before_disc [s sync_repl_pending_disconnects]
+        $rd set bgk_fsyncoff v1
+        wait_for_condition 100 20 {
+            [s sync_repl_pending_clients] == 1
+        } else {
+            $rd close
+            $r debug aof-flush-force-stall 0
+            fail "SET did not park a chunk while fsync was stalled"
+        }
+
+        $r config set appendfsync everysec
+
+        set got_ok 0
+        catch {
+            if {[$rd read] eq {OK}} { set got_ok 1 }
+        }
+        assert_equal 0 $got_ok
+        $rd close
+
+        wait_for_condition 100 20 {
+            [s sync_repl_pending_disconnects] > $before_disc
+        } else {
+            fail "client held on a write left non-durable by CONFIG SET\
+                appendfsync everysec was not disconnected via\
+                disconnectAllSyncRepPendingClients"
+        }
+
+        $r debug aof-flush-force-stall 0
+        $r config set appendfsync bgalways
+    }
+
     test {bgalways: a transient forced-fsync failure during BGREWRITEAOF self-heals instead of permanently denying writes} {
         # A classic appendfsync always exits(1) on a synchronous fsync
         # failure rather than continuing degraded, so it never has to

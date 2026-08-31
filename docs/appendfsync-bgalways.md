@@ -87,8 +87,14 @@ differs from classic `always`, where data is on disk before it is ever observabl
 - **Forced fsync (shutdown / stopAppendOnly / rewrite-done).** Done synchronously after draining the
   bio AOF worker, so a late bio completion cannot regress the durable offset.
 - **Config switching.** Switching `appendfsync` into/out of `always`/`bgalways` drains the bio AOF
-  worker first. Switching away from `bgalways` releases held replies under the new policy's
-  semantics.
+  worker first. Switching *away* from `bgalways` (to `always`, `everysec`, or `no`) also disarms
+  `syncReplWaitLocalAof()`'s gate, the same way `stopAppendOnly()` pinning `fsynced_reploff` to `-1`
+  does — without disconnecting first, the very next `drainSyncPendingReplies()` would release every
+  still-parked chunk unconditionally, regardless of whether its data ever actually got fsynced.
+  `updateAppendFsync()` therefore calls `disconnectAllSyncRepPendingClients` whenever the new
+  `appendfsync` value is no longer `bgalways` and clients are still waiting on
+  `server.sync_clients_with_pending`, mirroring the same protection used for `CONFIG SET appendonly
+  no` and replica demotion below.
 - **`CONFIG SET appendonly no`.** `stopAppendOnly()` pins `fsynced_reploff` to `-1`, which disarms
   `syncReplWaitLocalAof()`'s gate — without disconnecting first, the very next `drainSyncPendingReplies()`
   would release every still-parked chunk unconditionally, even one whose data `stopAppendOnly()`'s own
@@ -219,8 +225,8 @@ differs from classic `always`, where data is on disk before it is ever observabl
 - `sync_repl_hold_depth_sum` — sum of queue depth at park time; `/hold_count` gives the average
   number of commands held together (counter).
 - `sync_repl_hold_latency_usec` — total time chunks spent parked (counter).
-- `sync_repl_pending_disconnects` — clients dropped while holding chunks, i.e. AOF error or demotion
-  (counter).
+- `sync_repl_pending_disconnects` — clients dropped while holding chunks, i.e. AOF error, demotion,
+  `CONFIG SET appendonly no`, or `appendfsync` switched away from `bgalways` (counter).
 
 ## Testing
 `tests/integration/appendfsync-bgalways.tcl`, driven by two fault-injection hooks:

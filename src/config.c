@@ -2775,6 +2775,15 @@ int updateAppendFsync(const char **err) {
          * BGALWAYS forced-fsync path. */
         bioDrainWorker(BIO_AOF_FSYNC);
     }
+    if (server.aof_fsync != AOF_FSYNC_BGALWAYS && listLength(server.sync_clients_with_pending) > 0) {
+        /* Reply holding (appendfsync bgalways): moving away from bgalways disarms
+         * syncReplWaitLocalAof()'s gate, so on the very next drainSyncPendingReplies()
+         * every chunk still parked on server.sync_clients_with_pending would be
+         * released unconditionally -- acking a write whose durability was never
+         * confirmed. Disconnect those clients first instead, the same way
+         * stopAppendOnly() and replicationSetMaster()'s demotion handling do. */
+        disconnectAllSyncRepPendingClients("appendfsync changed away from bgalways");
+    }
     return 1;
 }
 
