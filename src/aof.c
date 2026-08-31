@@ -1531,6 +1531,7 @@ void flushAppendOnlyFile(int force) {
     int sync_in_progress = 0;
     mstime_t latency;
 
+    /* Test-only: DEBUG AOF-FLUSH-FORCE-* fault injection. */
     if (aofFlushFaultInjection(force)) return;
 
     if (sdslen(server.aof_buf) == 0) {
