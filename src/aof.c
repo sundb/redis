@@ -1453,6 +1453,60 @@ ssize_t aofWrite(int fd, const char *buf, size_t len) {
     return totwritten;
 }
 
+/* Test-only fault injection for flushAppendOnlyFile(), gating on the DEBUG
+ * AOF-FLUSH-FORCE-* flags below. Returns 1 if a fault was injected -- the
+ * caller must bail out immediately without touching the AOF -- or 0 to
+ * proceed with the real flush. */
+static int aofFlushFaultInjection(int force) {
+    /* Simulate a main-thread AOF write/fsync failure (e.g. ENOSPC). We set
+     * the error status and bail before writing/fsyncing, so fsynced_reploff
+     * stalls and any held bgalways clients stay held — the production
+     * soft-fail scenario. Clearing the flag lets the next flush write the
+     * buffered data and recover to C_OK. */
+    if (server.aof_flush_force_error) {
+        if (server.aof_last_write_status == C_OK)
+            serverLog(LL_WARNING,"Simulating an AOF write error (debug aof-flush-force-error).");
+        server.aof_last_write_status = C_ERR;
+        server.aof_last_write_errno = ENOSPC;
+        /* This simulates a real write() failure, the same distinct failure
+         * mode as the production write()-failure branch below -- clear any
+         * stale offset left over from an unrelated, already-superseded
+         * BGALWAYS forced-fsync-only failure, for the same reason that
+         * branch does. */
+        server.aof_force_fsync_fail_offset = -1;
+        return 1;
+    }
+
+    /* Simulate the BGALWAYS forced (synchronous) fsync path failing while
+     * the write() itself still succeeds (see DEBUG AOF-FLUSH-FORCE-FSYNC-
+     * ERROR). Intercepted here, ahead of aof_flush_force_stall and the
+     * empty-buffer/gap-detection logic below, so a caller of a forced flush
+     * (shutdown / stopAppendOnly / rewrite-done) hits this deterministically
+     * -- including while aof_flush_force_stall is also set to hold a
+     * write's bytes unflushed, which tests use to set up a genuine
+     * outstanding gap before forcing this failure. */
+    if (force && server.aof_fsync == AOF_FSYNC_BGALWAYS &&
+        server.aof_flush_force_fsync_error)
+    {
+        serverLog(LL_WARNING, "Can't persist AOF for fsync error when the "
+            "AOF fsync policy is 'bgalways': Simulated (debug "
+            "aof-flush-force-fsync-error).");
+        server.aof_last_write_status = C_ERR;
+        server.aof_last_write_errno = EIO;
+        if (server.aof_force_fsync_fail_offset == -1)
+            server.aof_force_fsync_fail_offset = server.master_repl_offset;
+        return 1;
+    }
+
+    /* Stall the durable offset (skip write+fsync) without flagging an
+     * error, so a bgalways client's reply stays held while new writes are
+     * still accepted — used to set up the held-then-error scenario above. */
+    if (server.aof_flush_force_stall)
+        return 1;
+
+    return 0;
+}
+
 /* Write the append only file buffer on disk.
  *
  * Since we are required to write the AOF before replying to the client,
@@ -1477,52 +1531,7 @@ void flushAppendOnlyFile(int force) {
     int sync_in_progress = 0;
     mstime_t latency;
 
-    /* Test-only fault injection: simulate a main-thread AOF write/fsync failure
-     * (e.g. ENOSPC). We set the error status and bail before writing/fsyncing,
-     * so fsynced_reploff stalls and any held bgalways clients stay held — the
-     * production soft-fail scenario. Clearing the flag lets the next flush write
-     * the buffered data and recover to C_OK. */
-    if (server.aof_flush_force_error) {
-        if (server.aof_last_write_status == C_OK)
-            serverLog(LL_WARNING,"Simulating an AOF write error (debug aof-flush-force-error).");
-        server.aof_last_write_status = C_ERR;
-        server.aof_last_write_errno = ENOSPC;
-        /* This simulates a real write() failure, the same distinct failure
-         * mode as the production write()-failure branch below -- clear any
-         * stale offset left over from an unrelated, already-superseded
-         * BGALWAYS forced-fsync-only failure, for the same reason that
-         * branch does. */
-        server.aof_force_fsync_fail_offset = -1;
-        return;
-    }
-
-    /* Test-only fault injection: simulate the BGALWAYS forced (synchronous)
-     * fsync path failing while the write() itself still succeeds (see
-     * DEBUG AOF-FLUSH-FORCE-FSYNC-ERROR). Intercepted here, ahead of
-     * aof_flush_force_stall and the empty-buffer/gap-detection logic below,
-     * so a caller of a forced flush (shutdown / stopAppendOnly /
-     * rewrite-done) hits this deterministically -- including while
-     * aof_flush_force_stall is also set to hold a write's bytes unflushed,
-     * which tests use to set up a genuine outstanding gap before forcing
-     * this failure. */
-    if (force && server.aof_fsync == AOF_FSYNC_BGALWAYS &&
-        server.aof_flush_force_fsync_error)
-    {
-        serverLog(LL_WARNING, "Can't persist AOF for fsync error when the "
-            "AOF fsync policy is 'bgalways': Simulated (debug "
-            "aof-flush-force-fsync-error).");
-        server.aof_last_write_status = C_ERR;
-        server.aof_last_write_errno = EIO;
-        if (server.aof_force_fsync_fail_offset == -1)
-            server.aof_force_fsync_fail_offset = server.master_repl_offset;
-        return;
-    }
-
-    /* Test-only: stall the durable offset (skip write+fsync) without flagging an
-     * error, so a bgalways client's reply stays held while new writes are still
-     * accepted — used to set up the held-then-error scenario above. */
-    if (server.aof_flush_force_stall)
-        return;
+    if (aofFlushFaultInjection(force)) return;
 
     if (sdslen(server.aof_buf) == 0) {
         if (server.aof_last_incr_fsync_offset == server.aof_last_incr_size) {
