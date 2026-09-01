@@ -2135,6 +2135,25 @@ void updateClientUnsharedReplyBytes(client *c) {
         if (block->buf_encoded)
             c->reply_bytes_unshared += computeUnsharedReplyBytes(block->buf, block->used);
     }
+
+    /* Scan blocks parked in sync_pending_replies chunks (appendfsync bgalways):
+     * a chunk's reply_list can hold the same BULK_STR_REF zero-copy references
+     * as c->reply until it is drained, so it needs the same accounting. */
+    if (c->sync_pending_replies) {
+        listIter chunk_li;
+        listNode *chunk_ln;
+        listRewind(c->sync_pending_replies, &chunk_li);
+        while ((chunk_ln = listNext(&chunk_li))) {
+            syncReplyChunk *chunk = listNodeValue(chunk_ln);
+            listRewind(chunk->reply_list, &reply_li);
+            while ((reply_ln = listNext(&reply_li))) {
+                clientReplyBlock *block = listNodeValue(reply_ln);
+                if (block == NULL) continue; /* deferred-length placeholder */
+                if (block->buf_encoded)
+                    c->reply_bytes_unshared += computeUnsharedReplyBytes(block->buf, block->used);
+            }
+        }
+    }
 }
 
 /* Compute shared reply memory: total shared reply bytes and the unshared subset where the key

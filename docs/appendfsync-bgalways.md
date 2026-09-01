@@ -178,6 +178,13 @@ differs from classic `always`, where data is on disk before it is ever observabl
   it now also walks each parked chunk's `reply_list` (`protectReplyBlockList()`, shared with the
   `c->reply` scan), not just `c->buf`/`c->reply`. Without that, the bio thread and the eventual chunk
   drain/send would `decrRefCount()` the same object without synchronization.
+- **Same parked-chunk gap for the unshared-memory accounting.** `updateClientUnsharedReplyBytes()`
+  (backs `CLIENT LIST`'s `omem-unshared`, `INFO`'s `mem_clients_normal_unshared`, and `MEMORY STATS`)
+  walks `c->buf`/`c->reply` to find `BULK_STR_REF` references whose key was deleted and are now solely
+  owned by the client. It now also walks each chunk's `reply_list` on `c->sync_pending_replies`, for the
+  same reason as `protectReplyBlockList()` above: a reference can be parked there instead of `c->reply`.
+  Without that, a zero-copy reply parked in a chunk when its key is deleted was never counted as
+  unshared until the chunk drained, under-reporting memory for `maxmemory-clients` eviction decisions.
 - **`CLIENT_CLOSE_AFTER_REPLY` (QUIT, protocol errors) vs. a still-parked chunk.** `c->reply`/`c->bufpos`
   being empty only means the *specific bytes appended so far* aren't sitting there — under `bgalways`
   they may instead be parked in `c->sync_pending_replies`, not yet durable. `clientHasPendingReplies()`

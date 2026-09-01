@@ -717,6 +717,106 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         assert_equal {} [r get bgk_uaf_big]
     }
 
+    test {bgalways: memory stats include zero-copy refs parked in a sync_pending_replies chunk} {
+        # updateClientUnsharedReplyBytes() (which feeds CLIENT LIST's
+        # omem-unshared, INFO's mem_clients_normal_unshared, and MEMORY
+        # STATS) only scanned c->buf and c->reply. Under bgalways, a
+        # zero-copy GET reply can instead be parked in a chunk on
+        # c->sync_pending_replies (passthrough, to preserve ordering behind
+        # an earlier held write) -- if that chunk isn't scanned too,
+        # deleting the key while the reply sits there makes the client the
+        # sole owner of the value without ever counting it as unshared,
+        # which throws off maxmemory-clients eviction accounting.
+        r set bgk_mem_warm v
+        assert_equal [r waitaof 1 0 5000] {1 0}
+
+        set val_size 20000
+        r set bgk_mem_big [string repeat v $val_size]
+
+        r debug aof-flush-force-stall 1
+
+        set rd [redis_deferring_client]
+        $rd client setname bgk_mem_client
+        assert_equal {OK} [$rd read]
+
+        set before [s sync_repl_hold_count]
+        $rd set bgk_mem_k1 v1
+        wait_for_condition 100 20 {
+            [s sync_repl_pending_clients] == 1 &&
+            [s sync_repl_hold_count] > $before
+        } else {
+            $rd close
+            r debug aof-flush-force-stall 0
+            fail "SET did not park a chunk while fsync was stalled"
+        }
+
+        # This GET's zero-copy reply gets chunked too (passthrough, behind
+        # the still-parked SET), landing its BULK_STR_REF in
+        # c->sync_pending_replies instead of c->reply.
+        set before2 [s sync_repl_hold_count]
+        $rd get bgk_mem_big
+        wait_for_condition 100 20 {
+            [s sync_repl_hold_count] > $before2
+        } else {
+            $rd close
+            r debug aof-flush-force-stall 0
+            fail "GET's zero-copy reply was not routed through the\
+                reply-holding path behind the still-parked SET"
+        }
+
+        # DEL is itself a write and would also park behind the stall if
+        # issued synchronously on $rd, so fire it from another deferring
+        # client. The keyspace mutation happens immediately; only that
+        # client's own reply is deferred for durability, so a plain read on
+        # a separate, unaffected connection observes the deletion right away.
+        set rd_del [redis_deferring_client]
+        $rd_del del bgk_mem_big
+        wait_for_condition 50 20 {
+            [r exists bgk_mem_big] == 0
+        } else {
+            $rd close
+            $rd_del close
+            r debug aof-flush-force-stall 0
+            fail "DEL did not take effect while its own reply was held"
+        }
+
+        # bgk_mem_client is now the sole owner of the big value's object,
+        # but the reference sits in a parked chunk, not c->reply.
+        set omem_unshared 0
+        wait_for_condition 50 20 {
+            [set c [lsearch -inline [split [r client list] "\r\n"] *name=bgk_mem_client*]] ne {} &&
+            [regexp {omem-unshared=([0-9]+)} $c - omem_unshared] &&
+            $omem_unshared >= $val_size
+        } else {
+            $rd close
+            $rd_del close
+            r debug aof-flush-force-stall 0
+            fail "omem-unshared did not account for the reply parked in a\
+                sync_pending_replies chunk after the key was deleted\
+                (omem-unshared=$omem_unshared)"
+        }
+        regexp {omem-shared=([0-9]+)} $c - omem_shared
+        assert_morethan_equal $omem_shared $omem_unshared
+
+        set info_mem [r info memory]
+        assert {[getInfoProperty $info_mem mem_clients_normal_unshared] >= $val_size}
+
+        # Release the stall so both parked replies drain.
+        r debug aof-flush-force-stall 0
+        assert_equal {OK} [$rd read]
+        assert_equal [string repeat v $val_size] [$rd read]
+        $rd close
+        assert_equal {1} [$rd_del read]
+        $rd_del close
+
+        wait_for_condition 50 20 {
+            [s mem_clients_normal_unshared] == 0
+        } else {
+            fail "mem_clients_normal_unshared did not return to 0 after the\
+                parked chunk drained"
+        }
+    }
+
     test {bgalways: QUIT does not drop a still-parked reply out from under the client} {
         # clientHasPendingReplies() only looks at c->reply/c->bufpos. Once
         # syncReplFinishCommand() moves a command's reply bytes out into a
