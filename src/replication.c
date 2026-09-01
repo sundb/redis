@@ -5043,6 +5043,15 @@ void processClientsWaitingReplicas(void) {
             if (numlocal < c->bstate.numlocal) continue;
         }
 
+        /* Reply holding (appendfsync bgalways): this writes straight into c's
+         * reply buffer, entirely outside call(). WAIT/WAITAOF's own reply never
+         * propagates a write itself, so this only needs ordering (passthrough)
+         * protection against an earlier, still-parked reply on the same
+         * connection -- same reasoning as replyToBlockedClientTimedOut()'s
+         * BLOCKED_WAIT/BLOCKED_WAITAOF branches, this function's timeout twin. */
+        long long pre_repl_offset = server.master_repl_offset;
+        syncReplCookie sync_rep = syncReplBeginCommand(c);
+
         /* Reply before unblocking, because unblock client calls reqresAppendResponse */
         if (is_wait_aof) {
             /* WAITAOF has an array reply */
@@ -5052,6 +5061,8 @@ void processClientsWaitingReplicas(void) {
         } else {
             addReplyLongLong(c, numreplicas);
         }
+
+        if (sync_rep.active) syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
 
         unblockClient(c, 1);
     }

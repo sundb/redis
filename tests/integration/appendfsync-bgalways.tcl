@@ -989,6 +989,57 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         assert_equal {} [$rd read]
         $rd close
     }
+
+    test {bgalways: WAITAOF's success reply stays in order behind an earlier parked reply} {
+        # processClientsWaitingReplicas() writes WAIT/WAITAOF's success reply
+        # straight into c->reply once the offset/replica conditions are met,
+        # entirely outside call() -- unlike its timeout twin
+        # (replyToBlockedClientTimedOut()'s BLOCKED_WAIT/BLOCKED_WAITAOF
+        # branches), it didn't bracket this with
+        # syncReplBeginCommand/syncReplFinishByOffset. On the same connection,
+        # an earlier write's reply can still be parked in a
+        # sync_pending_replies chunk (not yet durable) when WAITAOF's local
+        # condition (fsynced_reploff) is satisfied -- without the bracket,
+        # WAITAOF's reply lands directly in c->reply while the earlier
+        # chunk is still queued, and the chunk is only appended to the tail
+        # of c->reply once it drains, so the client receives WAITAOF's reply
+        # before the write's own reply -- a RESP ordering violation.
+        r set bgk_waitaof_warm v
+        assert_equal [r waitaof 1 0 5000] {1 0}
+
+        r debug aof-flush-force-stall 1
+
+        set rd [redis_deferring_client]
+        $rd set bgk_waitaof_order v1
+        wait_for_condition 100 20 {
+            [s sync_repl_pending_clients] == 1
+        } else {
+            $rd close
+            r debug aof-flush-force-stall 0
+            fail "SET did not park a chunk while fsync was stalled"
+        }
+
+        # WAITAOF blocks on the same connection behind the still-parked SET,
+        # waiting for fsynced_reploff to reach its own offset (unchanged by
+        # WAITAOF itself, which propagates nothing).
+        $rd waitaof 1 0 0
+        wait_for_condition 100 20 {
+            [s blocked_clients] == 1
+        } else {
+            $rd close
+            r debug aof-flush-force-stall 0
+            fail "WAITAOF did not block behind the still-parked SET"
+        }
+
+        # Releasing the stall lets the fsync complete, which satisfies
+        # WAITAOF's local condition and drains SET's chunk around the same
+        # event. Replies must arrive in the order they were actually
+        # produced: SET's OK first, then WAITAOF's array.
+        r debug aof-flush-force-stall 0
+        assert_equal {OK} [$rd read]
+        assert_equal {1 0} [$rd read]
+        $rd close
+    }
 }
 
 # Module clients unblocked via RM_BlockClientOnKeys() reply straight from their

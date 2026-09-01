@@ -212,6 +212,11 @@ differs from classic `always`, where data is on disk before it is ever observabl
   before it blocked, same as `unblockClientForAsyncFlush()`), so it uses `c->woff` via
   `syncReplFinishCommand` directly instead. `BLOCKED_MODULE` delegates to the already-bracketed
   `moduleBlockedClientTimedOut()`.
+- **WAIT/WAITAOF's success reply.** `processClientsWaitingReplicas()` writes the success reply
+  (offset/replica conditions met) straight into `c->reply`, entirely outside `call()` — the same
+  situation as the timeout twin above, just on the success path instead of the timeout one. It also
+  propagates nothing itself, so it's bracketed the same way, with
+  `syncReplBeginCommand`/`syncReplFinishByOffset`.
 - **Not gated:** keyspace notifications, pub/sub messages, and client-side-caching invalidations are
   pushed outside the command reply path and are not held; under `bgalways` they may be emitted
   slightly before the corresponding write is durable.
