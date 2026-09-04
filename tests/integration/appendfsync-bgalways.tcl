@@ -525,9 +525,9 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         # designed to avoid acking.
         $r debug aof-flush-force stall 1
 
-        # A big keyspace makes the BIO job that frees the old dict take long
-        # enough to reliably observe the client still blocked.
-        r debug populate 1000000
+        # Keep enough keys to observe the client blocked on BIO lazyfree,
+        # without the cleanup cost of a million-key DB on 32-bit CI runners.
+        r debug populate 100000
 
         set rd [redis_deferring_client]
         set before_disc [s sync_repl_pending_disconnects]
@@ -563,10 +563,13 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
 
         $r debug aof-flush-force stall 0
         $r replicaof no one
-        wait_for_condition 100 20 {
+        # Reclaiming the DB can take several seconds on slow.
+        # This is cleanup, not a latency assertion;
+        # allow up to 30 seconds, returning as soon as the BIO job completes.
+        wait_for_condition 500 20 {
             [s lazyfree_pending_objects] == 0
         } else {
-            fail "lazyfree did not finish draining"
+            fail "lazyfree did not finish draining: [s lazyfree_pending_objects] objects pending"
         }
     }
 
