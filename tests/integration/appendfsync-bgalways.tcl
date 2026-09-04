@@ -35,6 +35,52 @@ proc bg_prog {c ncmds} {
     return $prog
 }
 
+# A parked reply is released from the main thread's beforeSleep path. Keep the
+# owning client on the main thread so re-arming its write path cannot touch an
+# I/O thread-owned connection event loop.
+start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appendfsync bgalways auto-aof-rewrite-percentage 0 io-threads 4}} {
+    set r [srv 0 client]
+
+    test {bgalways + io-threads: a parked client stays on main and drains safely} {
+        $r set bgk_iot_warm v
+        assert_equal [$r waitaof 1 0 5000] {1 0}
+
+        set rd [redis_deferring_client]
+        $rd client id
+        set rd_id [$rd read]
+
+        $r debug aof-flush-force-stall 1
+        set before [s sync_repl_hold_count]
+        $rd set bgk_iot v1
+        wait_for_condition 100 20 {
+            [s sync_repl_hold_count] > $before && [s sync_repl_pending_clients] >= 1
+        } else {
+            $rd close
+            $r debug aof-flush-force-stall 0
+            fail "write was not held under a stalled durable offset"
+        }
+
+        wait_for_condition 20 20 {
+            [regexp "id=$rd_id .*io-thread=(\[0-9\]+)" [$r client list] -> iothread]
+        } else {
+            $rd close
+            $r debug aof-flush-force-stall 0
+            fail "could not find the held client in CLIENT LIST"
+        }
+        assert_equal 0 $iothread
+
+        $r debug aof-flush-force-stall 0
+        assert_equal {OK} [$rd read]
+        $rd close
+        wait_for_condition 50 20 {
+            [s sync_repl_pending_clients] == 0
+        } else {
+            fail "pending clients did not drain after the write became durable"
+        }
+        assert_equal v1 [$r get bgk_iot]
+    }
+}
+
 start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appendfsync bgalways auto-aof-rewrite-percentage 0}} {
     set r [srv 0 client]
 
@@ -783,10 +829,14 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         # bgk_mem_client is now the sole owner of the big value's object,
         # but the reference sits in a parked chunk, not c->reply.
         set omem_unshared 0
+        set omem_shared 0
+        set omem 0
         wait_for_condition 50 20 {
             [set c [lsearch -inline [split [r client list] "\r\n"] *name=bgk_mem_client*]] ne {} &&
             [regexp {omem-unshared=([0-9]+)} $c - omem_unshared] &&
-            $omem_unshared >= $val_size
+            [regexp {omem-shared=([0-9]+)} $c - omem_shared] &&
+            [regexp {omem=([0-9]+)} $c - omem] &&
+            ($omem_unshared >= $val_size || ($omem_shared == 0 && $omem >= $val_size))
         } else {
             $rd close
             $rd_del close
@@ -795,11 +845,18 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
                 sync_pending_replies chunk after the key was deleted\
                 (omem-unshared=$omem_unshared)"
         }
-        regexp {omem-shared=([0-9]+)} $c - omem_shared
-        assert_morethan_equal $omem_shared $omem_unshared
-
-        set info_mem [r info memory]
-        assert {[getInfoProperty $info_mem mem_clients_normal_unshared] >= $val_size}
+        if {$omem_shared > 0} {
+            # The zero-copy reference survived, so it must be classified as
+            # unshared after DEL and included in the global memory statistic.
+            assert_morethan_equal $omem_shared $omem_unshared
+            set info_mem [r info memory]
+            assert {[getInfoProperty $info_mem mem_clients_normal_unshared] >= $val_size}
+        } else {
+            # With I/O threads the handoff may already have converted the
+            # reference into an owned reply block. It is then ordinary omem,
+            # not shared/unshared reference memory, but must remain accounted.
+            assert_morethan_equal $omem $val_size
+        }
 
         # Release the stall so both parked replies drain.
         r debug aof-flush-force-stall 0

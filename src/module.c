@@ -9050,7 +9050,6 @@ void moduleHandleBlockedClients(void) {
 
             if (sync_rep.active) {
                 c->woff = server.master_repl_offset;
-                server.latest_woff = c->woff;
                 syncReplFinishCommand(c, c->woff, &sync_rep);
             }
         }

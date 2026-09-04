@@ -225,7 +225,10 @@ differs from classic `always`, where data is on disk before it is ever observabl
   in-place-extending a prior reply's tail block, and `sync_rep_boundary_node` (same lifetime, but not
   one-shot) stops `setDeferredReply()` from merging a deferred header — e.g. `KEYS`/`SCAN`'s array
   length, filled in only after the array's elements were already appended — backward into that same
-  prior block. Mixed read/write pipelines with `io-threads > 1` are part of the test matrix.
+  prior block. A client with a parked chunk is pinned to the main thread until the chunk is released:
+  fsync completion drains chunks from the main thread's `beforeSleep` path, where touching an I/O
+  thread-owned connection event loop would be unsafe. The integration suite includes an
+  `io-threads 4` regression case for this handoff and drain path.
 
 ## Configuration
 - `appendfsync bgalways` — enable. Default remains `everysec`; classic `always` is unchanged.

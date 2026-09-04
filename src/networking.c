@@ -5714,7 +5714,6 @@ void syncReplFinishByOffset(client *c, long long pre_work_repl_offset, const syn
     if (server.master_repl_offset > pre_work_repl_offset) {
         /* Propagation happened — chunk the reply on the resulting offset. */
         c->woff = server.master_repl_offset;
-        server.latest_woff = c->woff;
         syncReplFinishCommand(c, c->woff, sr);
     } else if (c->sync_pending_replies && listLength(c->sync_pending_replies) > 0) {
         /* Nothing propagated, but the client still has pending chunks from
@@ -5789,6 +5788,16 @@ static void syncReplReleaseChunk(client *c, listNode *ln) {
         unlinkClientFromSyncPending(c);
 }
 
+/* Released chunks are spliced back from the main thread's beforeSleep path,
+ * not from a read event on the client's connection. Avoid touching an I/O
+ * thread-owned event loop while a client is being handed back to main. */
+static void syncReplArmWriteHandler(client *c) {
+    if (!c->conn || listLength(c->reply) == 0 || (c->flags & CLIENT_CLOSE_ASAP))
+        return;
+    if (c->running_tid == IOTHREAD_MAIN_THREAD_ID)
+        putClientInPendingWriteQueue(c);
+}
+
 /* Drain chunks whose durability condition is satisfied back into c->reply.
  * Invoked from processClientsWaitingReplicas(), which beforeSleep and the
  * bio fsync-completion callback both drive. The condition is evaluated against
@@ -5810,8 +5819,7 @@ void drainSyncPendingReplies(client *c) {
         syncReplReleaseChunk(c, ln);
     }
 
-    if (c->conn && listLength(c->reply) > 0)
-        installClientWriteHandler(c);
+    syncReplArmWriteHandler(c);
 }
 
 /* Tear down every client currently holding pending chunks. Used when their
