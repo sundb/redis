@@ -79,7 +79,7 @@ differs from classic `always`, where data is on disk before it is ever observabl
     background-fsync retry in `serverCron()`, a later successful forced fsync, or (as in the common
     BGREWRITEAOF case) the rewrite's own subsequent file-close fsync.
     Every site that can set `aof_last_write_status = C_ERR` for a *different* reason (the plain
-    `write()`-failure branch, and its `DEBUG AOF-FLUSH-FORCE-ERROR` test-only equivalent) also resets
+    `write()`-failure branch, and its `DEBUG AOF-FLUSH-FORCE ERROR` test-only equivalent) also resets
     `aof_force_fsync_fail_offset` back to `-1` — otherwise a still-outstanding, unrelated write failure
     could get silently (and wrongly) reported as resolved the moment `fsynced_reploff` happens to
     catch up past a stale, already-superseded forced-fsync-only offset from earlier, even though that
@@ -221,11 +221,10 @@ differs from classic `always`, where data is on disk before it is ever observabl
   pushed outside the command reply path and are not held; under `bgalways` they may be emitted
   slightly before the corresponding write is durable.
 - **Pipelines / io-threads.** Every write goes through reply chunking, so the RESP-ordering guards
-  are exercised on the hot path: `sync_rep_force_new_block` forces a fresh node instead of
-  in-place-extending a prior reply's tail block, and `sync_rep_boundary_node` (same lifetime, but not
-  one-shot) stops `setDeferredReply()` from merging a deferred header — e.g. `KEYS`/`SCAN`'s array
-  length, filled in only after the array's elements were already appended — backward into that same
-  prior block. A client with a parked chunk is pinned to the main thread until the chunk is released:
+  are exercised on the hot path: `sync_rep_boundary_node`, the reply tail captured at command start,
+  forces a fresh node instead of extending a prior command's tail block. It also stops
+  `setDeferredReply()` from merging a deferred header — e.g. `KEYS`/`SCAN`'s array length — backward
+  into that prior block. A client with a parked chunk is pinned to the main thread until release:
   fsync completion drains chunks from the main thread's `beforeSleep` path, where touching an I/O
   thread-owned connection event loop would be unsafe. The integration suite includes an
   `io-threads 4` regression case for this handoff and drain path.
@@ -245,5 +244,5 @@ differs from classic `always`, where data is on disk before it is ever observabl
 
 ## Testing
 `tests/integration/appendfsync-bgalways.tcl`, driven by two fault-injection hooks:
-`DEBUG AOF-FLUSH-FORCE-STALL <0|1>` (skip the flush so the durable offset stalls) and
-`DEBUG AOF-FLUSH-FORCE-ERROR <0|1>` (fail the flush and set the AOF write-error status).
+`DEBUG AOF-FLUSH-FORCE STALL <0|1>` (skip the flush so the durable offset stalls) and
+`DEBUG AOF-FLUSH-FORCE ERROR <0|1>` (fail the flush and set the AOF write-error status).

@@ -8642,6 +8642,19 @@ int checkModuleAuthentication(client *c, robj *username, robj *password, robj **
     return AUTH_ERR;
 }
 
+/* Run a blocked-client callback outside call() while preserving bgalways
+ * reply holding. moduleFreeContext() must precede the offset comparison since
+ * it flushes propagation queued by the callback when execution nesting ends. */
+static int moduleCallBlockedCallbackWithSyncRepBracket(client *c, RedisModuleCtx *ctx, RedisModuleCmdFunc callback) {
+    long long pre_repl_offset = server.master_repl_offset;
+    syncReplCookie sync_rep = syncReplBeginCommand(c);
+    int ret = callback(ctx, (void **)c->argv, c->argc);
+    moduleFreeContext(ctx);
+    if (sync_rep.active)
+        syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
+    return ret;
+}
+
 /* This function is called from module.c in order to check if a module
  * blocked for BLOCKED_MODULE and subtype 'on keys' (bc->blocked_on_keys true)
  * can really be unblocked, since the module was able to serve the client.
@@ -8665,32 +8678,8 @@ int moduleTryServeClientBlockedOnKey(client *c, robj *key) {
     ctx.client = bc->client;
     ctx.blocked_client = bc;
 
-    /* Reply holding (appendfsync bgalways): reply_callback writes straight
-     * into c's reply buffer and may itself propagate a write (RM_Call or
-     * RM_Replicate*), but this whole unblock path never goes through call(),
-     * so none of call()'s own syncReplStartCommand/syncReplFinishCommand
-     * bracketing applies here. Without this, a module command that
-     * propagates from its callback would have its reply reach the client
-     * before that write is durable. Bracket the callback and decide the
-     * chunk from whether it advanced server.master_repl_offset, mirroring
-     * call()'s own decision.
-     *
-     * moduleCreateContext() above already called enterExecutionUnit(1,0), so
-     * any propagation reply_callback queues (e.g. via RM_ReplicateVerbatim)
-     * is only actually flushed into server.master_repl_offset by
-     * moduleFreeContext()'s matching exitExecutionUnit()+
-     * postExecutionUnitOperations() once nesting drops back to 0 — which
-     * must therefore run *before* we compare offsets, not after. */
-    long long pre_repl_offset = server.master_repl_offset;
-    syncReplCookie sync_rep = syncReplBeginCommand(c);
-
-    if (bc->reply_callback(&ctx,(void**)c->argv,c->argc) == REDISMODULE_OK)
+    if (moduleCallBlockedCallbackWithSyncRepBracket(c, &ctx, bc->reply_callback) == REDISMODULE_OK)
         served = 1;
-
-    moduleFreeContext(&ctx);
-
-    if (sync_rep.active)
-        syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
 
     return served;
 }
@@ -8984,25 +8973,8 @@ void moduleHandleBlockedClients(void) {
             monotime replyTimer;
             elapsedStart(&replyTimer);
 
-            /* Reply holding (appendfsync bgalways): see the matching bracket
-             * in moduleTryServeClientBlockedOnKey() — this callback also
-             * writes straight into c's reply buffer outside call(), so it
-             * needs its own bracketing rather than relying on call()'s.
-             * moduleFreeContext() must run before syncReplFinishByOffset():
-             * moduleCreateContext() above already incremented execution
-             * nesting, so any propagation reply_callback queues is only
-             * flushed into server.master_repl_offset by moduleFreeContext()'s
-             * matching exitExecutionUnit()+postExecutionUnitOperations(). */
-            long long pre_repl_offset = server.master_repl_offset;
-            syncReplCookie sync_rep = syncReplBeginCommand(c);
-
-            bc->reply_callback(&ctx,(void**)c->argv,c->argc);
+            moduleCallBlockedCallbackWithSyncRepBracket(c, &ctx, bc->reply_callback);
             reply_us = elapsedUs(replyTimer);
-
-            moduleFreeContext(&ctx);
-
-            if (sync_rep.active)
-                syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
         }
         if (c && bc->blocked_on_keys_explicit_unblock) {
             serverAssert(bc->blocked_on_keys);
@@ -9134,30 +9106,9 @@ void moduleBlockedClientTimedOut(client *c) {
     long long prev_error_replies = server.stat_total_error_replies;
 
     if (bc->timeout_callback) {
-        /* Reply holding (appendfsync bgalways): timeout_callback writes
-         * straight into c's reply buffer and may itself propagate a write
-         * (RM_Call or RM_Replicate*), entirely outside call() -- the same
-         * situation as bc->reply_callback in moduleTryServeClientBlockedOnKey/
-         * moduleHandleBlockedClients above, just on the timeout path instead
-         * of the normal-completion path. Bracket it the same way.
-         *
-         * moduleCreateContext() above already called enterExecutionUnit(1,0),
-         * so any propagation timeout_callback queues is only actually
-         * flushed into server.master_repl_offset by moduleFreeContext()'s
-         * matching exitExecutionUnit()+postExecutionUnitOperations() once
-         * nesting drops back to 0 -- which must therefore run *before* we
-         * compare offsets, not after. */
-        long long pre_repl_offset = server.master_repl_offset;
-        syncReplCookie sync_rep = syncReplBeginCommand(c);
-
         /* In theory, the user should always pass the timeout handler as an
          * argument, but better to be safe than sorry. */
-        bc->timeout_callback(&ctx,(void**)c->argv,c->argc);
-
-        moduleFreeContext(&ctx);
-
-        if (sync_rep.active)
-            syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
+        moduleCallBlockedCallbackWithSyncRepBracket(c, &ctx, bc->timeout_callback);
     } else {
         moduleFreeContext(&ctx);
     }

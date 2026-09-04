@@ -210,9 +210,25 @@ void freeObjAsync(robj *key, robj *obj, int dbid) {
     }
 }
 
-/* Duplicate any BULK_STR_REF zero-copy references found in a clientReplyBlock
- * list. Shared by c->reply and a parked syncReplyChunk's reply_list, which
- * use the identical node format (see syncReplyChunk in server.h). */
+/* Duplicate BULK_STR_REF references in an encoded reply buffer. */
+static void protectBufReferences(char *buf, size_t len) {
+    char *ptr = buf;
+    while (ptr < buf + len) {
+        payloadHeader *header = (payloadHeader *)ptr;
+        ptr += sizeof(payloadHeader);
+        if (header->payload_type == BULK_STR_REF) {
+            bulkStrRef *str_ref = (bulkStrRef *)ptr;
+            if (str_ref->obj != NULL) {
+                robj *new_obj = dupStringObject(str_ref->obj);
+                decrRefCount(str_ref->obj);
+                str_ref->obj = new_obj;
+            }
+        }
+        ptr += header->payload_len;
+    }
+}
+
+/* Duplicate references found in a clientReplyBlock list. */
 static void protectReplyBlockList(list *reply_list) {
     if (!reply_list || !listLength(reply_list)) return;
     listIter li;
@@ -220,24 +236,8 @@ static void protectReplyBlockList(list *reply_list) {
     listRewind(reply_list, &li);
     while ((ln = listNext(&li))) {
         clientReplyBlock *block = listNodeValue(ln);
-        if (block && block->buf_encoded) {
-            char *ptr = block->buf;
-            while (ptr < block->buf + block->used) {
-                payloadHeader *header = (payloadHeader *)ptr;
-                ptr += sizeof(payloadHeader);
-
-                if (header->payload_type == BULK_STR_REF) {
-                    bulkStrRef *str_ref = (bulkStrRef *)ptr;
-                    if (str_ref->obj != NULL) {
-                        /* Duplicate the string object */
-                        robj *new_obj = dupStringObject(str_ref->obj);
-                        decrRefCount(str_ref->obj);
-                        str_ref->obj = new_obj;
-                    }
-                }
-                ptr += header->payload_len;
-            }
-        }
+        if (block && block->buf_encoded)
+            protectBufReferences(block->buf, block->used);
     }
 }
 
@@ -267,24 +267,8 @@ static void protectClientReplyObjects(void) {
         client *c = listNodeValue(ln);
 
         /* Process c->buf if it's encoded */
-        if (c->buf_encoded && c->bufpos > 0) {
-            char *ptr = c->buf;
-            while (ptr < c->buf + c->bufpos) {
-                payloadHeader *header = (payloadHeader *)ptr;
-                ptr += sizeof(payloadHeader);
-
-                if (header->payload_type == BULK_STR_REF) {
-                    bulkStrRef *str_ref = (bulkStrRef *)ptr;
-                    if (str_ref->obj != NULL) {
-                        /* Duplicate the string object */
-                        robj *new_obj = dupStringObject(str_ref->obj);
-                        decrRefCount(str_ref->obj);
-                        str_ref->obj = new_obj;
-                    }
-                }
-                ptr += header->payload_len;
-            }
-        }
+        if (c->buf_encoded && c->bufpos > 0)
+            protectBufReferences(c->buf, c->bufpos);
 
         /* Process reply list */
         protectReplyBlockList(c->reply);

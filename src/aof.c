@@ -1453,6 +1453,17 @@ ssize_t aofWrite(int fd, const char *buf, size_t len) {
     return totwritten;
 }
 
+/* Mark a BGALWAYS forced (synchronous) fsync failure. Unlike a write()
+ * failure, this leaves no buffered bytes for the normal retry-on-next-write
+ * recovery path, so remember the affected replication offset until a later
+ * fsync proves that durability has caught up. */
+void aofMarkForceFsyncFailure(int errno_val) {
+    server.aof_last_write_status = C_ERR;
+    server.aof_last_write_errno = errno_val;
+    if (server.aof_force_fsync_fail_offset == -1)
+        server.aof_force_fsync_fail_offset = server.master_repl_offset;
+}
+
 /* Test-only fault injection for flushAppendOnlyFile(), gating on the DEBUG
  * AOF-FLUSH-FORCE-* flags below. Returns 1 if a fault was injected -- the
  * caller must bail out immediately without touching the AOF -- or 0 to
@@ -1465,7 +1476,7 @@ static int aofFlushFaultInjection(int force) {
      * buffered data and recover to C_OK. */
     if (server.aof_flush_force_error) {
         if (server.aof_last_write_status == C_OK)
-            serverLog(LL_WARNING,"Simulating an AOF write error (debug aof-flush-force-error).");
+            serverLog(LL_WARNING,"Simulating an AOF write error (debug aof-flush-force error).");
         server.aof_last_write_status = C_ERR;
         server.aof_last_write_errno = ENOSPC;
         /* This simulates a real write() failure, the same distinct failure
@@ -1478,7 +1489,7 @@ static int aofFlushFaultInjection(int force) {
     }
 
     /* Simulate the BGALWAYS forced (synchronous) fsync path failing while
-     * the write() itself still succeeds (see DEBUG AOF-FLUSH-FORCE-FSYNC-
+     * the write() itself still succeeds (see DEBUG AOF-FLUSH-FORCE FSYNC-
      * ERROR). Intercepted here, ahead of aof_flush_force_stall and the
      * empty-buffer/gap-detection logic below, so a caller of a forced flush
      * (shutdown / stopAppendOnly / rewrite-done) hits this deterministically
@@ -1489,12 +1500,8 @@ static int aofFlushFaultInjection(int force) {
         server.aof_flush_force_fsync_error)
     {
         serverLog(LL_WARNING, "Can't persist AOF for fsync error when the "
-            "AOF fsync policy is 'bgalways': Simulated (debug "
-            "aof-flush-force-fsync-error).");
-        server.aof_last_write_status = C_ERR;
-        server.aof_last_write_errno = EIO;
-        if (server.aof_force_fsync_fail_offset == -1)
-            server.aof_force_fsync_fail_offset = server.master_repl_offset;
+            "AOF fsync policy is 'bgalways': Simulated (debug aof-flush-force fsync-error).");
+        aofMarkForceFsyncFailure(EIO);
         return 1;
     }
 
@@ -1754,18 +1761,7 @@ try_fsync:
             if (redis_fsync(server.aof_fd) == -1) {
                 serverLog(LL_WARNING, "Can't persist AOF for fsync error when the "
                     "AOF fsync policy is 'bgalways': %s.", strerror(errno));
-                server.aof_last_write_status = C_ERR;
-                server.aof_last_write_errno = errno;
-                /* Unlike a write() failure, aof_buf is already empty at this
-                 * point (the write() above already succeeded), so there's no
-                 * leftover data for the next flushAppendOnlyFile() retry to
-                 * write -- the retry-on-next-write self-heal at the top of
-                 * this function (which cleared aof_last_write_status on a
-                 * successful write()) never runs for this failure. Remember
-                 * the offset so aofRefreshFsyncedReploff() can self-heal once
-                 * a later fsync (forced or background) actually covers it. */
-                if (server.aof_force_fsync_fail_offset == -1)
-                    server.aof_force_fsync_fail_offset = server.master_repl_offset;
+                aofMarkForceFsyncFailure(errno);
             } else {
                 server.aof_last_incr_fsync_offset = server.aof_last_incr_size;
                 server.aof_last_fsync = server.mstime;

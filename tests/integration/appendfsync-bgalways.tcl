@@ -49,14 +49,14 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         $rd client id
         set rd_id [$rd read]
 
-        $r debug aof-flush-force-stall 1
+        $r debug aof-flush-force stall 1
         set before [s sync_repl_hold_count]
         $rd set bgk_iot v1
         wait_for_condition 100 20 {
             [s sync_repl_hold_count] > $before && [s sync_repl_pending_clients] >= 1
         } else {
             $rd close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "write was not held under a stalled durable offset"
         }
 
@@ -64,12 +64,12 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             [regexp "id=$rd_id .*io-thread=(\[0-9\]+)" [$r client list] -> iothread]
         } else {
             $rd close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "could not find the held client in CLIENT LIST"
         }
         assert_equal 0 $iothread
 
-        $r debug aof-flush-force-stall 0
+        $r debug aof-flush-force stall 0
         assert_equal {OK} [$rd read]
         $rd close
         wait_for_condition 50 20 {
@@ -123,7 +123,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         assert_equal [$r waitaof 1 0 5000] {1 0}   ;# fsynced_reploff established
 
         # Freeze the durable offset so the write's reply must stay held.
-        $r debug aof-flush-force-stall 1
+        $r debug aof-flush-force stall 1
         set rd [redis_deferring_client]
         set before [s sync_repl_hold_count]
         $rd set bgk_barrier v
@@ -131,7 +131,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             [s sync_repl_hold_count] > $before && [s sync_repl_pending_clients] >= 1
         } else {
             $rd close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "write was not held under a stalled durable offset"
         }
 
@@ -147,13 +147,13 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         fileevent $fd readable {}
         if {$::__bg_signal ne "timeout"} {
             $rd close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "reply bytes reached the socket before the write was durable"
         }
 
         # Clearing the stall lets the bio fsync advance fsynced_reploff past the
         # write's woff; only then is the reply delivered.
-        $r debug aof-flush-force-stall 0
+        $r debug aof-flush-force stall 0
         assert_equal [$rd read] OK
         wait_for_condition 50 50 {
             [s sync_repl_pending_clients] == 0
@@ -339,7 +339,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             $r set fk v
             assert_equal [$r waitaof 1 0 5000] {1 0}
 
-            $r debug aof-flush-force-stall 1
+            $r debug aof-flush-force stall 1
             set rd [redis_deferring_client]
             set before [s sync_repl_hold_count]
             $rd $flushcmd
@@ -348,7 +348,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
                 [s sync_repl_hold_count] > $before
             } else {
                 $rd close
-                $r debug aof-flush-force-stall 0
+                $r debug aof-flush-force stall 0
                 fail "$flushcmd did not park a pending chunk"
             }
             # Exactly one chunk: the late reply is chunked in the completion
@@ -373,12 +373,12 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             fileevent $fd readable {}
             if {$::__bg_flush_sig ne "timeout"} {
                 $rd close
-                $r debug aof-flush-force-stall 0
+                $r debug aof-flush-force stall 0
                 fail "$flushcmd reply arrived while the flush was not yet durable"
             }
 
             # Release the stall -> the AOF is written and fsynced -> +OK arrives.
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             assert_equal {OK} [$rd read]
             $rd close
             wait_for_condition 50 20 {
@@ -401,7 +401,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         $r set bgk_blist_warm v
         assert_equal [$r waitaof 1 0 5000] {1 0}
 
-        $r debug aof-flush-force-stall 1
+        $r debug aof-flush-force stall 1
 
         set rd_blpop [redis_deferring_client]
         $rd_blpop blpop bgk_blist 0
@@ -409,7 +409,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             [s blocked_clients] >= 1
         } else {
             $rd_blpop close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "BLPOP did not block"
         }
 
@@ -422,7 +422,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         } else {
             $rd_blpop close
             $rd_lpush close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "LPUSH and the woken BLPOP's reissue were not both held\
                 (pending_clients=[s sync_repl_pending_clients]\
                 hold_delta=[expr {[s sync_repl_hold_count] - $before}])"
@@ -444,13 +444,13 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         if {$::__bg_blpop_sig ne "timeout"} {
             $rd_blpop close
             $rd_lpush close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "BLPOP reply arrived before its pop was durable"
         }
 
         # Release the stall -> the pop's AOF write is fsynced -> both replies
         # arrive.
-        $r debug aof-flush-force-stall 0
+        $r debug aof-flush-force stall 0
         assert_equal {bgk_blist v1} [$rd_blpop read]
         assert_equal 1 [$rd_lpush read]
         $rd_blpop close
@@ -471,27 +471,27 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         assert_equal [$r waitaof 1 0 5000] {1 0}
 
         # Stall the durable offset (no error) so a write stays held.
-        $r debug aof-flush-force-stall 1
+        $r debug aof-flush-force stall 1
         set rd [redis_deferring_client]
         $rd set bgk_err v
         wait_for_condition 100 20 {
             [s sync_repl_pending_clients] >= 1
         } else {
             $rd close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "write was not held under a stalled durable offset"
         }
 
         # Now inject a main-thread AOF write error: the held reply can never
         # become durable, so beforeSleep must disconnect the client.
         set before_disc [s sync_repl_pending_disconnects]
-        $r debug aof-flush-force-error 1
+        $r debug aof-flush-force error 1
         wait_for_condition 100 20 {
             [s sync_repl_pending_disconnects] > $before_disc
         } else {
             $rd close
-            $r debug aof-flush-force-error 0
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force error 0
+            $r debug aof-flush-force stall 0
             fail "held client was not disconnected on a main-thread AOF error"
         }
         # The held client's connection was dropped (deferred read errors / EOF).
@@ -503,8 +503,8 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
 
         # Recover: clearing the flags lets the next flush write & fsync, the
         # error status returns to OK, and durability resumes.
-        $r debug aof-flush-force-error 0
-        $r debug aof-flush-force-stall 0
+        $r debug aof-flush-force error 0
+        $r debug aof-flush-force stall 0
         wait_for_condition 50 20 {
             [s sync_repl_pending_clients] == 0
         } else {
@@ -523,7 +523,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         # answer +OK for a write that disconnectAllSyncRepPendingClients()
         # (called right after, in replicationSetMaster()) is specifically
         # designed to avoid acking.
-        $r debug aof-flush-force-stall 1
+        $r debug aof-flush-force stall 1
 
         # A big keyspace makes the BIO job that frees the old dict take long
         # enough to reliably observe the client still blocked.
@@ -537,7 +537,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             [s blocked_clients] >= 1
         } else {
             $rd close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "FLUSHALL did not block in BLOCKED_LAZYFREE with a pending lazyfree job"
         }
 
@@ -561,7 +561,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
                 disconnected via disconnectAllSyncRepPendingClients"
         }
 
-        $r debug aof-flush-force-stall 0
+        $r debug aof-flush-force stall 0
         $r replicaof no one
         wait_for_condition 100 20 {
             [s lazyfree_pending_objects] == 0
@@ -574,11 +574,11 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         $r set bgk_cfgoff_warm v
         assert_equal [$r waitaof 1 0 5000] {1 0}
 
-        # aof-flush-force-stall makes flushAppendOnlyFile() a no-op
+        # aof-flush-force stall makes flushAppendOnlyFile() a no-op
         # unconditionally (even with force=1), so stopAppendOnly()'s own
         # forced flush+fsync below won't actually make this write durable
         # either.
-        $r debug aof-flush-force-stall 1
+        $r debug aof-flush-force stall 1
 
         set rd [redis_deferring_client]
         set before_disc [s sync_repl_pending_disconnects]
@@ -587,7 +587,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             [s sync_repl_pending_clients] == 1
         } else {
             $rd close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "SET did not park a chunk while fsync was stalled"
         }
 
@@ -610,7 +610,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
                 disconnectAllSyncRepPendingClients"
         }
 
-        $r debug aof-flush-force-stall 0
+        $r debug aof-flush-force stall 0
         $r config set appendonly yes
     }
 
@@ -625,7 +625,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         assert_equal [$r waitaof 1 0 5000] {1 0}
 
         # Stall the durable offset (no error) so a write stays held.
-        $r debug aof-flush-force-stall 1
+        $r debug aof-flush-force stall 1
 
         set rd [redis_deferring_client]
         set before_disc [s sync_repl_pending_disconnects]
@@ -634,7 +634,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             [s sync_repl_pending_clients] == 1
         } else {
             $rd close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "SET did not park a chunk while fsync was stalled"
         }
 
@@ -655,7 +655,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
                 disconnectAllSyncRepPendingClients"
         }
 
-        $r debug aof-flush-force-stall 0
+        $r debug aof-flush-force stall 0
         $r config set appendfsync bgalways
     }
 
@@ -674,19 +674,19 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         r set bgk_wedge_warm v
         assert_equal [r waitaof 1 0 5000] {1 0}
 
-        r debug aof-flush-force-fsync-error 1
+        r debug aof-flush-force fsync-error 1
         r bgrewriteaof
 
         wait_for_condition 50 20 {
             [catch {r set bgk_wedge v1}] == 0 &&
             [s aof_last_write_status] eq {ok}
         } else {
-            r debug aof-flush-force-fsync-error 0
+            r debug aof-flush-force fsync-error 0
             fail "aof_last_write_status did not self-heal after the\
                 simulated forced-fsync failure -- writes stayed denied"
         }
 
-        r debug aof-flush-force-fsync-error 0
+        r debug aof-flush-force fsync-error 0
         assert_equal {v1} [r get bgk_wedge]
     }
 
@@ -708,7 +708,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         r set bgk_uaf_warm v
         assert_equal [r waitaof 1 0 5000] {1 0}
 
-        r debug aof-flush-force-stall 1
+        r debug aof-flush-force stall 1
 
         set rd [redis_deferring_client]
         $rd set bgk_uaf_k1 v1
@@ -716,7 +716,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             [s sync_repl_pending_clients] == 1
         } else {
             $rd close
-            r debug aof-flush-force-stall 0
+            r debug aof-flush-force stall 0
             fail "SET did not park a chunk while fsync was stalled"
         }
 
@@ -729,7 +729,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             [s sync_repl_hold_count] > $before_hold
         } else {
             $rd close
-            r debug aof-flush-force-stall 0
+            r debug aof-flush-force stall 0
             fail "GET's zero-copy reply was not routed through the\
                 reply-holding path behind the still-parked SET"
         }
@@ -745,12 +745,12 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         } else {
             $rd close
             $rd_flush close
-            r debug aof-flush-force-stall 0
+            r debug aof-flush-force stall 0
             fail "lazyfree did not finish draining"
         }
 
         # Release the stall so all parked replies drain and get sent.
-        r debug aof-flush-force-stall 0
+        r debug aof-flush-force stall 0
         assert_equal {OK} [$rd read]
         assert_equal $bigval [$rd read]
         $rd close
@@ -779,7 +779,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         set val_size 20000
         r set bgk_mem_big [string repeat v $val_size]
 
-        r debug aof-flush-force-stall 1
+        r debug aof-flush-force stall 1
 
         set rd [redis_deferring_client]
         $rd client setname bgk_mem_client
@@ -792,7 +792,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             [s sync_repl_hold_count] > $before
         } else {
             $rd close
-            r debug aof-flush-force-stall 0
+            r debug aof-flush-force stall 0
             fail "SET did not park a chunk while fsync was stalled"
         }
 
@@ -805,7 +805,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             [s sync_repl_hold_count] > $before2
         } else {
             $rd close
-            r debug aof-flush-force-stall 0
+            r debug aof-flush-force stall 0
             fail "GET's zero-copy reply was not routed through the\
                 reply-holding path behind the still-parked SET"
         }
@@ -822,7 +822,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         } else {
             $rd close
             $rd_del close
-            r debug aof-flush-force-stall 0
+            r debug aof-flush-force stall 0
             fail "DEL did not take effect while its own reply was held"
         }
 
@@ -840,7 +840,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         } else {
             $rd close
             $rd_del close
-            r debug aof-flush-force-stall 0
+            r debug aof-flush-force stall 0
             fail "omem-unshared did not account for the reply parked in a\
                 sync_pending_replies chunk after the key was deleted\
                 (omem-unshared=$omem_unshared)"
@@ -859,7 +859,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         }
 
         # Release the stall so both parked replies drain.
-        r debug aof-flush-force-stall 0
+        r debug aof-flush-force stall 0
         assert_equal {OK} [$rd read]
         assert_equal [string repeat v $val_size] [$rd read]
         $rd close
@@ -887,7 +887,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         r set bgk_quit_warm v
         assert_equal [r waitaof 1 0 5000] {1 0}
 
-        r debug aof-flush-force-stall 1
+        r debug aof-flush-force stall 1
 
         set rd [redis_deferring_client]
         set before [s sync_repl_hold_count]
@@ -897,7 +897,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             [s sync_repl_hold_count] - $before >= 2
         } else {
             $rd close
-            r debug aof-flush-force-stall 0
+            r debug aof-flush-force stall 0
             fail "SET and QUIT's own +OK were not both routed through the\
                 reply-holding path (hold_delta=[expr {[s sync_repl_hold_count] - $before}])"
         }
@@ -914,13 +914,13 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         fileevent $fd readable {}
         if {$::__bg_quit_sig ne "timeout"} {
             $rd close
-            r debug aof-flush-force-stall 0
+            r debug aof-flush-force stall 0
             fail "client was disconnected (or sent data) before its held\
                 replies were durable"
         }
 
         # Release the stall -> both replies actually arrive, in order.
-        r debug aof-flush-force-stall 0
+        r debug aof-flush-force stall 0
         assert_equal {OK} [$rd read]
         assert_equal {OK} [$rd read]
         $rd close
@@ -936,7 +936,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         # could wrongly declare the *new* failure resolved the moment
         # fsynced_reploff catches up past the *old* one -- even though the
         # new failure's own bytes are still stuck unwritten. Checking the
-        # field directly (DEBUG AOF-FORCE-FSYNC-FAIL-OFFSET) verifies the
+        # field directly (DEBUG AOF-FSYNC-FAIL OFFSET) verifies the
         # reset itself deterministically, without depending on real
         # fsync/bio timing to observe it indirectly through
         # aof_last_write_status.
@@ -947,19 +947,19 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         # offset the simulated failure below captures is strictly ahead of
         # what's currently durable -- otherwise it would self-heal trivially
         # on its own, before this test ever gets to check anything.
-        r debug aof-flush-force-stall 1
+        r debug aof-flush-force stall 1
         set rd [redis_deferring_client]
         $rd set bgk_stale v1
         wait_for_condition 100 20 {
             [s sync_repl_pending_clients] == 1
         } else {
             $rd close
-            r debug aof-flush-force-stall 0
+            r debug aof-flush-force stall 0
             fail "SET did not park a chunk while fsync was stalled"
         }
 
-        r debug aof-simulate-force-fsync-failure
-        assert {[r debug aof-force-fsync-fail-offset] != -1}
+        r debug aof-fsync-fail simulate
+        assert {[r debug aof-fsync-fail offset] != -1}
 
         # The still-parked client gets disconnected by the existing
         # AOF-error protection (its held write can't be trusted durable) --
@@ -975,18 +975,18 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         # cleared the offset. The stall from above stays in effect
         # throughout, so nothing else can independently advance
         # fsynced_reploff past X while waiting.
-        r debug aof-flush-force-error 1
+        r debug aof-flush-force error 1
         wait_for_condition 30 100 {
-            [r debug aof-force-fsync-fail-offset] eq {-1}
+            [r debug aof-fsync-fail offset] eq {-1}
         } else {
-            r debug aof-flush-force-error 0
-            r debug aof-flush-force-stall 0
+            r debug aof-flush-force error 0
+            r debug aof-flush-force stall 0
             fail "aof_force_fsync_fail_offset was not reset by the later,\
                 unrelated write failure (stayed stale)"
         }
 
-        r debug aof-flush-force-error 0
-        r debug aof-flush-force-stall 0
+        r debug aof-flush-force error 0
+        r debug aof-flush-force stall 0
         wait_for_condition 50 20 {
             [catch {r set bgk_stale2 v2}] == 0
         } else {
@@ -1011,7 +1011,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         r set bgk_order_warm v
         assert_equal [r waitaof 1 0 5000] {1 0}
 
-        r debug aof-flush-force-stall 1
+        r debug aof-flush-force stall 1
 
         set rd [redis_deferring_client]
         $rd set bgk_order v1
@@ -1019,7 +1019,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             [s sync_repl_pending_clients] == 1
         } else {
             $rd close
-            r debug aof-flush-force-stall 0
+            r debug aof-flush-force stall 0
             fail "SET did not park a chunk while fsync was stalled"
         }
 
@@ -1034,14 +1034,14 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             [s sync_repl_hold_count] > $before
         } else {
             $rd close
-            r debug aof-flush-force-stall 0
+            r debug aof-flush-force stall 0
             fail "BLPOP's timeout reply was not routed through the\
                 reply-holding path (hold_delta=[expr {[s sync_repl_hold_count] - $before}])"
         }
 
         # Release the stall -> both replies drain/arrive, in the order they
         # were actually produced.
-        r debug aof-flush-force-stall 0
+        r debug aof-flush-force stall 0
         assert_equal {OK} [$rd read]
         assert_equal {} [$rd read]
         $rd close
@@ -1064,7 +1064,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         r set bgk_waitaof_warm v
         assert_equal [r waitaof 1 0 5000] {1 0}
 
-        r debug aof-flush-force-stall 1
+        r debug aof-flush-force stall 1
 
         set rd [redis_deferring_client]
         $rd set bgk_waitaof_order v1
@@ -1072,7 +1072,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             [s sync_repl_pending_clients] == 1
         } else {
             $rd close
-            r debug aof-flush-force-stall 0
+            r debug aof-flush-force stall 0
             fail "SET did not park a chunk while fsync was stalled"
         }
 
@@ -1084,7 +1084,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             [s blocked_clients] == 1
         } else {
             $rd close
-            r debug aof-flush-force-stall 0
+            r debug aof-flush-force stall 0
             fail "WAITAOF did not block behind the still-parked SET"
         }
 
@@ -1092,7 +1092,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         # WAITAOF's local condition and drains SET's chunk around the same
         # event. Replies must arrive in the order they were actually
         # produced: SET's OK first, then WAITAOF's array.
-        r debug aof-flush-force-stall 0
+        r debug aof-flush-force stall 0
         assert_equal {OK} [$rd read]
         assert_equal {1 0} [$rd read]
         $rd close
@@ -1115,7 +1115,7 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
         $r set bgk_fsl_warm v
         assert_equal [$r waitaof 1 0 5000] {1 0}
 
-        $r debug aof-flush-force-stall 1
+        $r debug aof-flush-force stall 1
 
         set rd_bpop [redis_deferring_client]
         $rd_bpop fsl.bpop bgk_fsl 0
@@ -1123,7 +1123,7 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
             [s blocked_clients] >= 1
         } else {
             $rd_bpop close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "FSL.BPOP did not block"
         }
 
@@ -1136,7 +1136,7 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
         } else {
             $rd_bpop close
             $rd_push close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "FSL.PUSH and the woken FSL.BPOP reply_callback's reply were not\
                 both held (pending_clients=[s sync_repl_pending_clients]\
                 hold_delta=[expr {[s sync_repl_hold_count] - $before}])"
@@ -1158,13 +1158,13 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
         if {$::__bg_fslbpop_sig ne "timeout"} {
             $rd_bpop close
             $rd_push close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "FSL.BPOP reply arrived before its pop was durable"
         }
 
         # Release the stall -> the pop's AOF write is fsynced -> both replies
         # arrive.
-        $r debug aof-flush-force-stall 0
+        $r debug aof-flush-force stall 0
         assert_equal 1 [$rd_bpop read]
         assert_equal {OK} [$rd_push read]
         $rd_bpop close
@@ -1182,7 +1182,7 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
         $r set bgk_fsl_to_warm v
         assert_equal [$r waitaof 1 0 5000] {1 0}
 
-        $r debug aof-flush-force-stall 1
+        $r debug aof-flush-force stall 1
 
         set rd_to [redis_deferring_client]
         set before [s sync_repl_hold_count]
@@ -1192,7 +1192,7 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
             [s sync_repl_hold_count] > $before
         } else {
             $rd_to close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "fsl.bpop_to_propagate's timeout reply was not routed through\
                 the reply-holding path"
         }
@@ -1212,13 +1212,13 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
         fileevent $fd readable {}
         if {$::__bg_to_sig ne "timeout"} {
             $rd_to close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "timeout_callback's reply arrived while its write was not yet\
                 durable"
         }
 
         # Release the stall -> the write is durable -> the reply arrives.
-        $r debug aof-flush-force-stall 0
+        $r debug aof-flush-force stall 0
         assert_equal {Request timedout} [$rd_to read]
         $rd_to close
         wait_for_condition 50 20 {
@@ -1251,7 +1251,7 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
         $r set bgk_thrd_warm v
         assert_equal [$r waitaof 1 0 5000] {1 0}
 
-        $r debug aof-flush-force-stall 1
+        $r debug aof-flush-force stall 1
 
         set rd [redis_deferring_client]
         set before [s sync_repl_hold_count]
@@ -1261,7 +1261,7 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
             [s sync_repl_hold_count] > $before
         } else {
             $rd close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "do_bg_rm_call_format's reply was not routed through the\
                 reply-holding path"
         }
@@ -1281,13 +1281,13 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
         fileevent $fd readable {}
         if {$::__bg_thrd_sig ne "timeout"} {
             $rd close
-            $r debug aof-flush-force-stall 0
+            $r debug aof-flush-force stall 0
             fail "thread-safe-context reply arrived while the write was not\
                 yet durable"
         }
 
         # Release the stall -> the write is durable -> the reply arrives.
-        $r debug aof-flush-force-stall 0
+        $r debug aof-flush-force stall 0
         assert_equal {OK} [$rd read]
         $rd close
         wait_for_condition 50 20 {

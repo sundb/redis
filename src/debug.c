@@ -422,18 +422,16 @@ void debugCommand(client *c) {
         const char *help[] = {
 "AOF-FLUSH-SLEEP <microsec>",
 "    Server will sleep before flushing the AOF, this is used for testing.",
-"AOF-FLUSH-FORCE-ERROR <0|1>",
-"    Force the AOF flush to fail (set the AOF write error status), used for testing.",
-"AOF-FLUSH-FORCE-STALL <0|1>",
-"    Skip the AOF flush so the durable offset stalls (no error), used for testing.",
-"AOF-FLUSH-FORCE-FSYNC-ERROR <0|1>",
-"    Force the BGALWAYS forced (synchronous) fsync path to fail while the write()",
-"    itself still succeeds, used for testing.",
-"AOF-SIMULATE-FORCE-FSYNC-FAILURE",
-"    Directly simulate a BGALWAYS forced-fsync-only failure without an actual",
-"    forced flush call, used for testing.",
-"AOF-FORCE-FSYNC-FAIL-OFFSET",
-"    Return the current server.aof_force_fsync_fail_offset value, used for testing.",
+"AOF-FLUSH-FORCE <ERROR|STALL|FSYNC-ERROR> <0|1>",
+"    ERROR: force the AOF flush to fail (set the AOF write error status).",
+"    STALL: skip the AOF flush so the durable offset stalls (no error).",
+"    FSYNC-ERROR: force the BGALWAYS forced (synchronous) fsync path to fail",
+"    while the write() itself still succeeds. Used for testing.",
+"AOF-FSYNC-FAIL <SIMULATE|OFFSET>",
+"    SIMULATE: directly simulate a BGALWAYS forced-fsync-only failure",
+"    without an actual forced flush call.",
+"    OFFSET: return the current server.aof_force_fsync_fail_offset value.",
+"    Used for testing.",
 "ASSERT",
 "    Crash by assertion failed.",
 "CHANGE-REPL-ID",
@@ -997,34 +995,28 @@ NULL
     {
         server.aof_flush_sleep = atoi(c->argv[2]->ptr);
         addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"aof-flush-force-error") && c->argc == 3) {
-        server.aof_flush_force_error = atoi(c->argv[2]->ptr);
+    } else if (!strcasecmp(c->argv[1]->ptr,"aof-flush-force") && c->argc == 4) {
+        if (!strcasecmp(c->argv[2]->ptr,"error")) {
+            server.aof_flush_force_error = atoi(c->argv[3]->ptr);
+        } else if (!strcasecmp(c->argv[2]->ptr,"stall")) {
+            server.aof_flush_force_stall = atoi(c->argv[3]->ptr);
+        } else if (!strcasecmp(c->argv[2]->ptr,"fsync-error")) {
+            server.aof_flush_force_fsync_error = atoi(c->argv[3]->ptr);
+        } else {
+            addReplySubcommandSyntaxError(c);
+            return;
+        }
         addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"aof-flush-force-stall") && c->argc == 3) {
-        server.aof_flush_force_stall = atoi(c->argv[2]->ptr);
-        addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"aof-flush-force-fsync-error") && c->argc == 3) {
-        server.aof_flush_force_fsync_error = atoi(c->argv[2]->ptr);
-        addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"aof-simulate-force-fsync-failure") && c->argc == 2) {
-        /* Test-only: directly simulate a BGALWAYS forced-fsync-only failure
-         * (see flushAppendOnlyFile()'s AOF_FSYNC_BGALWAYS force branch)
-         * without an actual forced flush call, so tests can set up this
-         * exact state deterministically -- e.g. to test its interaction
-         * with a later, unrelated aof_last_write_status failure without
-         * racing the real forced-fsync callers' own side effects (like
-         * BGREWRITEAOF's file-close fsync). */
-        server.aof_last_write_status = C_ERR;
-        server.aof_last_write_errno = EIO;
-        if (server.aof_force_fsync_fail_offset == -1)
-            server.aof_force_fsync_fail_offset = server.master_repl_offset;
-        addReply(c,shared.ok);
-    } else if (!strcasecmp(c->argv[1]->ptr,"aof-force-fsync-fail-offset") && c->argc == 2) {
-        /* Test-only introspection: read server.aof_force_fsync_fail_offset
-         * directly, so tests can assert it was reset by an unrelated later
-         * write failure without depending on real fsync/bio timing to
-         * observe the effect indirectly through aof_last_write_status. */
-        addReplyLongLong(c, server.aof_force_fsync_fail_offset);
+    } else if (!strcasecmp(c->argv[1]->ptr,"aof-fsync-fail") && c->argc >= 3) {
+        if (!strcasecmp(c->argv[2]->ptr,"simulate") && c->argc == 3) {
+            /* Test-only: directly simulate a BGALWAYS forced-fsync-only failure. */
+            aofMarkForceFsyncFailure(EIO);
+            addReply(c,shared.ok);
+        } else if (!strcasecmp(c->argv[2]->ptr,"offset") && c->argc == 3) {
+            addReplyLongLong(c, server.aof_force_fsync_fail_offset);
+        } else {
+            addReplySubcommandSyntaxError(c);
+        }
     } else if (!strcasecmp(c->argv[1]->ptr,"replicate") && c->argc >= 3) {
         replicationFeedSlaves(server.slaves, -1,
                 c->argv + 2, c->argc - 2);
