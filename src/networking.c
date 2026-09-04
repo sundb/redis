@@ -5565,6 +5565,12 @@ syncReplCookie syncReplBeginCommand(client *c) {
 void syncReplFinishCommand(client *c, long long woff, const syncReplCookie *sr) {
     if (!sr->active) return;
 
+    /* Log the response while it is still in c->buf/c->reply. Once parked,
+     * these bytes are no longer visible to prepareForNextCommand()'s logger.
+     * Reset the logging state after recording it to avoid logging it twice. */
+    if (reqresAppendResponse(c))
+        reqresReset(c, 1);
+
     /* Clear the boundary node so it cannot stick into the next command. */
     c->sync_rep_boundary_node = NULL;
 
