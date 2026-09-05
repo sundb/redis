@@ -731,8 +731,8 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         # This GET's zero-copy reply gets chunked too (passthrough, to
         # preserve ordering behind the still-parked SET), landing its
         # BULK_STR_REF in c->sync_pending_replies instead of c->reply.
-        $rd get bgk_uaf_big
         set before_hold [s sync_repl_hold_count]
+        $rd get bgk_uaf_big
         wait_for_condition 100 20 {
             [s sync_repl_hold_count] > $before_hold
         } else {
