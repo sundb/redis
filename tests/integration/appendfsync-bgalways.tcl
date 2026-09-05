@@ -525,9 +525,14 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         # designed to avoid acking.
         $r debug aof-flush-force stall 1
 
-        # Keep enough keys to observe the client blocked on BIO lazyfree,
-        # without the cleanup cost of a million-key DB on 32-bit CI runners.
-        r debug populate 100000
+        # Freeing the DB is dominated by object count, not value size, and
+        # the BIO thread races the poll below: at 100k keys it finishes in
+        # single-digit ms, well under the 20ms poll granularity, so the
+        # blocked/pending window is never observed. 500k keys (tiny values)
+        # keeps that window comfortably above the poll interval while
+        # staying well short of "a million"-key cleanup cost on 32-bit CI
+        # runners.
+        r debug populate 500000
 
         set rd [redis_deferring_client]
         set before_disc [s sync_repl_pending_disconnects]
