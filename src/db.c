@@ -1339,8 +1339,7 @@ void unblockClientForAsyncFlush(uint64_t client_id, struct slotRangeArray *slots
     else
         addReply(c, shared.ok);
 
-    if (sync_rep.active)
-        syncReplFinishCommand(c, c->woff, &sync_rep);
+    syncReplFinishCommand(c, c->woff, &sync_rep);
 
     /* mark client as unblocked */
     unblockClient(c, 1);

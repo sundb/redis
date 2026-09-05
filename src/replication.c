@@ -5062,7 +5062,7 @@ void processClientsWaitingReplicas(void) {
             addReplyLongLong(c, numreplicas);
         }
 
-        if (sync_rep.active) syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
+        syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
 
         unblockClient(c, 1);
     }

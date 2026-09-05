@@ -8650,8 +8650,7 @@ static int moduleCallBlockedCallbackWithSyncRepBracket(client *c, RedisModuleCtx
     syncReplCookie sync_rep = syncReplBeginCommand(c);
     int ret = callback(ctx, (void **)c->argv, c->argc);
     moduleFreeContext(ctx);
-    if (sync_rep.active)
-        syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
+    syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
     return ret;
 }
 
@@ -9020,10 +9019,8 @@ void moduleHandleBlockedClients(void) {
 
             AddReplyFromClient(c, bc->reply_client);
 
-            if (sync_rep.active) {
-                c->woff = server.master_repl_offset;
-                syncReplFinishCommand(c, c->woff, &sync_rep);
-            }
+            c->woff = server.master_repl_offset;
+            syncReplFinishCommand(c, c->woff, &sync_rep);
         }
         moduleReleaseTempClient(bc->reply_client);
         moduleReleaseTempClient(bc->thread_safe_ctx_client);

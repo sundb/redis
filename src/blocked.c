@@ -279,12 +279,10 @@ void replyToBlockedClientTimedOut(client *c) {
         serverPanic("Unknown btype in replyToBlockedClientTimedOut().");
     }
 
-    if (sync_rep.active) {
-        if (c->bstate.btype == BLOCKED_LAZYFREE)
-            syncReplFinishCommand(c, c->woff, &sync_rep);
-        else
-            syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
-    }
+    if (c->bstate.btype == BLOCKED_LAZYFREE)
+        syncReplFinishCommand(c, c->woff, &sync_rep);
+    else
+        syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
 }
 
 /* If one or more clients are blocked on the SHUTDOWN command, this function
@@ -349,8 +347,7 @@ void disconnectAllBlockedClients(void) {
                 else
                     addReply(c, shared.ok);
 
-                if (sync_rep.active)
-                    syncReplFinishCommand(c, c->woff, &sync_rep);
+                syncReplFinishCommand(c, c->woff, &sync_rep);
 
                 updateStatsOnUnblock(c, 0, 0, 0);
                 c->flags &= ~CLIENT_PENDING_COMMAND;
@@ -822,8 +819,7 @@ static void unblockClientOnKey(client *c, robj *key) {
         exitExecutionUnit();
         afterCommand(c);
 
-        if (sync_rep.active)
-            syncReplFinishOrDeferChunk(c, &sync_rep);
+        syncReplFinishOrDeferChunk(c, &sync_rep);
 
         /* Clear the CLIENT_REEXECUTING_COMMAND flag after the proc is executed. */
         c->flags &= ~CLIENT_REEXECUTING_COMMAND;
@@ -884,8 +880,7 @@ void unblockClientOnError(client *c, const char *err_str) {
 
         addReplyError(c, err_str);
 
-        if (sync_rep.active)
-            syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
+        syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
     }
     updateStatsOnUnblock(c, 0, 0, 1);
     if (c->flags & CLIENT_PENDING_COMMAND)
