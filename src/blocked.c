@@ -238,9 +238,11 @@ int blockedClientMayTimeout(client *c) {
  * send it a reply of some kind. After this function is called,
  * unblockClient() will be called with the same client as argument. */
 void replyToBlockedClientTimedOut(client *c) {
-    /* Reply holding (appendfsync bgalways): every branch below writes a
-     * reply straight into c's reply buffer, entirely outside call() -- the
-     * same situation as unblockClientOnKey()/disconnectAllBlockedClients().
+    long long pre_repl_offset = server.master_repl_offset;
+    /* Reply holding (appendfsync bgalways): every branch below (other than
+     * BLOCKED_MODULE, which brackets itself in moduleBlockedClientTimedOut())
+     * writes a reply straight into c's reply buffer, entirely outside call()
+     * -- the same situation as unblockClientOnKey()/disconnectAllBlockedClients().
      * None of these branches propagate a write themselves (a genuine pop
      * would have been served by the normal ready-key path, not a timeout),
      * except BLOCKED_LAZYFREE, whose underlying FLUSH already propagated
@@ -248,18 +250,10 @@ void replyToBlockedClientTimedOut(client *c) {
      * unblockClientForAsyncFlush()/disconnectAllBlockedClients() use it) --
      * so the other branches only need ordering (passthrough) protection,
      * gated on whether anything propagated since entry, while
-     * BLOCKED_LAZYFREE is gated directly on c->woff.
-     *
-     * BLOCKED_MODULE delegates to moduleBlockedClientTimedOut(), which
-     * already brackets itself, so it's excluded here to avoid a nested,
-     * redundant bracket. */
-    if (c->bstate.btype == BLOCKED_MODULE) {
-        moduleBlockedClientTimedOut(c);
-        return;
-    }
-
-    long long pre_repl_offset = server.master_repl_offset;
-    syncReplCookie sync_rep = syncReplBeginCommand(c);
+     * BLOCKED_LAZYFREE is gated directly on c->woff. */
+    syncReplCookie sync_rep = {0, 0, NULL};
+    if (c->bstate.btype != BLOCKED_MODULE)
+        sync_rep = syncReplBeginCommand(c);
 
     if (c->bstate.btype == BLOCKED_LAZYFREE) {
         /* SFLUSH: reply with empty array, FLUSH*: reply with OK */
@@ -279,6 +273,8 @@ void replyToBlockedClientTimedOut(client *c) {
         addReplyArrayLen(c,2);
         addReplyLongLong(c,server.fsynced_reploff >= c->bstate.reploffset);
         addReplyLongLong(c,replicationCountAOFAcksByOffset(c->bstate.reploffset));
+    } else if (c->bstate.btype == BLOCKED_MODULE) {
+        moduleBlockedClientTimedOut(c);
     } else {
         serverPanic("Unknown btype in replyToBlockedClientTimedOut().");
     }
