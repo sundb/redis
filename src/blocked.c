@@ -279,6 +279,9 @@ void replyToBlockedClientTimedOut(client *c) {
         serverPanic("Unknown btype in replyToBlockedClientTimedOut().");
     }
 
+    /* BLOCKED_LAZYFREE propagated before blocking, so gate on the saved
+     * c->woff directly; other branches propagate nothing here, so gate on
+     * whether master_repl_offset moved since entry. */
     if (c->bstate.btype == BLOCKED_LAZYFREE)
         syncReplFinishCommand(c, c->woff, &sync_rep);
     else
