@@ -8645,12 +8645,12 @@ int checkModuleAuthentication(client *c, robj *username, robj *password, robj **
 /* Run a blocked-client callback outside call() while preserving bgalways
  * reply holding. moduleFreeContext() must precede the offset comparison since
  * it flushes propagation queued by the callback when execution nesting ends. */
-static int moduleCallBlockedCallbackWithSyncRepBracket(client *c, RedisModuleCtx *ctx, RedisModuleCmdFunc callback) {
+static int moduleCallBlockedCallbackWithReplyHoldBracket(client *c, RedisModuleCtx *ctx, RedisModuleCmdFunc callback) {
     long long pre_repl_offset = server.master_repl_offset;
-    syncReplCookie sync_rep = syncReplBeginCommand(c);
+    replyHoldCookie reply_hold = replyHoldBegin(c);
     int ret = callback(ctx, (void **)c->argv, c->argc);
     moduleFreeContext(ctx);
-    syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
+    replyHoldFinishByOffset(c, pre_repl_offset, &reply_hold);
     return ret;
 }
 
@@ -8677,7 +8677,7 @@ int moduleTryServeClientBlockedOnKey(client *c, robj *key) {
     ctx.client = bc->client;
     ctx.blocked_client = bc;
 
-    if (moduleCallBlockedCallbackWithSyncRepBracket(c, &ctx, bc->reply_callback) == REDISMODULE_OK)
+    if (moduleCallBlockedCallbackWithReplyHoldBracket(c, &ctx, bc->reply_callback) == REDISMODULE_OK)
         served = 1;
 
     return served;
@@ -8972,7 +8972,7 @@ void moduleHandleBlockedClients(void) {
             monotime replyTimer;
             elapsedStart(&replyTimer);
 
-            moduleCallBlockedCallbackWithSyncRepBracket(c, &ctx, bc->reply_callback);
+            moduleCallBlockedCallbackWithReplyHoldBracket(c, &ctx, bc->reply_callback);
             reply_us = elapsedUs(replyTimer);
         }
         if (c && bc->blocked_on_keys_explicit_unblock) {
@@ -9009,14 +9009,14 @@ void moduleHandleBlockedClients(void) {
              * unconditional bracketing would park a superfluous empty chunk
              * on every module unblock. */
             int reply_client_has_data = bc->reply_client->bufpos > 0 || listLength(bc->reply_client->reply) > 0;
-            syncReplCookie sync_rep = {0, 0, NULL};
+            replyHoldCookie reply_hold = {0, 0, NULL};
             if (reply_client_has_data)
-                sync_rep = syncReplBeginCommand(c);
+                reply_hold = replyHoldBegin(c);
 
             AddReplyFromClient(c, bc->reply_client);
 
             c->woff = server.master_repl_offset;
-            syncReplFinishCommand(c, c->woff, &sync_rep);
+            replyHoldFinish(c, c->woff, &reply_hold);
         }
         moduleReleaseTempClient(bc->reply_client);
         moduleReleaseTempClient(bc->thread_safe_ctx_client);
@@ -9101,7 +9101,7 @@ void moduleBlockedClientTimedOut(client *c) {
     if (bc->timeout_callback) {
         /* In theory, the user should always pass the timeout handler as an
          * argument, but better to be safe than sorry. */
-        moduleCallBlockedCallbackWithSyncRepBracket(c, &ctx, bc->timeout_callback);
+        moduleCallBlockedCallbackWithReplyHoldBracket(c, &ctx, bc->timeout_callback);
     } else {
         moduleFreeContext(&ctx);
     }

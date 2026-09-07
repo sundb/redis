@@ -21,16 +21,16 @@ flight, the next batch accumulates and is flushed+fsynced as soon as the previou
 Reply holding is implemented as per-command reply chunking in `networking.c`:
 
 - Each propagating command's reply bytes are moved out of `c->buf` / `c->reply` into a
-  `syncReplyChunk` tagged with `woff` and parked on `c->sync_pending_replies`
-  (`syncReplStartCommand` at the head of `call()`, `syncReplFinishCommand` at its tail). The client
+  `replyHoldChunk` tagged with `woff` and parked on `c->reply_hold_chunks`
+  (`replyHoldStart` at the head of `call()`, `replyHoldFinish` at its tail). The client
   is not blocked; only its bytes are withheld.
-- The gate is `syncReplWaitLocalAof()`: `appendfsync bgalways && aof_enabled && fsynced_reploff != -1`.
+- The gate is `replyHoldWaitLocalAof()`: `appendfsync bgalways && aof_enabled && fsynced_reploff != -1`.
 - `flushAppendOnlyFile()` fires a bio fsync after every flush (no 1s interval) while no fsync is in
   flight — that "in flight" test is what makes writes group-commit. The bio worker advances
   `fsynced_reploff_pending` monotonically (`aofAdvanceFsyncedReploff`, atomic-max, so a late
   completion can never regress the durable offset).
 - `beforeSleep` copies the pending offset into `fsynced_reploff` (`aofRefreshFsyncedReploff`) and
-  `drainSyncPendingReplies()` splices every chunk whose `woff` is covered back into `c->reply`.
+  `drainReplyHoldChunks()` splices every chunk whose `woff` is covered back into `c->reply`.
   A bio completion-request (`bioCreateCompRq`, queued FIFO right behind the fsync job) runs the same
   refresh+drain on the main thread the moment the fsync lands, so held replies are released promptly
   even on an otherwise idle server.
@@ -88,28 +88,28 @@ differs from classic `always`, where data is on disk before it is ever observabl
   bio AOF worker, so a late bio completion cannot regress the durable offset.
 - **Config switching.** Switching `appendfsync` into/out of `always`/`bgalways` drains the bio AOF
   worker first. Switching *away* from `bgalways` (to `always`, `everysec`, or `no`) also disarms
-  `syncReplWaitLocalAof()`'s gate, the same way `stopAppendOnly()` pinning `fsynced_reploff` to `-1`
-  does — without disconnecting first, the very next `drainSyncPendingReplies()` would release every
+  `replyHoldWaitLocalAof()`'s gate, the same way `stopAppendOnly()` pinning `fsynced_reploff` to `-1`
+  does — without disconnecting first, the very next `drainReplyHoldChunks()` would release every
   still-parked chunk unconditionally, regardless of whether its data ever actually got fsynced.
-  `updateAppendFsync()` therefore calls `disconnectAllSyncRepPendingClients` whenever the new
+  `updateAppendFsync()` therefore calls `disconnectAllReplyHoldPendingClients` whenever the new
   `appendfsync` value is no longer `bgalways` and clients are still waiting on
-  `server.sync_clients_with_pending`, mirroring the same protection used for `CONFIG SET appendonly
+  `server.reply_hold_pending_clients`, mirroring the same protection used for `CONFIG SET appendonly
   no` and replica demotion below.
 - **`CONFIG SET appendonly no`.** `stopAppendOnly()` pins `fsynced_reploff` to `-1`, which disarms
-  `syncReplWaitLocalAof()`'s gate — without disconnecting first, the very next `drainSyncPendingReplies()`
+  `replyHoldWaitLocalAof()`'s gate — without disconnecting first, the very next `drainReplyHoldChunks()`
   would release every still-parked chunk unconditionally, even one whose data `stopAppendOnly()`'s own
   best-effort flush+fsync never actually made durable (e.g. AOF was already erroring, or a test/fault
-  hook skipped the flush outright). `stopAppendOnly()` therefore calls `disconnectAllSyncRepPendingClients`
+  hook skipped the flush outright). `stopAppendOnly()` therefore calls `disconnectAllReplyHoldPendingClients`
   before pinning the offset — the same protection `replicationSetMaster`'s demotion handling and the
   `beforeSleep` AOF-error check give their own respective triggers.
 - **Demotion to replica.** `REPLICAOF` disconnects clients still holding chunks
-  (`disconnectAllSyncRepPendingClients`): the offset they wait on belongs to the old primary's offset
+  (`disconnectAllReplyHoldPendingClients`): the offset they wait on belongs to the old primary's offset
   space and the write may be rolled back by the new master. This must also catch a blocking-async
   FLUSH client still sitting in `BLOCKED_LAZYFREE` when the demotion happens, i.e. before the BIO
   lazyfree job has completed and produced that reply — `disconnectAllBlockedClients()`'s
   `BLOCKED_LAZYFREE` branch (`blocked.c`) brackets that `+OK`/empty-array the same way
   `unblockClientForAsyncFlush` does (gated on `c->woff`, the offset the FLUSH already propagated
-  before blocking), so if the reply ends up chunked, the `disconnectAllSyncRepPendingClients` sweep
+  before blocking), so if the reply ends up chunked, the `disconnectAllReplyHoldPendingClients` sweep
   right after (in `replicationSetMaster`) catches this client too, instead of unconditionally
   answering `+OK` for a write that is about to vanish.
 - **Blocking-async FLUSH.** A SYNC `FLUSHALL`/`FLUSHDB` that runs as a blocking-async flush produces
@@ -120,13 +120,13 @@ differs from classic `always`, where data is on disk before it is ever observabl
 - **Blocked-on-keys commands (BLPOP/BRPOPLPUSH/BLMOVE/BZPOPMIN/BZMPOP, blocking XREADGROUP).**
   `unblockClientOnKey` (`blocked.c`) reissues the command by wrapping its own `call()` in an
   `enterExecutionUnit`, so that reissued `call()` sees `execution_nesting != 0` and skips its usual
-  `syncReplStartCommand`/`syncReplFinishCommand` bracketing — and, more importantly, the reissue's own
+  `replyHoldStart`/`replyHoldFinish` bracketing — and, more importantly, the reissue's own
   propagation flush (`afterCommandEx` → `postExecutionUnitOperationsEx`, itself gated on
   `execution_nesting == 0`) doesn't happen until `unblockClientOnKey`'s own `exitExecutionUnit()` +
   `afterCommand()` run, i.e. strictly after that inner `call()` has already returned. So `call()` can
   never correctly decide "did this propagate" for a reissue. `unblockClientOnKey` therefore does its
-  own `syncReplStartCommand`/… bracketing around the *whole* reissue (command + unblock handler),
-  finishing it (via the shared `syncReplFinishOrDeferChunk`) only after its own `afterCommand()` call —
+  own `replyHoldStart`/… bracketing around the *whole* reissue (command + unblock handler),
+  finishing it (via the shared `replyHoldFinishOrDefer`) only after its own `afterCommand()` call —
   the same "bracket outside `call()`" pattern as the blocking-async FLUSH case above. Without this, a
   reissued command's reply is delivered as soon as it's produced, unheld, breaking "ack ⇒ durable" for
   this entire command class (see `tests/integration/appendfsync-bgalways.tcl`, "a blocked command's
@@ -136,12 +136,12 @@ differs from classic `always`, where data is on disk before it is ever observabl
   straight from `bc->reply_callback`, entirely outside `call()`. Unlike the blocked-on-keys case above,
   `CLIENT_BLOCKED` is cleared *asynchronously* here (only once `moduleHandleBlockedClients` later drains
   `moduleUnblockedClients`), so it's still set at the moment the reply is produced — the shared
-  `syncReplFinishOrDeferChunk` can't be reused as-is, since its `CLIENT_BLOCKED` check would read that as
+  `replyHoldFinishOrDefer` can't be reused as-is, since its `CLIENT_BLOCKED` check would read that as
   "reply not produced yet, defer" and never chunk it. Both call sites instead bracket the
-  `reply_callback` call directly with `syncReplStartCommand`/`syncReplFinishByOffset` (the offset-decision
-  half of `syncReplFinishOrDeferChunk`, extracted so both share the chunk-vs-passthrough logic without
+  `reply_callback` call directly with `replyHoldStart`/`replyHoldFinishByOffset` (the offset-decision
+  half of `replyHoldFinishOrDefer`, extracted so both share the chunk-vs-passthrough logic without
   the `CLIENT_BLOCKED` gate), using a locally captured pre-callback `server.master_repl_offset` in place
-  of `call()`'s `sync_pre_command_repl_offset`.
+  of `call()`'s `reply_hold_pre_command_repl_offset`.
 - **Module clients replying via a thread-safe context.** A module can also reply to a blocked client
   from a background thread via `RM_GetThreadSafeContext(bc)` + `RM_ReplyWith*()` — e.g. run a write
   through `RM_Call()` while holding the GIL, release it, then reply — instead of (or as well as) using
@@ -156,7 +156,7 @@ differs from classic `always`, where data is on disk before it is ever observabl
   module API has no way to tell us whether it did. This function already assumes the worst case for a
   different reason a few lines later (`c->woff = server.master_repl_offset; /* we don't know if this
   blocked client propagated anything ... assume it did */`); the splice is bracketed
-  (`syncReplStartCommand`/`syncReplFinishCommand`) on that same current-offset assumption, but only when
+  (`replyHoldStart`/`replyHoldFinish`) on that same current-offset assumption, but only when
   `bc->reply_client` actually accumulated bytes — a keys-blocked client that already replied via
   `reply_callback` reaches this same splice with an empty `reply_client`, and bracketing that
   unconditionally would park a superfluous empty chunk on every module unblock.
@@ -169,9 +169,9 @@ differs from classic `always`, where data is on disk before it is ever observabl
   `timeout_callback` is only flushed into `server.master_repl_offset` once `moduleFreeContext()`'s
   matching `exitExecutionUnit()` runs, so the offset comparison happens after that call returns.
 - **Zero-copy replies parked across an async FLUSHALL/FLUSHDB.** A `BULK_STR_REF` zero-copy reply
-  (`tryAvoidBulkStrCopyToReply()`) can end up parked in `c->sync_pending_replies` instead of `c->reply`
+  (`tryAvoidBulkStrCopyToReply()`) can end up parked in `c->reply_hold_chunks` instead of `c->reply`
   — either because the command itself propagated, or because a chunk was already parked ahead of it
-  and it gets queued as a `woff = 0` passthrough purely to preserve RESP ordering. `syncReplFinishCommand()`
+  and it gets queued as a `woff = 0` passthrough purely to preserve RESP ordering. `replyHoldFinish()`
   moves/splices these nodes verbatim (no deep copy), so the reference and its `incrRefCount()` travel
   with the node into the chunk. `protectClientReplyObjects()` (`lazyfree.c`) exists to duplicate any such
   reference still outstanding before an async `FLUSHALL`/`FLUSHDB` frees the object in a bio thread —
@@ -181,19 +181,19 @@ differs from classic `always`, where data is on disk before it is ever observabl
 - **Same parked-chunk gap for the unshared-memory accounting.** `updateClientUnsharedReplyBytes()`
   (backs `CLIENT LIST`'s `omem-unshared`, `INFO`'s `mem_clients_normal_unshared`, and `MEMORY STATS`)
   walks `c->buf`/`c->reply` to find `BULK_STR_REF` references whose key was deleted and are now solely
-  owned by the client. It now also walks each chunk's `reply_list` on `c->sync_pending_replies`, for the
+  owned by the client. It now also walks each chunk's `reply_list` on `c->reply_hold_chunks`, for the
   same reason as `protectReplyBlockList()` above: a reference can be parked there instead of `c->reply`.
   Without that, a zero-copy reply parked in a chunk when its key is deleted was never counted as
   unshared until the chunk drained, under-reporting memory for `maxmemory-clients` eviction decisions.
 - **`CLIENT_CLOSE_AFTER_REPLY` (QUIT, protocol errors) vs. a still-parked chunk.** `c->reply`/`c->bufpos`
   being empty only means the *specific bytes appended so far* aren't sitting there — under `bgalways`
-  they may instead be parked in `c->sync_pending_replies`, not yet durable. `clientHasPendingReplies()`
+  they may instead be parked in `c->reply_hold_chunks`, not yet durable. `clientHasPendingReplies()`
   intentionally doesn't look there (it's also used by the active write loop, where that would spin
   re-checking a chunk it can't do anything with). `writeToClient()`'s own `CLIENT_CLOSE_AFTER_REPLY`
-  check does look at `c->sync_pending_replies` directly, so a `QUIT` (or protocol-error) reply following
+  check does look at `c->reply_hold_chunks` directly, so a `QUIT` (or protocol-error) reply following
   a still-held write on the same connection doesn't get `freeClientAsync()`'d — which would tear the
-  parked chunk down via `freeSyncPendingReplies()` (a pure discard, never sent) — before it drains.
-  `drainSyncPendingReplies()` re-arms the write handler once the chunk actually releases, so the check
+  parked chunk down via `freeReplyHoldChunks()` (a pure discard, never sent) — before it drains.
+  `drainReplyHoldChunks()` re-arms the write handler once the chunk actually releases, so the check
   runs again then. `tryUnlinkClientFromPendingRefReply()`'s `force` path has the same guard, for the
   same reason `protectClientReplyObjects()` needs one: a parked chunk can still hold a `BULK_STR_REF`
   reference that isn't safe to consider "gone" yet.
@@ -203,25 +203,25 @@ differs from classic `always`, where data is on disk before it is ever observabl
   shape as `unblockClientOnKey()`/`disconnectAllBlockedClients()` above, but for the timeout/error
   completion instead of the successful one. None of these propagate a write themselves (a genuine pop
   is served by the ready-key path, not a timeout), so the risk isn't durability — it's RESP ordering:
-  `syncReplReleaseChunk()` appends a drained chunk's bytes to the *tail* of `c->reply` (`listJoin`), so
+  `replyHoldReleaseChunk()` appends a drained chunk's bytes to the *tail* of `c->reply` (`listJoin`), so
   a reply written directly into `c->reply` while an earlier command's chunk is still parked on the same
   connection ends up ahead of that chunk's bytes once it drains. Both are bracketed with
-  `syncReplStartCommand`/`syncReplFinishByOffset`, the same passthrough-on-ordering mechanism `call()`
+  `replyHoldStart`/`replyHoldFinishByOffset`, the same passthrough-on-ordering mechanism `call()`
   uses for a non-propagating reply that finds a chunk already queued ahead of it. `BLOCKED_LAZYFREE`'s
   timeout is the one branch that *does* have a real offset to gate on (the FLUSH already propagated
   before it blocked, same as `unblockClientForAsyncFlush()`), so it uses `c->woff` via
-  `syncReplFinishCommand` directly instead. `BLOCKED_MODULE` delegates to the already-bracketed
+  `replyHoldFinish` directly instead. `BLOCKED_MODULE` delegates to the already-bracketed
   `moduleBlockedClientTimedOut()`.
 - **WAIT/WAITAOF's success reply.** `processClientsWaitingReplicas()` writes the success reply
   (offset/replica conditions met) straight into `c->reply`, entirely outside `call()` — the same
   situation as the timeout twin above, just on the success path instead of the timeout one. It also
   propagates nothing itself, so it's bracketed the same way, with
-  `syncReplBeginCommand`/`syncReplFinishByOffset`.
+  `replyHoldBegin`/`replyHoldFinishByOffset`.
 - **Not gated:** keyspace notifications, pub/sub messages, and client-side-caching invalidations are
   pushed outside the command reply path and are not held; under `bgalways` they may be emitted
   slightly before the corresponding write is durable.
 - **Pipelines / io-threads.** Every write goes through reply chunking, so the RESP-ordering guards
-  are exercised on the hot path: `sync_rep_boundary_node`, the reply tail captured at command start,
+  are exercised on the hot path: `reply_hold_boundary_node`, the reply tail captured at command start,
   forces a fresh node instead of extending a prior command's tail block. It also stops
   `setDeferredReply()` from merging a deferred header — e.g. `KEYS`/`SCAN`'s array length — backward
   into that prior block. A client with a parked chunk is pinned to the main thread until release:
@@ -233,13 +233,13 @@ differs from classic `always`, where data is on disk before it is ever observabl
 - `appendfsync bgalways` — enable. Default remains `everysec`; classic `always` is unchanged.
 
 ## Introspection (INFO stats)
-- `sync_repl_pending_clients` — clients currently holding at least one parked chunk (gauge).
-- `sync_repl_pending_commands` — parked chunks (gauge).
-- `sync_repl_hold_count` — chunks ever parked (counter).
-- `sync_repl_hold_depth_sum` — sum of queue depth at park time; `/hold_count` gives the average
+- `reply_hold_pending_clients` — clients currently holding at least one parked chunk (gauge).
+- `reply_hold_pending_commands` — parked chunks (gauge).
+- `reply_hold_count` — chunks ever parked (counter).
+- `reply_hold_depth_sum` — sum of queue depth at park time; `/hold_count` gives the average
   number of commands held together (counter).
-- `sync_repl_hold_latency_usec` — total time chunks spent parked (counter).
-- `sync_repl_pending_disconnects` — clients dropped while holding chunks, i.e. AOF error, demotion,
+- `reply_hold_latency_usec` — total time chunks spent parked (counter).
+- `reply_hold_pending_disconnects` — clients dropped while holding chunks, i.e. AOF error, demotion,
   `CONFIG SET appendonly no`, or `appendfsync` switched away from `bgalways` (counter).
 
 ## Testing

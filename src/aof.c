@@ -1339,14 +1339,14 @@ void stopAppendOnly(void) {
     server.aof_last_incr_fsync_offset = 0;
 
     /* Reply holding (appendfsync bgalways): pinning fsynced_reploff to -1
-     * below disarms syncReplWaitLocalAof()'s gate, so on the very next
-     * drainSyncPendingReplies() every chunk still parked on
-     * server.sync_clients_with_pending would be released unconditionally --
+     * below disarms replyHoldWaitLocalAof()'s gate, so on the very next
+     * drainReplyHoldChunks() every chunk still parked on
+     * server.reply_hold_pending_clients would be released unconditionally --
      * acking a write whose durability the flush/fsync above may not have
      * actually secured (e.g. AOF was already erroring). Disconnect those
      * clients first instead, the same way replicationSetMaster()'s demotion
      * handling and beforeSleep's AOF-error check both do. */
-    disconnectAllSyncRepPendingClients("AOF disabled");
+    disconnectAllReplyHoldPendingClients("AOF disabled");
 
     server.fsynced_reploff = -1;
     atomicSet(server.fsynced_reploff_pending, 0);
@@ -1783,7 +1783,7 @@ try_fsync:
             /* Wake the event loop when the fsync completes so held clients release
              * promptly even with no other traffic (FIFO: this comp-rq runs after
              * the fsync job on the same worker). Skip if nobody is waiting. */
-            if (listLength(server.sync_clients_with_pending) > 0)
+            if (listLength(server.reply_hold_pending_clients) > 0)
                 bioCreateCompRq(BIO_WORKER_AOF_FSYNC, aofBioFsyncNotify, 0, NULL);
         }
     } else if (server.aof_fsync == AOF_FSYNC_EVERYSEC &&
@@ -3426,7 +3426,7 @@ int rewriteAppendOnlyFileBackground(void) {
          * aofRefreshFsyncedReploff() only advances it once aof_state is back to
          * AOF_ON, so a plain 0 here would sit below every write's offset until
          * the rewrite completes — under appendfsync bgalways that gates every
-         * write's reply (syncReplWaitLocalAof() checks fsynced_reploff != -1),
+         * write's reply (replyHoldWaitLocalAof() checks fsynced_reploff != -1),
          * holding all of them for the whole rewrite instead of the intended
          * "gating suppressed during the initial rewrite" (see beforeSleep's
          * matching fsynced_reploff != -1 check and docs/appendfsync-bgalways.md).

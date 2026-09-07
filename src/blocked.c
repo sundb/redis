@@ -249,9 +249,9 @@ void replyToBlockedClientTimedOut(client *c) {
      * the other branches just need passthrough protection gated on whether
      * anything propagated since entry, while BLOCKED_LAZYFREE gates directly
      * on c->woff. */
-    syncReplCookie sync_rep = {0, 0, NULL};
+    replyHoldCookie reply_hold = {0, 0, NULL};
     if (c->bstate.btype != BLOCKED_MODULE)
-        sync_rep = syncReplBeginCommand(c);
+        reply_hold = replyHoldBegin(c);
 
     if (c->bstate.btype == BLOCKED_LAZYFREE) {
         /* SFLUSH: reply with empty array, FLUSH*: reply with OK */
@@ -281,9 +281,9 @@ void replyToBlockedClientTimedOut(client *c) {
      * c->woff directly; other branches propagate nothing here, so gate on
      * whether master_repl_offset moved since entry. */
     if (c->bstate.btype == BLOCKED_LAZYFREE)
-        syncReplFinishCommand(c, c->woff, &sync_rep);
+        replyHoldFinish(c, c->woff, &reply_hold);
     else
-        syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
+        replyHoldFinishByOffset(c, pre_repl_offset, &reply_hold);
 }
 
 /* If one or more clients are blocked on the SHUTDOWN command, this function
@@ -333,13 +333,13 @@ void disconnectAllBlockedClients(void) {
                  * the normal completion path in unblockClientForAsyncFlush(),
                  * so gate this reply on c->woff the same way. Otherwise the
                  * client would get an unconditional +OK for a write that
-                 * disconnectAllSyncRepPendingClients() (called right after
+                 * disconnectAllReplyHoldPendingClients() (called right after
                  * this loop, in replicationSetMaster()) is specifically
                  * trying to avoid acking; if the reply ends up chunked here,
                  * that call picks the client up via
-                 * server.sync_clients_with_pending and disconnects it instead
+                 * server.reply_hold_pending_clients and disconnects it instead
                  * of letting the +OK go out. */
-                syncReplCookie sync_rep = syncReplBeginCommand(c);
+                replyHoldCookie reply_hold = replyHoldBegin(c);
 
                 /* SFLUSH: reply with empty array, FLUSH*: reply with OK */
                 if (c->cmd && c->cmd->proc == sflushCommand)
@@ -347,7 +347,7 @@ void disconnectAllBlockedClients(void) {
                 else
                     addReply(c, shared.ok);
 
-                syncReplFinishCommand(c, c->woff, &sync_rep);
+                replyHoldFinish(c, c->woff, &reply_hold);
 
                 updateStatsOnUnblock(c, 0, 0, 0);
                 c->flags &= ~CLIENT_PENDING_COMMAND;
@@ -786,13 +786,13 @@ static void unblockClientOnKey(client *c, robj *key) {
 
         /* Reply holding (appendfsync bgalways): this reissue's own call() runs
          * with execution_nesting == 1 (the enterExecutionUnit below), so call()
-         * skips its usual syncReplStartCommand/syncReplFinishCommand bracketing
-         * (see the comment on sync_rep_active in call()) — that bracketing must
+         * skips its usual replyHoldStart/replyHoldFinish bracketing
+         * (see the comment on reply_hold.active in call()) — that bracketing must
          * happen here instead, around the whole reissue, so it can be finished
          * only after propagation has actually flushed (which itself waits for
          * execution_nesting == 0, i.e. after this function's own afterCommand()
          * call below). */
-        syncReplCookie sync_rep = syncReplBeginCommand(c);
+        replyHoldCookie reply_hold = replyHoldBegin(c);
 
         /* We want the command processing and the unblock handler (see RM_Call 'K' option)
          * to run atomically, this is why we must enter the execution unit here before
@@ -819,7 +819,7 @@ static void unblockClientOnKey(client *c, robj *key) {
         exitExecutionUnit();
         afterCommand(c);
 
-        syncReplFinishOrDeferChunk(c, &sync_rep);
+        replyHoldFinishOrDefer(c, &reply_hold);
 
         /* Clear the CLIENT_REEXECUTING_COMMAND flag after the proc is executed. */
         c->flags &= ~CLIENT_REEXECUTING_COMMAND;
@@ -876,11 +876,11 @@ void unblockClientOnError(client *c, const char *err_str) {
          * on the same connection -- same reasoning as
          * replyToBlockedClientTimedOut(). */
         long long pre_repl_offset = server.master_repl_offset;
-        syncReplCookie sync_rep = syncReplBeginCommand(c);
+        replyHoldCookie reply_hold = replyHoldBegin(c);
 
         addReplyError(c, err_str);
 
-        syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
+        replyHoldFinishByOffset(c, pre_repl_offset, &reply_hold);
     }
     updateStatsOnUnblock(c, 0, 0, 1);
     if (c->flags & CLIENT_PENDING_COMMAND)
@@ -898,7 +898,7 @@ void blockedBeforeSleep(void) {
     /* Unblock all the clients blocked for synchronous replication
      * in WAIT or WAITAOF. Also drains reply chunks parked by
      * appendfsync bgalways once the durable offset moves. */
-    if (listLength(server.clients_waiting_acks) || listLength(server.sync_clients_with_pending))
+    if (listLength(server.clients_waiting_acks) || listLength(server.reply_hold_pending_clients))
         processClientsWaitingReplicas();
 
     /* Try to process blocked clients every once in while.

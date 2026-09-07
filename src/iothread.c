@@ -302,7 +302,7 @@ int isClientMustHandledByMainThread(client *c) {
         return 1;
     }
 
-    if (c->sync_clients_with_pending_node) return 1;
+    if (c->reply_hold_pending_node) return 1;
 
     /* If RDB replication is done it's safe to move the master client to an IO thread.
      * Note that we keep the master client in main thread during failover so as
