@@ -72,11 +72,11 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         $r debug aof-flush-force stall 0
         assert_equal {OK} [$rd read]
         $rd close
-        wait_for_condition 50 20 {
-            [s reply_hold_pending_clients] == 0
-        } else {
-            fail "pending clients did not drain after the write became durable"
-        }
+        # rd is pinned to the main thread (asserted above), so the release
+        # (unlink from reply_hold_pending_clients) and the write it enables
+        # both run there too -- the read above already proves the unlink
+        # happened, deterministically, not just eventually.
+        assert_equal 0 [s reply_hold_pending_clients]
         assert_equal v1 [$r get bgk_iot]
     }
 }
@@ -101,14 +101,12 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             $rd close
             fail "bgalways write was not routed through the reply-holding path"
         }
-        # It drains: the reply is delivered and pending returns to zero.
+        # It drains: the reply is delivered and pending returns to zero --
+        # deterministically, since a chunk's release (and pending-clients
+        # unlink) always happens before its bytes are queued for writing, so
+        # the read above already proves it happened.
         assert_equal [$rd read] OK
-        wait_for_condition 50 20 {
-            [s reply_hold_pending_clients] == 0
-        } else {
-            $rd close
-            fail "bgalways pending clients did not drain"
-        }
+        assert_equal 0 [s reply_hold_pending_clients]
         $rd close
         assert_equal [$r get bgk1] v1
     }
@@ -155,12 +153,9 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         # write's woff; only then is the reply delivered.
         $r debug aof-flush-force stall 0
         assert_equal [$rd read] OK
-        wait_for_condition 50 50 {
-            [s reply_hold_pending_clients] == 0
-        } else {
-            $rd close
-            fail "held reply did not drain after clearing the stall"
-        }
+        # The read already proves the release happened (unlink precedes the
+        # write).
+        assert_equal 0 [s reply_hold_pending_clients]
         $rd close
         assert_equal [$r get bgk_barrier] v
     }
@@ -317,12 +312,11 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             }
         }
         foreach x $rds { catch {$x close} }
-        wait_for_condition 50 100 {
-            [s reply_hold_pending_clients] == 0
-        } else {
-            $r config set client-output-buffer-limit $saved_obl
-            fail "pending clients did not drain after pipeline"
-        }
+        # Every client's own last reply was already read above, and a
+        # chunk's release (unlink from reply_hold_pending_clients) always
+        # happens before its bytes are queued for writing, so all six
+        # clients are already unlinked here.
+        assert_equal 0 [s reply_hold_pending_clients]
         $r config set client-output-buffer-limit $saved_obl
     }
 
@@ -381,11 +375,9 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
             $r debug aof-flush-force stall 0
             assert_equal {OK} [$rd read]
             $rd close
-            wait_for_condition 50 20 {
-                [s reply_hold_pending_clients] == 0
-            } else {
-                fail "pending clients did not drain after the flush became durable"
-            }
+            # rd's read already proves the chunk was released (unlink
+            # precedes the write).
+            assert_equal 0 [s reply_hold_pending_clients]
         }
     }
 
@@ -455,11 +447,8 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         assert_equal 1 [$rd_lpush read]
         $rd_blpop close
         $rd_lpush close
-        wait_for_condition 50 20 {
-            [s reply_hold_pending_clients] == 0
-        } else {
-            fail "pending clients did not drain after the pop became durable"
-        }
+        # Both clients' reads already proved their chunks were released.
+        assert_equal 0 [s reply_hold_pending_clients]
     }
 
     test {bgalways: held client is disconnected on a main-thread AOF error} {
@@ -559,12 +548,10 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         assert_equal 0 $got_ok
         $rd close
 
-        wait_for_condition 100 20 {
-            [s reply_hold_pending_disconnects] > $before_disc
-        } else {
-            fail "FLUSHALL client held on a since-demoted write was not\
-                disconnected via disconnectAllReplyHoldPendingClients"
-        }
+        # replicationSetMaster() disconnects pending-reply clients
+        # synchronously -- before the REPLICAOF call above even returned --
+        # and $rd's own failed read confirms this one already was.
+        assert_equal 1 [expr {[s reply_hold_pending_disconnects] - $before_disc}]
 
         $r debug aof-flush-force stall 0
         $r replicaof no one
@@ -610,13 +597,9 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         assert_equal 0 $got_ok
         $rd close
 
-        wait_for_condition 100 20 {
-            [s reply_hold_pending_disconnects] > $before_disc
-        } else {
-            fail "client held on a write left non-durable by CONFIG SET\
-                appendonly no was not disconnected via\
-                disconnectAllReplyHoldPendingClients"
-        }
+        # stopAppendOnly() disconnects pending-reply clients synchronously --
+        # before the CONFIG SET call above even returned.
+        assert_equal 1 [expr {[s reply_hold_pending_disconnects] - $before_disc}]
 
         $r debug aof-flush-force stall 0
         $r config set appendonly yes
@@ -655,13 +638,9 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         assert_equal 0 $got_ok
         $rd close
 
-        wait_for_condition 100 20 {
-            [s reply_hold_pending_disconnects] > $before_disc
-        } else {
-            fail "client held on a write left non-durable by CONFIG SET\
-                appendfsync everysec was not disconnected via\
-                disconnectAllReplyHoldPendingClients"
-        }
+        # updateAppendFsync() disconnects pending-reply clients
+        # synchronously -- before the CONFIG SET call above even returned.
+        assert_equal 1 [expr {[s reply_hold_pending_disconnects] - $before_disc}]
 
         $r debug aof-flush-force stall 0
         $r config set appendfsync bgalways
@@ -1177,11 +1156,8 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
         assert_equal {OK} [$rd_push read]
         $rd_bpop close
         $rd_push close
-        wait_for_condition 50 20 {
-            [s reply_hold_pending_clients] == 0
-        } else {
-            fail "pending clients did not drain after the pop became durable"
-        }
+        # Both clients' reads already proved their chunks were released.
+        assert_equal 0 [s reply_hold_pending_clients]
     }
 
     test {bgalways: a module's timeout_callback reply is held until its propagated write is durable} {
@@ -1229,11 +1205,9 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
         $r debug aof-flush-force stall 0
         assert_equal {Request timedout} [$rd_to read]
         $rd_to close
-        wait_for_condition 50 20 {
-            [s reply_hold_pending_clients] == 0
-        } else {
-            fail "pending clients did not drain after the write became durable"
-        }
+        # rd_to's read already proves the chunk was released (unlink
+        # precedes the write).
+        assert_equal 0 [s reply_hold_pending_clients]
     }
 }
 
@@ -1298,10 +1272,8 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
         $r debug aof-flush-force stall 0
         assert_equal {OK} [$rd read]
         $rd close
-        wait_for_condition 50 20 {
-            [s reply_hold_pending_clients] == 0
-        } else {
-            fail "pending clients did not drain after the write became durable"
-        }
+        # rd's read already proves the chunk was released (unlink precedes
+        # the write).
+        assert_equal 0 [s reply_hold_pending_clients]
     }
 }
