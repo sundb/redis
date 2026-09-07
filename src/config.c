@@ -24,6 +24,7 @@
 #include <string.h>
 #include <locale.h>
 #include <ctype.h>
+#include <arpa/inet.h>
 
 /*-----------------------------------------------------------------------------
  * Config file name-value maps.
@@ -92,6 +93,15 @@ configEnum shutdown_on_sig_enum[] = {
     {"nosave", SHUTDOWN_NOSAVE},
     {"now", SHUTDOWN_NOW},
     {"force", SHUTDOWN_FORCE},
+    {NULL, 0}
+};
+
+configEnum cluster_slot_stats_enum[] = {
+    {"no", 0},
+    {"yes", CLUSTER_SLOT_STATS_ALL},
+    {"cpu", CLUSTER_SLOT_STATS_CPU},
+    {"net", CLUSTER_SLOT_STATS_NET},
+    {"mem", CLUSTER_SLOT_STATS_MEM},
     {NULL, 0}
 };
 
@@ -1784,7 +1794,7 @@ int rewriteConfig(char *path, int force_write) {
     /* Step 4: generate a new configuration file from the modified state
      * and write it into the original file. */
     newcontent = rewriteConfigGetContentFromState(state);
-    retval = rewriteConfigOverwriteFile(server.configfile,newcontent);
+    retval = rewriteConfigOverwriteFile(path, newcontent);
 
     sdsfree(newcontent);
     rewriteConfigReleaseState(state);
@@ -2401,6 +2411,16 @@ static int isValidShutdownOnSigFlags(int val, const char **err) {
     return 1;
 }
 
+static int updateMemoryTrackingEnabled(const char **err) {
+    int memory_tracking_enabled = server.key_memory_histograms || (server.cluster_slot_stats_enabled & CLUSTER_SLOT_STATS_MEM);
+    if (!server.memory_tracking_enabled && memory_tracking_enabled) {
+        *err = "memory tracking cannot be enabled at runtime";
+        return 0;
+    }
+    server.memory_tracking_enabled = memory_tracking_enabled;
+    return 1;
+}
+
 static int isValidAnnouncedNodename(char *val,const char **err) {
     if (!(isValidAuxString(val,sdslen(val)))) {
         *err = "Announced human node name contained invalid character";
@@ -2409,13 +2429,7 @@ static int isValidAnnouncedNodename(char *val,const char **err) {
     return 1;
 }
 
-static int isValidAnnouncedHostname(char *val, const char **err) {
-    if (strlen(val) >= NET_HOST_STR_LEN) {
-        *err = "Hostnames must be less than "
-            STRINGIFY(NET_HOST_STR_LEN) " characters";
-        return 0;
-    }
-
+static int isValidHostnameChars(char *val, const char **err) {
     int i = 0;
     char c;
     while ((c = val[i])) {
@@ -2433,10 +2447,70 @@ static int isValidAnnouncedHostname(char *val, const char **err) {
     return 1;
 }
 
+static int isValidAnnouncedHostname(char *val, const char **err) {
+    if (strlen(val) >= NET_HOST_STR_LEN) {
+        *err = "Hostnames must be less than "
+            STRINGIFY(NET_HOST_STR_LEN) " characters";
+        return 0;
+    }
+    return isValidHostnameChars(val, err);
+}
+
+/* Validation function for cluster-announce-ip.
+ * Ensures the IP address is valid and rejects control characters. */
+static int isValidClusterAnnounceIp(char *val, const char **err) {
+    unsigned char buf[sizeof(struct in6_addr)];
+    /* Empty string is allowed - it will be converted to NULL by EMPTY_STRING_IS_NULL flag */
+    if (val[0] == '\0') {
+        return 1;
+    }
+
+    /* Accept valid IPv4 or IPv6 */
+    if (inet_pton(AF_INET, val, buf) == 1 || inet_pton(AF_INET6, val, buf) == 1) {
+        return 1;
+    }
+    /* Also accept valid hostnames, but limited to NET_IP_STR_LEN since
+     * cluster_announce_ip is stored in a NET_IP_STR_LEN buffer */
+    if (strlen(val) >= NET_IP_STR_LEN) {
+        *err = "Hostnames for cluster-announce-ip must be less than "
+               STRINGIFY(NET_IP_STR_LEN) " characters";
+        return 0;
+    }
+    /* Also accept valid hostnames */
+    return isValidHostnameChars(val, err);
+}
+
 /* Validate specified string is a valid proc-title-template */
 static int isValidProcTitleTemplate(char *val, const char **err) {
     if (!validateProcTitleTemplate(val)) {
         *err = "template format is invalid or contains unknown variables";
+        return 0;
+    }
+    return 1;
+}
+
+/* Validate that array-slice-size is a power of two */
+static int isValidArraySliceSize(long long val, const char **err) {
+    if (val <= 0 || (val & (val - 1)) != 0) {
+        *err = "array-slice-size must be a power of two";
+        return 0;
+    }
+    return 1;
+}
+
+/* Validate array-sparse-kmax: if non-zero, must be > kmin */
+static int isValidArraySparseKmax(long long val, const char **err) {
+    if (val > 0 && (unsigned int)val <= server.array_sparse_kmin) {
+        *err = "array-sparse-kmax must be greater than array-sparse-kmin when non-zero";
+        return 0;
+    }
+    return 1;
+}
+
+/* Validate array-sparse-kmin: must be < kmax when kmax is non-zero */
+static int isValidArraySparseKmin(long long val, const char **err) {
+    if (server.array_sparse_kmax > 0 && (unsigned int)val >= server.array_sparse_kmax) {
+        *err = "array-sparse-kmin must be less than array-sparse-kmax";
         return 0;
     }
     return 1;
@@ -2898,7 +2972,11 @@ static int setConfigNotifyKeyspaceEventsOption(standardConfig *config, sds *argv
     }
     int flags = keyspaceEventsStringToFlags(argv[0]);
     if (flags == -1) {
-        *err = "Invalid event class character. Use 'Ag$lshzxeKEtmdn'.";
+#ifdef ENABLE_GCRA
+        *err = "Invalid event class character. Use 'Ag$lshzxeKEtmdnocraSTIV'.";
+#else
+        *err = "Invalid event class character. Use 'Ag$lshzxeKEtmdnocaSTIV'.";
+#endif
         return 0;
     }
     server.notify_keyspace_events = flags;
@@ -3130,8 +3208,9 @@ standardConfig static_configs[] = {
     createBoolConfig("replica-ignore-disk-write-errors", NULL, MODIFIABLE_CONFIG, server.repl_ignore_disk_write_error, 0, NULL, NULL),
     createBoolConfig("hide-user-data-from-log", NULL, MODIFIABLE_CONFIG, server.hide_user_data_from_log, 0, NULL, NULL),
     createBoolConfig("lazyexpire-nested-arbitrary-keys", NULL, MODIFIABLE_CONFIG | HIDDEN_CONFIG, server.lazyexpire_nested_arbitrary_keys, 1, NULL, NULL),
-    createBoolConfig("cluster-slot-stats-enabled", NULL, MODIFIABLE_CONFIG, server.cluster_slot_stats_enabled, 0, NULL, NULL),
+    createEnumConfig("cluster-slot-stats-enabled", NULL, MODIFIABLE_CONFIG | MULTI_ARG_CONFIG, cluster_slot_stats_enum, server.cluster_slot_stats_enabled, 0, NULL, updateMemoryTrackingEnabled),
     createBoolConfig("lua-enable-deprecated-api", NULL, IMMUTABLE_CONFIG | HIDDEN_CONFIG, server.lua_enable_deprecated_api, 0, NULL, NULL),
+    createBoolConfig("key-memory-histograms", NULL, MODIFIABLE_CONFIG, server.key_memory_histograms, 0, NULL, updateMemoryTrackingEnabled),
 
     /* String Configs */
     createStringConfig("aclfile", NULL, IMMUTABLE_CONFIG, ALLOW_EMPTY_STRING, server.acl_filename, "", NULL, NULL),
@@ -3139,7 +3218,7 @@ standardConfig static_configs[] = {
     createStringConfig("pidfile", NULL, IMMUTABLE_CONFIG, EMPTY_STRING_IS_NULL, server.pidfile, NULL, NULL, NULL),
     createStringConfig("replica-announce-ip", "slave-announce-ip", MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.slave_announce_ip, NULL, NULL, NULL),
     createStringConfig("masteruser", NULL, MODIFIABLE_CONFIG | SENSITIVE_CONFIG, EMPTY_STRING_IS_NULL, server.masteruser, NULL, NULL, NULL),
-    createStringConfig("cluster-announce-ip", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.cluster_announce_ip, NULL, NULL, updateClusterIp),
+    createStringConfig("cluster-announce-ip", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.cluster_announce_ip, NULL, isValidClusterAnnounceIp, updateClusterIp),
     createStringConfig("cluster-config-file", NULL, IMMUTABLE_CONFIG, ALLOW_EMPTY_STRING, server.cluster_configfile, "nodes.conf", NULL, NULL),
     createStringConfig("cluster-announce-hostname", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.cluster_announce_hostname, NULL, isValidAnnouncedHostname, updateClusterHostname),
     createStringConfig("cluster-announce-human-nodename", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.cluster_announce_human_nodename, NULL, isValidAnnouncedNodename, updateClusterHumanNodename),
@@ -3186,7 +3265,7 @@ standardConfig static_configs[] = {
     createIntConfig("databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.dbnum, 16, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("port", NULL, MODIFIABLE_CONFIG, 0, 65535, server.port, 6379, INTEGER_CONFIG, NULL, updatePort), /* TCP port. */
     createIntConfig("io-threads", NULL, DEBUG_CONFIG | IMMUTABLE_CONFIG, 1, 128, server.io_threads_num, 1, INTEGER_CONFIG, NULL, NULL), /* Single threaded by default */
-    createIntConfig("prefetch-batch-max-size", NULL, MODIFIABLE_CONFIG | HIDDEN_CONFIG, 0, 128, server.prefetch_batch_max_size, 16, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("prefetch-batch-max-size", NULL, MODIFIABLE_CONFIG | HIDDEN_CONFIG, 0, PREFETCH_BATCH_MAX_SIZE, server.prefetch_batch_max_size, 16, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("auto-aof-rewrite-percentage", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.aof_rewrite_perc, 100, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("cluster-replica-validity-factor", "cluster-slave-validity-factor", MODIFIABLE_CONFIG, 0, INT_MAX, server.cluster_slave_validity_factor, 10, INTEGER_CONFIG, NULL, NULL), /* Slave max data age factor. */
     createIntConfig("list-max-listpack-size", "list-max-ziplist-size", MODIFIABLE_CONFIG, INT_MIN, INT_MAX, server.list_max_listpack_size, -2, INTEGER_CONFIG, NULL, NULL),
@@ -3224,6 +3303,7 @@ standardConfig static_configs[] = {
     createIntConfig("cluster-compatibility-sample-ratio", NULL, MODIFIABLE_CONFIG, 0, 100, server.cluster_compatibility_sample_ratio, 0, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("cluster-slot-migration-max-archived-tasks", NULL, MODIFIABLE_CONFIG | HIDDEN_CONFIG, 1, INT_MAX, server.asm_max_archived_tasks, 32, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("lookahead", NULL, MODIFIABLE_CONFIG, 1, INT_MAX, server.lookahead, REDIS_DEFAULT_LOOKAHEAD, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("slowlog-entry-max-argc", NULL, MODIFIABLE_CONFIG, 2, INT_MAX, server.slowlog_max_argc, 32, INTEGER_CONFIG, NULL, NULL),
 
     /* Unsigned int configs */
     createUIntConfig("maxclients", NULL, MODIFIABLE_CONFIG, 1, UINT_MAX, server.maxclients, 10000, INTEGER_CONFIG, NULL, updateMaxclients),
@@ -3231,6 +3311,10 @@ standardConfig static_configs[] = {
     createUIntConfig("socket-mark-id", NULL, IMMUTABLE_CONFIG, 0, UINT_MAX, server.socket_mark_id, 0, INTEGER_CONFIG, NULL, NULL),
     createUIntConfig("max-new-connections-per-cycle", NULL, MODIFIABLE_CONFIG, 1, 1000, server.max_new_conns_per_cycle, 10, INTEGER_CONFIG, NULL, NULL),
     createUIntConfig("max-new-tls-connections-per-cycle", NULL, MODIFIABLE_CONFIG, 1, 1000, server.max_new_tls_conns_per_cycle, 1, INTEGER_CONFIG, NULL, NULL),
+    /* Array type configuration */
+    createUIntConfig("array-slice-size", NULL, MODIFIABLE_CONFIG, AR_SLICE_SIZE_MIN, AR_SLICE_SIZE_MAX, server.array_slice_size, AR_SLICE_SIZE_DEFAULT, INTEGER_CONFIG, isValidArraySliceSize, NULL),
+    createUIntConfig("array-sparse-kmax", NULL, MODIFIABLE_CONFIG, 0, 256, server.array_sparse_kmax, AR_SPARSE_KMAX_DEFAULT, INTEGER_CONFIG, isValidArraySparseKmax, NULL),
+    createUIntConfig("array-sparse-kmin", NULL, MODIFIABLE_CONFIG, 0, 256, server.array_sparse_kmin, AR_SPARSE_KMIN_DEFAULT, INTEGER_CONFIG, isValidArraySparseKmin, NULL),
 #ifdef LOG_REQ_RES
     createUIntConfig("client-default-resp", NULL, IMMUTABLE_CONFIG | HIDDEN_CONFIG, 2, 3, server.client_default_resp, 2, INTEGER_CONFIG, NULL, NULL),
 #endif
@@ -3238,6 +3322,7 @@ standardConfig static_configs[] = {
     /* Unsigned Long configs */
     createULongConfig("active-defrag-max-scan-fields", NULL, MODIFIABLE_CONFIG, 1, LONG_MAX, server.active_defrag_max_scan_fields, 1000, INTEGER_CONFIG, NULL, NULL), /* Default: keys with more than 1000 fields will be processed separately */
     createULongConfig("slowlog-max-len", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.slowlog_max_len, 128, INTEGER_CONFIG, NULL, NULL),
+    createULongConfig("slowlog-entry-max-string-len", NULL, MODIFIABLE_CONFIG, 1, LONG_MAX, server.slowlog_max_string_len, 128, INTEGER_CONFIG, NULL, NULL),
     createULongConfig("acllog-max-len", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.acllog_max_len, 128, INTEGER_CONFIG, NULL, NULL),
 
     /* Long Long configs */
@@ -3682,6 +3767,7 @@ int moduleSetEnumConfig(client *c, sds name, sds *vals, int vals_cnt, const char
 
 int moduleSetNumericConfig(client *c, sds name, long long val, const char **err) {
     standardConfig *config = getMutableConfig(c, name, err);
+    if (!config) return 0;
     if (config->type != NUMERIC_CONFIG) return 0;
 
     sds old_value = config->interface.get(config);

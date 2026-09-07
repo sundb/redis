@@ -92,7 +92,7 @@ static uint64_t keyMetaClassEncode(const char *name, int metaver, uint64_t flags
     /* Encode last 4-char into 32-bit serialized class ID (24b name + 5b version + 3b flags) */
     uint32_t encName4chars = 0;
     for (int j = 0; j < KM_FULLNAME_LEN; j++) {
-        char *p = strchr(keyMetaCharSet, fullname[j]);
+        const char *p = strchr(keyMetaCharSet, fullname[j]);
         if (!p) return 0; /* Invalid character in name */
         unsigned long pos = p - keyMetaCharSet;
         encName9Chars = (encName9Chars << KM_ENC_CHAR_BITS) | pos;
@@ -416,7 +416,7 @@ int rdbLoadSkipMetaIfAllowed(rio *rdb, char *cname, int flags) {
          *
          * Note: rdbLoadCheckModuleValue() reads opcodes until it finds RDB_MODULE_OPCODE_EOF,
          * so it consumes the EOF marker as well. We don't need to read it separately. */
-        robj *dummy = rdbLoadCheckModuleValue(rdb, cname);
+        robj *dummy = rdbLoadCheckModuleValue(rdb, cname, 1);
         if (dummy == NULL) {
             serverLog(LL_WARNING, "Corrupted metadata value for class '%s'", cname);
             return -1;
@@ -593,7 +593,7 @@ int rdbSaveKeyMetadata(rio *rdb, robj *key, kvobj *kv, int dbid) {
                 /* Call module's rdb_save callback */
                 RedisModuleIO io;
                 moduleInitIOContext(&io, &pClass->entity, &payload_rio, key, dbid);
-                pClass->conf.rdb_save(&io, kv, pMeta);
+                pClass->conf.rdb_save(&io, NULL, pMeta);
 
                 if (io.ctx) {
                     moduleFreeContext(io.ctx);
@@ -668,7 +668,7 @@ int keyMetaOnAof(rio *r, robj *key, kvobj *kv, int dbid) {
             {
                 RedisModuleIO io;
                 moduleInitIOContext(&io, &keyMetaClass[keyMetaId].entity, r, key, dbid);
-                keyMetaClass[keyMetaId].conf.aof_rewrite(&io, kv, meta);
+                keyMetaClass[keyMetaId].conf.aof_rewrite(&io, NULL, meta);
                 if (io.ctx) {
                     moduleFreeContext(io.ctx);
                     zfree(io.ctx);
@@ -743,25 +743,25 @@ KeyMetaClassId keyMetaClassCreate(RedisModule *context, const char *name,
 
     /* Check for name conflicts using 4-char name. Allow reuse of RELEASED; forbid if INUSE. */
     int alreayReleased;
-    int slot = keyMetaClassLookupByName(name, &alreayReleased);
+    int keyMetaId = keyMetaClassLookupByName(name, &alreayReleased);
 
     if (alreayReleased) {
-        /* If already released, then reuse the slot. */
+        /* If already released, then reuse the keyMetaId. */
     } else {
         /* Assert class is registered for first time */
-        serverAssert(slot == -1);
+        serverAssert(keyMetaId == -1);
 
-        /* Find free slot */
+        /* Find free keyMetaId */
         for (int i = KEY_META_ID_MODULE_FIRST; i <= KEY_META_ID_MODULE_LAST; i++) {
             if (keyMetaClass[i].state == CLASS_STATE_FREE) {
-                slot = i;
+                keyMetaId = i;
                 break;
             }
         }
-        if (slot == -1) return 0; /* no free slots */
+        if (keyMetaId == -1) return 0; /* no free keyMetaId */
     }
 
-    KeyMetaClass *pKeyMetaClass = &keyMetaClass[slot];
+    KeyMetaClass *pKeyMetaClass = &keyMetaClass[keyMetaId];
 
     /* Store 4-char short name */
     memcpy(pKeyMetaClass->name, name, KM_NAME_LEN);
@@ -774,7 +774,7 @@ KeyMetaClassId keyMetaClassCreate(RedisModule *context, const char *name,
     pKeyMetaClass->state = CLASS_STATE_INUSE;
     pKeyMetaClass->classSpecEncoded = classSpecEncoded;
     KM_SET_CONST_CONF(pKeyMetaClass->conf) = *conf; /* Copy config as is. */
-    return slot; /* Return handle (1..7). */
+    return keyMetaId; /* Return handle (1..7). */
 }
 
 /* Destroy (release) a class by its ID. Returns 1 on success, 0 on failure. */
@@ -835,8 +835,13 @@ kvobj *keyMetaSetMetadata(redisDb *db, kvobj *kv, KeyMetaClassId id, uint64_t me
 
     /* Reallocate kv with the new metadata bit enabled. kvobjSet may return a new 
      * ptr. Takes care to transition existing metadata as needed. */
+    size_t oldsize = 0;
+    if (server.memory_tracking_enabled)
+        oldsize = kvobjAllocSize(kv);
     kv = kvobjSet(key, kv, kv->metabits | (1u << id));
     kvstoreDictSetAtLink(db->keys, slot, kv, &keyLink, 0);
+    if (server.memory_tracking_enabled)
+        updateSlotAllocSize(db, slot, kv, oldsize, kvobjAllocSize(kv));
 
     /* Set new metadata */
     *kvobjMetaRef(kv, id) = metadata;

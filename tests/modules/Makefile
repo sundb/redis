@@ -85,6 +85,8 @@ TEST_MODULES = \
     internalsecret.so \
     configaccess.so \
     test_keymeta.so \
+    keymeta_notify.so \
+    postnotifications_perkey_metadata.so \
     atomicslotmigration.so
 
 .PHONY: all

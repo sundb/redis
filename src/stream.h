@@ -86,6 +86,9 @@ typedef struct streamIterator {
     unsigned char value_buf[LP_INTBUF_SIZE];
 } streamIterator;
 
+/* Forward declarations */
+typedef struct streamNACK streamNACK;
+
 /* Consumer group. */
 typedef struct streamCG {
     streamID last_id;       /* Last delivered (not acknowledged) ID for this
@@ -102,11 +105,16 @@ typedef struct streamCG {
                                as processed. The key of the radix tree is the
                                ID as a 64 bit big endian number, while the
                                associated value is a streamNACK structure.*/
-    rax *pel_by_time;       /* A radix tree mapping delivery time to pending
-                               entries, so that we can query faster PEL entries
-                               by time. The key is a pelTimeKey structure containing
-                               both delivery_time and stream ID. All information is
-                               in the key; no value is stored. */
+    streamNACK *pel_time_head; /* Head of time-ordered doubly-linked list of pending
+                                  entries (oldest delivery_time). Used for efficient
+                                  CLAIM operations. O(1) access to oldest entries. */
+    streamNACK *pel_time_tail; /* Tail of time-ordered doubly-linked list of pending
+                                  entries (newest delivery_time). O(1) append for
+                                  updates that set delivery_time to current time. */
+    streamNACK *pel_nack_tail; /* Tail of the NACK zone at the head of the
+                                  PEL time-ordered list. NACKed entries occupy
+                                  positions from pel_time_head to pel_nack_tail.
+                                  NULL if no NACKed entries exist. */
     rax *consumers;         /* A radix tree representing the consumers by name
                                and their associated representation in the form
                                of streamConsumer structures. */
@@ -129,13 +137,16 @@ typedef struct streamConsumer {
 } streamConsumer;
 
 /* Pending (yet not acknowledged) message in a consumer group. */
-typedef struct streamNACK {
+struct streamNACK {
     mstime_t delivery_time;     /* Last time this message was delivered. */
     uint64_t delivery_count;    /* Number of times this message was delivered.*/
     streamConsumer *consumer;   /* The consumer this message was delivered to
                                    in the last delivery. */
     listNode *cgroup_ref_node; /* Reference to this NACK in the cgroups_ref list. */
-} streamNACK;
+    streamID id;                /* Stream ID for this pending entry. */
+    struct streamNACK *pel_prev; /* Previous NACK in time-ordered doubly-linked list. */
+    struct streamNACK *pel_next; /* Next NACK in time-ordered doubly-linked list. */
+};
 
 /* Stream propagation information, passed to functions in order to propagate
  * XCLAIM commands to AOF and slaves. */
@@ -144,11 +155,29 @@ typedef struct streamPropInfo {
     robj *groupname;
 } streamPropInfo;
 
-/* Pending entry in the consumer group's PEL, indexed by delivery time. */
-typedef struct pelTimeKey {
-    uint64_t delivery_time;
-    streamID id;
-} pelTimeKey;
+/* Parameters controlling how streamReplyWithRange() fetches and emits entries.
+ * Bundled into a struct so callers can use designated initializers and avoid a
+ * long, error-prone positional argument list. Fields left unset are zero, which
+ * matches "no group", "no propagation", "no limit", etc.; note that
+ * 'min_idle_time' must be set to -1 to disable the idle-time filter. */
+typedef struct streamReplyRangeArgs {
+    streamID *start;            /* Inclusive range start (NULL for open start). */
+    streamID *end;              /* Inclusive range end (NULL for open end). */
+    size_t count;               /* Max entries to emit (0 means unlimited). */
+    int rev;                    /* Iterate in reverse order if non-zero. */
+    long long min_idle_time;    /* Only serve PEL entries idle for this long;
+                                   -1 disables idle-time filtering. */
+    streamCG *group;            /* Consumer group, or NULL. */
+    streamConsumer *consumer;   /* Consumer within the group, or NULL. */
+    int flags;                  /* STREAM_RWR_* flags. */
+    streamPropInfo *spi;        /* Propagation info, or NULL for no propagation. */
+    unsigned long *propCount;   /* Out: number of propagated commands, or NULL. */
+    long long maxsize;          /* Byte budget for the reply (0 means unlimited).
+                                   Already includes the output-bytes baseline, so
+                                   MAXSIZE is checked against the absolute
+                                   c->net_output_bytes_curr_cmd. */
+    size_t emitted_before;      /* Entries already emitted before this call. */
+} streamReplyRangeArgs;
 
 /* Prototypes of exported APIs. */
 struct client;
@@ -163,7 +192,7 @@ struct client;
 stream *streamNew(void);
 void freeStream(stream *s);
 unsigned long streamLength(const robj *subject);
-size_t streamReplyWithRange(client *c, stream *s, streamID *start, streamID *end, size_t count, int rev, long long min_idle_time, streamCG *group, streamConsumer *consumer, int flags, streamPropInfo *spi, unsigned long *propCount);
+size_t streamReplyWithRange(client *c, stream *s, streamReplyRangeArgs *args);
 void streamIteratorStart(streamIterator *si, stream *s, streamID *start, streamID *end, int rev);
 int streamIteratorGetID(streamIterator *si, streamID *id, int64_t *numfields);
 void streamIteratorGetField(streamIterator *si, unsigned char **fieldptr, unsigned char **valueptr, int64_t *fieldlen, int64_t *valuelen);
@@ -173,10 +202,12 @@ streamCG *streamLookupCG(stream *s, sds groupname);
 streamConsumer *streamLookupConsumer(streamCG *cg, sds name);
 streamConsumer *streamCreateConsumer(stream *s, streamCG *cg, sds name, robj *key, int dbid, int flags);
 streamCG *streamCreateCG(stream *s, char *name, size_t namelen, streamID *id, long long entries_read);
-streamNACK *streamCreateNACK(stream *s, streamConsumer *consumer);
+streamNACK *streamCreateNACK(stream *s, streamConsumer *consumer, streamID *id);
+void streamEncodeID(void *buf, streamID *id);
 void streamDecodeID(void *buf, streamID *id);
 int streamCompareID(streamID *a, streamID *b);
 void streamFreeNACK(stream *s, streamNACK *na);
+void streamDestroyNACK(stream *s, streamNACK *na, unsigned char *key);
 int streamIncrID(streamID *id);
 int streamDecrID(streamID *id);
 void streamPropagateConsumerCreation(client *c, robj *key, robj *groupname, sds consumername);
@@ -190,13 +221,17 @@ void streamGetEdgeID(stream *s, int first, int skip_tombstones, streamID *edge_i
 long long streamEstimateDistanceFromFirstEverEntry(stream *s, streamID *id);
 int64_t streamTrimByLength(stream *s, long long maxlen, int approx);
 int64_t streamTrimByID(stream *s, streamID minid, int approx);
+int streamEntryExists(stream *s, streamID *id);
+void streamKeyLoaded(redisDb *db, robj *key, robj *val);
+void streamKeyRemoved(redisDb *db, robj *key, robj *val);
 
 listNode *streamLinkCGroupToEntry(stream *s, streamCG *cg, unsigned char *key);
 
-void encodePelTimeKey(void* buf, pelTimeKey *timeKey);
-void decodePelTimeKey(void *buf, pelTimeKey *timeKey);
-void raxInsertPelByTime(rax *pel_by_time, uint64_t delivery_time, streamID *id);
-void raxRemovePelByTime(rax *pel_by_time, uint64_t delivery_time, streamID *id);
+/* PEL time list management (used by RDB loading) */
+void pelListInsertSorted(streamCG *cg, streamNACK *nack);
+void pelListUnlink(streamCG *cg, streamNACK *nack);
+void pelListInsertNacked(streamCG *cg, streamNACK *nack);
+uint64_t pelListNackedCount(streamCG *cg);
 
 /* IDMP functions */
 idmpEntry *idmpEntryCreate(const char *iid, size_t iid_len, size_t *alloc_size);

@@ -389,6 +389,7 @@ start_server {} {
 }
 
 start_server {} {
+
     test "decrease maxmemory-clients causes client eviction" {
         set maxmemory_clients [mb 4]
         set client_count 10
@@ -569,7 +570,7 @@ start_server {} {
         r config set maxmemory-clients 0
 
         test "client total memory grows during $type" {
-            r setrange k [mb 1] v
+            r setrange k [kb 10] v ;# Keep value <= 16KB to avoid copy-avoidance, which shares memory and slows tot-mem growth.
             set rr [redis_client]
             $rr client setname test_client
             if {$type eq "client no-evict"} {
@@ -581,8 +582,9 @@ start_server {} {
             # Fill output buffer in loop without reading it and make sure
             # the tot-mem of client has increased (OS buffers didn't swallow it)
             # and eviction not occurring.
+            set mget_args [lrepeat 100 k] ;# Use mget with 100 keys so each reply adds ~1MB to tot-mem, reaching 10MB faster.
             while {true} {
-                $rr get k
+                $rr mget {*}$mget_args
                 $rr flush
                 after 10
                 if {[client_field test_client tot-mem] > [mb 10]} {
@@ -606,6 +608,35 @@ start_server {} {
             }
             $rr close
         }
+    }
+}
+
+start_server {} {
+    r flushall
+    r client no-evict on
+    r config set maxmemory-clients 0
+
+    test "Verify blocked client eviction during unblock does not cause use-after-free" {
+        # Create a deferring client that will be blocked on stream
+        # Use a long stream name to make client memory usage exceed 200000 bytes
+        set rd [redis_deferring_client]
+        $rd XREAD BLOCK 0 STREAMS mystream stream_[string repeat x 200000] $ $
+
+        # Wait for the client to be blocked
+        wait_for_condition 50 100 {
+            [s blocked_clients] eq {1}
+        } else {
+            fail "Client was not blocked"
+        }
+
+        # Now lower MAXMEMORY-CLIENTS to a low value and use
+        # XADD to unblock the blocked client, triggering eviction.
+        r MULTI
+        r CONFIG SET MAXMEMORY-CLIENTS 100000 ;# Put in MULTI to defer blocked client eviction until after EXEC
+        r XADD mystream * field val
+        r EXEC
+        r PING
+        $rd close
     }
 }
 
