@@ -277,9 +277,20 @@ void replyToBlockedClientTimedOut(client *c) {
         serverPanic("Unknown btype in replyToBlockedClientTimedOut().");
     }
 
-    /* BLOCKED_LAZYFREE propagated before blocking, so gate on the saved
-     * c->woff directly; other branches propagate nothing here, so gate on
-     * whether master_repl_offset moved since entry. */
+    /* BLOCKED_LAZYFREE's FLUSH was already propagated during the original
+     * command execution, and c->woff records that write's offset. Only its
+     * reply is produced here. Propagation does not imply AOF fsync completion,
+     * so hold this reply until the saved c->woff is durable. Comparing against
+     * pre_repl_offset would miss that earlier write: the offset need not move
+     * during this callback, even if the FLUSH is still waiting for fsync.
+     *
+     * The other non-module branches only report a timeout result and do not
+     * propagate a write here. Use the offset comparison helper: if the offset
+     * advanced since entry, hold the reply on the resulting write offset;
+     * otherwise, queue it with woff=0 behind any existing held replies to
+     * preserve RESP order, or leave it unheld if there are none. This avoids
+     * attaching a timeout-only reply to an old c->woff. BLOCKED_MODULE handles
+     * reply holding inside its callback; our reply_hold is inactive for it. */
     if (c->bstate.btype == BLOCKED_LAZYFREE)
         replyHoldFinish(c, c->woff, &reply_hold);
     else
