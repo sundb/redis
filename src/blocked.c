@@ -239,18 +239,16 @@ int blockedClientMayTimeout(client *c) {
  * unblockClient() will be called with the same client as argument. */
 void replyToBlockedClientTimedOut(client *c) {
     long long pre_repl_offset = server.master_repl_offset;
-    /* Reply holding (appendfsync bgalways): every branch below (other than
-     * BLOCKED_MODULE, which brackets itself in moduleBlockedClientTimedOut())
-     * writes a reply straight into c's reply buffer, entirely outside call()
-     * -- the same situation as unblockClientOnKey()/disconnectAllBlockedClients().
-     * None of these branches propagate a write themselves (a genuine pop
-     * would have been served by the normal ready-key path, not a timeout),
-     * except BLOCKED_LAZYFREE, whose underlying FLUSH already propagated
-     * before it blocked (c->woff holds that offset, same as
-     * unblockClientForAsyncFlush()/disconnectAllBlockedClients() use it) --
-     * so the other branches only need ordering (passthrough) protection,
-     * gated on whether anything propagated since entry, while
-     * BLOCKED_LAZYFREE is gated directly on c->woff. */
+    /* Reply holding (appendfsync bgalways): each branch below, except
+     * BLOCKED_MODULE (which brackets itself in moduleBlockedClientTimedOut()),
+     * writes a reply straight into c's reply buffer outside call() -- same as
+     * unblockClientOnKey()/disconnectAllBlockedClients(). None of them
+     * propagate a write here (a genuine pop would have been served by the
+     * ready-key path, not a timeout), except BLOCKED_LAZYFREE, whose FLUSH
+     * already propagated before it blocked (c->woff holds that offset). So
+     * the other branches just need passthrough protection gated on whether
+     * anything propagated since entry, while BLOCKED_LAZYFREE gates directly
+     * on c->woff. */
     syncReplCookie sync_rep = {0, 0, NULL};
     if (c->bstate.btype != BLOCKED_MODULE)
         sync_rep = syncReplBeginCommand(c);
@@ -331,17 +329,16 @@ void disconnectAllBlockedClients(void) {
             if (c->bstate.btype == BLOCKED_LAZYFREE) {
                 /* Reply holding (appendfsync bgalways): the FLUSH already
                  * propagated and advanced master_repl_offset (captured in
-                 * c->woff) before this client blocked (forceCommandPropagation()
-                 * runs inside the original call(), before
-                 * blockClientForAsyncFlush() suspends it) — same situation as
+                 * c->woff) before this client blocked -- same situation as
                  * the normal completion path in unblockClientForAsyncFlush(),
-                 * so gate this reply on c->woff the same way. Without this, the
+                 * so gate this reply on c->woff the same way. Otherwise the
                  * client would get an unconditional +OK for a write that
-                 * disconnectAllSyncRepPendingClients() (called right after this
-                 * loop, in replicationSetMaster()) is specifically trying to
-                 * avoid acking. If the reply does end up chunked here, that
-                 * call picks this client up via server.sync_clients_with_pending
-                 * and disconnects it instead of letting the +OK go out. */
+                 * disconnectAllSyncRepPendingClients() (called right after
+                 * this loop, in replicationSetMaster()) is specifically
+                 * trying to avoid acking; if the reply ends up chunked here,
+                 * that call picks the client up via
+                 * server.sync_clients_with_pending and disconnects it instead
+                 * of letting the +OK go out. */
                 syncReplCookie sync_rep = syncReplBeginCommand(c);
 
                 /* SFLUSH: reply with empty array, FLUSH*: reply with OK */

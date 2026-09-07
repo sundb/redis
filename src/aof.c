@@ -1279,8 +1279,7 @@ long long aofRefreshFsyncedReploff(void) {
         server.fsynced_reploff != -1 &&
         server.fsynced_reploff >= server.aof_force_fsync_fail_offset)
     {
-        serverLog(LL_NOTICE,
-            "AOF forced-fsync error looks solved, Redis can write again.");
+        serverLog(LL_NOTICE, "AOF forced-fsync error looks solved, Redis can write again.");
         server.aof_last_write_status = C_OK;
         server.aof_force_fsync_fail_offset = -1;
     }

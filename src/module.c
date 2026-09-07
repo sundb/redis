@@ -8994,24 +8994,20 @@ void moduleHandleBlockedClients(void) {
          * free the temporary client we just used for the replies. */
         if (c) {
             /* Reply holding (appendfsync bgalways): bytes in bc->reply_client
-             * come from RM_ReplyWith*() calls made through a thread-safe
-             * context, typically from a background thread that already ran
-             * RM_Call() (propagating a write) before RM_UnblockClient() --
-             * unlike bc->reply_callback above, there's no callback boundary
-             * here to bracket with a "before" offset snapshot, and the
-             * module API doesn't tell us whether this blocked client
-             * propagated anything. Matching the same "we don't know, so
-             * assume it did" call a few lines below (c->woff =
-             * server.master_repl_offset), gate this splice on the current
-             * offset too, so a write this bc did isn't acked before it's
-             * durable.
+             * come from RM_ReplyWith*() calls through a thread-safe context,
+             * typically a background thread that already ran RM_Call()
+             * before RM_UnblockClient(). Unlike bc->reply_callback above,
+             * there's no callback boundary here for a "before" offset
+             * snapshot, and the module API doesn't tell us whether this
+             * blocked client propagated anything -- so, matching the "assume
+             * it did" call a few lines below (c->woff = server.master_repl_offset),
+             * gate this splice on the current offset too.
              *
              * Only bracket when reply_client actually accumulated something:
              * a keys-blocked client already replied via reply_callback above
-             * (bracketed there) and reply_client is empty here, so
-             * unconditionally bracketing would park a superfluous empty
-             * chunk on every module unblock, not just the thread-safe-context
-             * reply case this is for. */
+             * (bracketed there), leaving reply_client empty here, so
+             * unconditional bracketing would park a superfluous empty chunk
+             * on every module unblock. */
             int reply_client_has_data = bc->reply_client->bufpos > 0 || listLength(bc->reply_client->reply) > 0;
             syncReplCookie sync_rep = {0, 0, NULL};
             if (reply_client_has_data)

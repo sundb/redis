@@ -1322,15 +1322,15 @@ void unblockClientForAsyncFlush(uint64_t client_id, struct slotRangeArray *slots
     updateStatsOnUnblock(c, 0 /*blocked_us*/, elapsedUs(c->bstate.lazyfreeStartTime), 0);
 
     /* Reply holding (appendfsync bgalways): a default (SYNC) FLUSH ran as a
-     * blocking-async flush, so its "+OK" is produced here, in the BIO completion
-     * callback, OUTSIDE the call() cycle where chunking happens. The flush
-     * already propagated and advanced master_repl_offset during the original
-     * call() (captured in c->woff). Bracket the reply with
-     * syncReplBeginCommand/syncReplFinishCommand so it lands in a chunk gated on
-     * that woff instead of leaking straight to the socket — otherwise the client
-     * gets +OK for a FLUSH that is not yet in the AOF, and a crash would
-     * resurrect the "flushed" keyspace. The non-blocking flush path (e.g.
-     * FLUSH ASYNC) replies inside call() and is chunked by the gate there. */
+     * blocking-async flush, so its "+OK" is produced here, in the BIO
+     * completion callback, outside the call() cycle where chunking normally
+     * happens. The flush already advanced master_repl_offset during the
+     * original call() (captured in c->woff), so bracket the reply with
+     * syncReplBeginCommand/syncReplFinishCommand to gate it on that woff
+     * instead of leaking straight to the socket -- otherwise the client gets
+     * +OK for a FLUSH not yet in the AOF, and a crash would resurrect the
+     * "flushed" keyspace. Non-blocking flushes (e.g. FLUSH ASYNC) reply
+     * inside call() and are already gated there. */
     syncReplCookie sync_rep = syncReplBeginCommand(c);
 
     /* Only SFLUSH command pass user data pointer. */
