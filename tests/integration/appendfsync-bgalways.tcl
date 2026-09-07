@@ -35,6 +35,24 @@ proc bg_prog {c ncmds} {
     return $prog
 }
 
+# Returns 1 if rd's channel became readable within ms milliseconds, 0 if the
+# window elapsed with no data. Used to prove a reply-holding write's reply
+# hasn't leaked onto the socket early. A plain `after ms` blocks without
+# pumping the event loop, so the trailing `update` is what actually lets a
+# fileevent that fired during the sleep be observed. The handler unregisters
+# itself on first fire -- readable is level-triggered, so update would spin
+# forever re-invoking it otherwise, since it never itself reads the data.
+proc reply_arrived_within {rd ms} {
+    set fd [$rd channel]
+    global __reply_arrived_flag
+    set __reply_arrived_flag 0
+    fileevent $fd readable "set ::__reply_arrived_flag 1; fileevent $fd readable {}"
+    after $ms
+    update
+    fileevent $fd readable {}
+    return $__reply_arrived_flag
+}
+
 # A parked reply is released from the main thread's beforeSleep path. Keep the
 # owning client on the main thread so re-arming its write path cannot touch an
 # I/O thread-owned connection event loop.
@@ -130,16 +148,8 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         }
 
         # Poll the writer's socket for 100ms: no bytes may arrive while the
-        # write is not yet durable. (Same fileevent/vwait race the sync-rep
-        # "Replica paused" test uses.)
-        set fd [$rd channel]
-        set ::__bg_signal 0
-        fileevent $fd readable [list set ::__bg_signal data]
-        set timer [after 100 [list set ::__bg_signal timeout]]
-        vwait ::__bg_signal
-        after cancel $timer
-        fileevent $fd readable {}
-        if {$::__bg_signal ne "timeout"} {
+        # write is not yet durable.
+        if {[reply_arrived_within $rd 100]} {
             $rd close
             r debug aof-flush-force stall 0
             fail "reply bytes reached the socket before the write was durable"
@@ -354,14 +364,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
 
             # Prove the +OK is really held: poll the socket for 100ms and verify
             # no bytes arrive.
-            set fd [$rd channel]
-            set ::__bg_flush_sig 0
-            fileevent $fd readable [list set ::__bg_flush_sig data]
-            set timer [after 100 [list set ::__bg_flush_sig timeout]]
-            vwait ::__bg_flush_sig
-            after cancel $timer
-            fileevent $fd readable {}
-            if {$::__bg_flush_sig ne "timeout"} {
+            if {[reply_arrived_within $rd 100]} {
                 $rd close
                 r debug aof-flush-force stall 0
                 fail "$flushcmd reply arrived while the flush was not yet durable"
@@ -422,14 +425,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
 
         # Prove BLPOP's reply is really held: poll its socket for 100ms and
         # verify no bytes arrive while the pop is not yet durable.
-        set fd [$rd_blpop channel]
-        set ::__bg_blpop_sig 0
-        fileevent $fd readable [list set ::__bg_blpop_sig data]
-        set timer [after 100 [list set ::__bg_blpop_sig timeout]]
-        vwait ::__bg_blpop_sig
-        after cancel $timer
-        fileevent $fd readable {}
-        if {$::__bg_blpop_sig ne "timeout"} {
+        if {[reply_arrived_within $rd_blpop 100]} {
             $rd_blpop close
             $rd_lpush close
             r debug aof-flush-force stall 0
@@ -888,18 +884,10 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         # Prove the connection is not being torn down early: poll its
         # socket for 150ms and verify neither data nor a close arrives
         # while the fsync is still stalled.
-        set fd [$rd channel]
-        set ::__bg_quit_sig 0
-        fileevent $fd readable [list set ::__bg_quit_sig data]
-        set timer [after 150 [list set ::__bg_quit_sig timeout]]
-        vwait ::__bg_quit_sig
-        after cancel $timer
-        fileevent $fd readable {}
-        if {$::__bg_quit_sig ne "timeout"} {
+        if {[reply_arrived_within $rd 150]} {
             $rd close
             r debug aof-flush-force stall 0
-            fail "client was disconnected (or sent data) before its held\
-                replies were durable"
+            fail "client was disconnected (or sent data) before its held replies were durable"
         }
 
         # Release the stall -> both replies actually arrive, in order.
@@ -1129,14 +1117,7 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
 
         # Prove FSL.BPOP's reply is really held: poll its socket for 100ms and
         # verify no bytes arrive while the pop is not yet durable.
-        set fd [$rd_bpop channel]
-        set ::__bg_fslbpop_sig 0
-        fileevent $fd readable [list set ::__bg_fslbpop_sig data]
-        set timer [after 100 [list set ::__bg_fslbpop_sig timeout]]
-        vwait ::__bg_fslbpop_sig
-        after cancel $timer
-        fileevent $fd readable {}
-        if {$::__bg_fslbpop_sig ne "timeout"} {
+        if {[reply_arrived_within $rd_bpop 100]} {
             $rd_bpop close
             $rd_push close
             r debug aof-flush-force stall 0
@@ -1181,14 +1162,7 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
 
         # Prove the reply is really held: poll its socket for 100ms and
         # verify no bytes arrive while the write is not yet durable.
-        set fd [$rd_to channel]
-        set ::__bg_to_sig 0
-        fileevent $fd readable [list set ::__bg_to_sig data]
-        set timer [after 100 [list set ::__bg_to_sig timeout]]
-        vwait ::__bg_to_sig
-        after cancel $timer
-        fileevent $fd readable {}
-        if {$::__bg_to_sig ne "timeout"} {
+        if {[reply_arrived_within $rd_to 100]} {
             $rd_to close
             r debug aof-flush-force stall 0
             fail "timeout_callback's reply arrived while its write was not yet\
@@ -1246,18 +1220,10 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
 
         # Prove the reply is really held: poll its socket for 100ms and
         # verify no bytes arrive while the write is not yet durable.
-        set fd [$rd channel]
-        set ::__bg_thrd_sig 0
-        fileevent $fd readable [list set ::__bg_thrd_sig data]
-        set timer [after 100 [list set ::__bg_thrd_sig timeout]]
-        vwait ::__bg_thrd_sig
-        after cancel $timer
-        fileevent $fd readable {}
-        if {$::__bg_thrd_sig ne "timeout"} {
+        if {[reply_arrived_within $rd 100]} {
             $rd close
             r debug aof-flush-force stall 0
-            fail "thread-safe-context reply arrived while the write was not\
-                yet durable"
+            fail "thread-safe-context reply arrived while the write was not yet durable"
         }
 
         # Release the stall -> the write is durable -> the reply arrives.
