@@ -123,7 +123,7 @@ static inline void lpAssertValidEntry(unsigned char* lp, size_t lpbytes, unsigne
 #define LISTPACK_MAX_SAFETY_SIZE (1<<30)
 int lpSafeToAdd(unsigned char* lp, size_t add) {
     size_t len = lp? lpGetTotalBytes(lp): 0;
-    if (len + add > LISTPACK_MAX_SAFETY_SIZE)
+    if (add > LISTPACK_MAX_SAFETY_SIZE || len > LISTPACK_MAX_SAFETY_SIZE - add)
         return 0;
     return 1;
 }
@@ -337,20 +337,20 @@ static inline unsigned long lpEncodeBacklen(unsigned char *buf, uint64_t l) {
     if (l <= 127) {
         if (buf) buf[0] = l;
         return 1;
-    } else if (l < 16383) {
+    } else if (l <= 16383) {
         if (buf) {
             buf[0] = l>>7;
             buf[1] = (l&127)|128;
         }
         return 2;
-    } else if (l < 2097151) {
+    } else if (l <= 2097151) {
         if (buf) {
             buf[0] = l>>14;
             buf[1] = ((l>>7)&127)|128;
             buf[2] = (l&127)|128;
         }
         return 3;
-    } else if (l < 268435455) {
+    } else if (l <= 268435455) {
         if (buf) {
             buf[0] = l>>21;
             buf[1] = ((l>>14)&127)|128;
@@ -376,11 +376,11 @@ static inline unsigned long lpEncodeBacklen(unsigned char *buf, uint64_t l) {
 static inline unsigned long lpEncodeBacklenBytes(uint64_t l) {
     if (l <= 127) {
         return 1;
-    } else if (l < 16383) {
+    } else if (l <= 16383) {
         return 2;
-    } else if (l < 2097151) {
+    } else if (l <= 2097151) {
         return 3;
-    } else if (l < 268435455) {
+    } else if (l <= 268435455) {
         return 4;
     } else {
         return 5;
@@ -388,18 +388,49 @@ static inline unsigned long lpEncodeBacklenBytes(uint64_t l) {
 }
 
 /* Decode the backlen and returns it. If the encoding looks invalid (more than
- * 5 bytes are used), UINT64_MAX is returned to report the problem. */
+ * 5 bytes are used), UINT64_MAX is returned to report the problem.
+ *
+ * Optimized for the common case: most backlen values fit in one or two bytes
+ * due to listpack size limits. This version avoids a loop and pointer
+ * mutation, reducing overhead in hot paths while keeping the same encoding
+ * semantics.
+ *
+ * Note: the caller guarantees that up to 5 bytes preceding 'p' are readable,
+ * as ensured by listpack invariants. */
 static inline uint64_t lpDecodeBacklen(unsigned char *p) {
-    uint64_t val = 0;
-    uint64_t shift = 0;
-    do {
-        val |= (uint64_t)(p[0] & 127) << shift;
-        if (!(p[0] & 128)) break;
-        shift += 7;
-        p--;
-        if (shift > 28) return UINT64_MAX;
-    } while(1);
-    return val;
+    uint64_t val;
+
+    /* Fast path: single byte (most common for small entries <= 127 bytes) */
+    if (likely(!(p[0] & 128))) {
+        return p[0] & 127;
+    }
+
+    /* Two bytes */
+    val = (uint64_t)(p[0] & 127);
+    if (!(p[-1] & 128)) {
+        return val | ((uint64_t)(p[-1] & 127) << 7);
+    }
+
+    /* Three bytes */
+    val |= (uint64_t)(p[-1] & 127) << 7;
+    if (!(p[-2] & 128)) {
+        return val | ((uint64_t)(p[-2] & 127) << 14);
+    }
+
+    /* Four bytes */
+    val |= (uint64_t)(p[-2] & 127) << 14;
+    if (!(p[-3] & 128)) {
+        return val | ((uint64_t)(p[-3] & 127) << 21);
+    }
+
+    /* Five bytes */
+    val |= (uint64_t)(p[-3] & 127) << 21;
+    if (!(p[-4] & 128)) {
+        return val | ((uint64_t)(p[-4] & 127) << 28);
+    }
+
+    /* Invalid: more than 5 bytes */
+    return UINT64_MAX;
 }
 
 /* Encode the string element pointed by 's' of size 'len' in the target
@@ -1177,7 +1208,10 @@ unsigned char *lpBatchInsert(unsigned char *lp, unsigned char *p, int where,
 
     uint64_t old_listpack_bytes = lpGetTotalBytes(lp);
     uint64_t new_listpack_bytes = old_listpack_bytes + addedlen;
-    if (new_listpack_bytes > UINT32_MAX) return NULL;
+    if (new_listpack_bytes > UINT32_MAX) {
+        if (enc != tmp) lp_free(enc);
+        return NULL;
+    }
 
     /* Store the offset of the element 'p', so that we can obtain its
      * address again after a reallocation. */
@@ -1187,7 +1221,10 @@ unsigned char *lpBatchInsert(unsigned char *lp, unsigned char *p, int where,
     /* Realloc before: we need more room. */
     if (new_listpack_bytes > old_listpack_bytes &&
         new_listpack_bytes > lp_malloc_size(lp)) {
-        if ((lp = lp_realloc(lp,new_listpack_bytes)) == NULL) return NULL;
+        if ((lp = lp_realloc(lp,new_listpack_bytes)) == NULL) {
+            if (enc != tmp) lp_free(enc);
+            return NULL;
+        }
         dst = lp + poff;
     }
 
@@ -2604,6 +2641,32 @@ int listpackTest(int argc, char *argv[], int flags) {
         vstr = lpGet(p, &vlen, NULL);
         assert(strncmp(v2, (char*)vstr, vlen) == 0);
         lpFree(lp);
+    }
+
+    TEST("Backlen encode/decode at width boundaries") {
+        /* Body lengths where backlen widens; maxima per width must use the
+         * minimum byte count and round-trip (lpEncodeBacklen vs
+         * lpEncodeBacklenBytes and lpDecodeBacklen). */
+        const uint64_t cases[] = {
+            128ULL,
+            16382ULL,
+            16383ULL,
+            16384ULL,
+            2097150ULL,
+            2097151ULL,
+            2097152ULL,
+            268435454ULL,
+            268435455ULL,
+            268435456ULL,
+        };
+        unsigned char enc[LP_MAX_BACKLEN_SIZE];
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            uint64_t enclen = cases[i];
+            unsigned long n = lpEncodeBacklen(NULL, enclen);
+            assert(n == lpEncodeBacklenBytes(enclen));
+            assert(lpEncodeBacklen(enc, enclen) == n);
+            assert(lpDecodeBacklen(enc + n - 1) == enclen);
+        }
     }
 
     TEST("Create long list and check indices") {

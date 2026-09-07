@@ -357,7 +357,7 @@ start_server {tags {"acl external:skip"}} {
         assert_error {*NOPERM No permissions to access a key*} {$rd read}
         $rd ping
         $rd close
-        assert_match {*calls=0,usec=0,*,rejected_calls=1,failed_calls=0} [cmdrstat blpop r]
+        assert_match {*calls=0,usec=0,*,rejected_calls=1,failed_calls=0*} [cmdrstat blpop r]
     }
 
     test {Users can be configured to authenticate with any password} {
@@ -1298,6 +1298,26 @@ start_server [list overrides [list "dir" $server_path "aclfile" "user.acl"] tags
         catch {exec src/redis-server --user default --user default} err
         assert_match {*Duplicate user*} $err
     } {} {external:skip}
+
+    test {Test loading an ACL file with comments} {
+        exec cp -f tests/assets/user.acl $server_path
+
+        # Add comments to the ACL file
+        set acl_content "# This is a comment at the beginning\nuser alice on allcommands allkeys &* >alice\n# Comment between users\nuser bob on -@all +@set +acl ~set* &* >bob\n\n# Comment with blank line above\nuser doug on resetchannels &test +@all ~* >doug\nuser default on nopass ~* &* +@all\n# Comment at the end"
+        set fd [open $server_path/user.acl w]
+        puts $fd $acl_content
+        close $fd
+
+        # Load the ACL file with comments
+        assert_match {OK} [r ACL LOAD]
+
+        # Verify all users loaded correctly
+        assert {[r ACL GETUSER alice] != ""}
+        assert_equal [dict get [r ACL GETUSER alice] commands] "+@all"
+        assert {[r ACL GETUSER bob] != ""}
+        assert {[r ACL GETUSER doug] != ""}
+        assert {[r ACL GETUSER default] != ""}
+    }
 }
 
 start_server {overrides {user "default on nopass ~* +@all -flushdb"} tags {acl external:skip}} {

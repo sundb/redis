@@ -293,7 +293,10 @@ int pubsubUnsubscribeChannel(client *c, robj *channel, int notify, pubsubtype ty
         retval = 1;
         /* Remove the client from the channel -> clients list hash table */
         if (server.cluster_enabled && type.shard) {
-            slot = getKeySlot(channel->ptr);
+            /* Compute the slot from the channel directly instead of using getKeySlot(),
+             * because the unsubscribe may be triggered by a different client, and
+             * getKeySlot() would return the cached slot of that client. */
+            slot = keyHashSlot(channel->ptr, sdslen(channel->ptr));
         }
         de = kvstoreDictFind(*type.serverPubSubChannels, slot, channel);
         serverAssertWithInfo(c,NULL,de != NULL);
@@ -483,7 +486,7 @@ int pubsubPublishMessageInternal(robj *channel, robj *message, pubsubtype type) 
         while ((entry = dictNext(&iter)) != NULL) {
             client *c = dictGetKey(entry);
             addReplyPubsubMessage(c,channel,message,*type.messageBulk);
-            if (clusterSlotStatsEnabled())
+            if (clusterSlotStatsEnabled(CLUSTER_SLOT_STATS_NET))
                 clusterSlotStatsAddNetworkBytesOutForShardedPubSubInternalPropagation(c, slot);
             updateClientMemUsageAndBucket(c);
             receivers++;

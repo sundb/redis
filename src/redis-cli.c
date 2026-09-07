@@ -472,7 +472,7 @@ static void cliLegacyIntegrateHelp(void) {
         if (entry->type != REDIS_REPLY_ARRAY || entry->elements < 4 ||
             entry->element[0]->type != REDIS_REPLY_STRING ||
             entry->element[1]->type != REDIS_REPLY_INTEGER ||
-            entry->element[3]->type != REDIS_REPLY_INTEGER) return;
+            entry->element[3]->type != REDIS_REPLY_INTEGER) break;
         char *cmdname = entry->element[0]->str;
         int i;
 
@@ -2735,8 +2735,10 @@ static int parseOptions(int argc, char **argv) {
         } else if ((!strcmp(argv[i],"-a") || !strcmp(argv[i],"--pass"))
                    && !lastarg)
         {
+            sdsfree(config.conn_info.auth);
             config.conn_info.auth = sdsnew(argv[++i]);
         } else if (!strcmp(argv[i],"--user") && !lastarg) {
+            sdsfree(config.conn_info.user);
             config.conn_info.user = sdsnew(argv[++i]);
         } else if (!strcmp(argv[i],"-u") && !lastarg) {
             parseRedisUri(argv[++i],"redis-cli",&config.conn_info,&config.tls);
@@ -6152,6 +6154,8 @@ static int clusterManagerFixSlotsCoverage(char *all_slots) {
                     fixed = -1;
                     if (reply) freeReplyObject(reply);
                     if (slot_nodes) listRelease(slot_nodes);
+                    sdsfree(slot_nodes_str);
+                    sdsfree(slot);
                     goto cleanup;
                 }
                 assert(reply->type == REDIS_REPLY_ARRAY);
@@ -10492,28 +10496,27 @@ static int displayKeyStatsSizeDist(struct hdr_histogram *keysize_histogram) {
     struct hdr_iter iter;
     int64_t last_displayed_cumulative_count = 0;
 
+    if (keysize_histogram->total_count == 0) {
+        line_count += cleanPrintfln("No key size samples collected");
+        return line_count;
+    }
+
     hdr_iter_percentile_init(&iter, keysize_histogram, 1);
 
     line_count += cleanPrintfln("Key size Percentile Total keys");
     line_count += cleanPrintfln("-------- ---------- -----------");
 
     while (hdr_iter_next(&iter)) {
-        /* Skip repeat in hdr_histogram cumulative_count, and set the last line
-         * to 100% when total_count is reached. For instance:
+        /* Skip repeat in hdr_histogram cumulative_count. For instance:
          * 140.68K    99.9969%        50013
          * 140.68K    99.9977%        50013
-         *   2.04G    99.9985%        50014
          *   2.04G   100.0000%        50014
          * Will display:
          * 140.68K    99.9969%        50013
          *   2.04G   100.0000%        50014                                   */
 
         if (iter.cumulative_count != last_displayed_cumulative_count) {
-            if (iter.cumulative_count == iter.h->total_count) {
-                percentile = 100;
-            } else {
-                percentile = iter.specifics.percentiles.percentile;
-            }
+            percentile = (100.0 * (double) iter.cumulative_count) / iter.h->total_count;
 
             line_count += cleanPrintfln("%8s %9.4f%% %11lld",
                 bytesToHuman(size, sizeof(size), iter.highest_equivalent_value),
@@ -10691,7 +10694,7 @@ static void updateKeyType(redisReply *element, unsigned long long size, typeinfo
         /* Keep track of biggest key name for this type */
         if (type->biggest_key)
             sdsfree(type->biggest_key);
-        type->biggest_key = sdsnewlen(element->str, element->len);
+        type->biggest_key = sdscatrepr(sdsempty(), element->str, element->len);
         if (!type->biggest_key) {
             fprintf(stderr, "Failed to allocate memory for key!\n");
             exit(1);

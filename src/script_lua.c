@@ -964,7 +964,7 @@ static int luaRedisGenericCommand(lua_State *lua, int raise_error) {
         ldbLogRedisReply(reply);
 
     if (reply != c->buf) sdsfree(reply);
-    c->reply_bytes = 0;
+    c->reply_bytes = c->reply_bytes_shared = c->reply_bytes_unshared = 0;
 
 cleanup:
     /* Clean up. Command code may have changed argv/argc so we use the
@@ -1131,6 +1131,9 @@ static int luaRedisAclCheckCmdPermissionsCommand(lua_State *lua) {
     struct redisCommand *cmd;
     if ((cmd = lookupCommand(argv, argc)) == NULL) {
         luaPushError(lua, "Invalid command passed to redis.acl_check_cmd()");
+        raise_error = 1;
+    } else if (!commandCheckArity(cmd, argc, NULL)) {
+        luaPushError(lua, "Wrong number of args for redis.acl_check_cmd()");
         raise_error = 1;
     } else {
         int keyidxptr;
@@ -1331,7 +1334,7 @@ static int luaNewIndexAllowList(lua_State *lua) {
             }
         }
         if (!*c && !deprecated) {
-            serverLog(LL_WARNING, "A key '%s' was added to Lua globals which is not on the globals allow list nor listed on the deny list.", variable_name);
+            serverLog(LL_WARNING, "A key '%s' was added to Lua globals which is not on the globals allow list nor listed on the deny list.", redactLogCstr(variable_name));
         }
     } else {
         lua_rawset(lua, -3);

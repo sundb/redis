@@ -125,7 +125,7 @@ int checkPrefixCollisionsOrReply(client *c, robj **prefixes, size_t numprefix) {
                     "Prefixes for a single client must not overlap.",
                     (unsigned char *)prefixes[i]->ptr,
                     (unsigned char *)prefixes[j]->ptr);
-                return i;
+                return 0;
             }
         }
     }
@@ -139,11 +139,12 @@ void enableBcastTrackingForPrefix(client *c, char *prefix, size_t plen) {
     bcastState *bs;
     /* If this is the first client subscribing to such prefix, create
      * the prefix in the table. */
-    if (!raxFind(PrefixTable,(unsigned char*)prefix,plen,&result)) {
+    raxNodeLink link;
+    if (!raxFindLink(PrefixTable,(unsigned char*)prefix,plen,&result,&link)) {
         bs = zmalloc(sizeof(*bs));
         bs->keys = raxNew();
         bs->clients = raxNew();
-        raxInsert(PrefixTable,(unsigned char*)prefix,plen,bs,NULL);
+        raxInsertAt(PrefixTable,(unsigned char*)prefix,plen,bs,NULL,&link);
     } else {
         bs = result;
     }
@@ -200,6 +201,13 @@ void enableTracking(client *c, uint64_t redirect_to, uint64_t options, robj **pr
  * that should receive an invalidation message with certain groups of keys
  * are modified. */
 void trackingRememberKeys(client *tracking, client *executing) {
+    /* Shard channels are treated as special keys for client
+     * library to rely on `COMMAND` command to discover the node
+     * to connect to. These channels don't need to be tracked. */
+    if (executing->cmd->flags & CMD_PUBSUB) {
+        return;
+    }
+
     /* Return if we are in optin/out mode and the right CACHING command
      * was/wasn't given in order to modify the default behavior. */
     uint64_t optin = tracking->flags & CLIENT_TRACKING_OPTIN;
@@ -213,12 +221,6 @@ void trackingRememberKeys(client *tracking, client *executing) {
         getKeysFreeResult(&result);
         return;
     }
-    /* Shard channels are treated as special keys for client
-     * library to rely on `COMMAND` command to discover the node
-     * to connect to. These channels doesn't need to be tracked. */
-    if (executing->cmd->flags & CMD_PUBSUB) {
-        return;
-    }
 
     keyReference *keys = result.keys;
 
@@ -227,10 +229,11 @@ void trackingRememberKeys(client *tracking, client *executing) {
         sds sdskey = executing->argv[idx]->ptr;
         void *result;
         rax *ids;
-        if (!raxFind(TrackingTable,(unsigned char*)sdskey,sdslen(sdskey),&result)) {
+        raxNodeLink link;
+        if (!raxFindLink(TrackingTable,(unsigned char*)sdskey,sdslen(sdskey),&result,&link)) {
             ids = raxNew();
-            int inserted = raxTryInsert(TrackingTable,(unsigned char*)sdskey,
-                                        sdslen(sdskey),ids, NULL);
+            int inserted = raxInsertAt(TrackingTable,(unsigned char*)sdskey,
+                                       sdslen(sdskey),ids,NULL,&link);
             serverAssert(inserted == 1);
         } else {
             ids = result;

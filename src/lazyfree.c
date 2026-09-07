@@ -3,6 +3,7 @@
 #include "atomicvar.h"
 #include "functions.h"
 #include "cluster.h"
+#include "cluster_asm.h"
 #include "ebuckets.h"
 
 static redisAtomic size_t lazyfree_objects = 0;
@@ -17,14 +18,52 @@ void lazyfreeFreeObject(void *args[]) {
     atomicIncr(lazyfreed_objects,1);
 }
 
+/* Populate delta histograms by iterating through keys in the kvstore. To be 
+ * deduced from the main db histogram later on kvsAsyncFreeDoneCB */
+static void populateDeltaHistograms(kvstore *kvs, asmTrimCtx *ctx) {
+    kvstoreIterator kvs_it;
+    kvstoreIteratorInit(&kvs_it, kvs);
+    dictEntry *de;
+
+    while ((de = kvstoreIteratorNext(&kvs_it)) != NULL) {
+        kvobj *kv = dictGetKV(de);
+        if ((!kv) || (kv->type >= OBJ_TYPE_BASIC_MAX)) continue;
+
+        /* Update keysizes_hist delta */
+        size_t len = getObjectLength(kv);
+        int sizeBin = (len == 0) ? 0 : log2ceil(len) + 1; /* Only strings can be empty */
+        debugServerAssert(sizeBin < MAX_KEYSIZES_BINS);
+        ctx->delta_keysizes_hist[kv->type][sizeBin]++;
+
+        /* Update allocsizes_hist delta */
+        if (server.memory_tracking_enabled) {
+            size_t alloc_size = kvobjAllocSize(kv);
+            int allocBin = (alloc_size == 0) ? 0 : log2ceil(alloc_size) + 1;
+            debugServerAssert(allocBin < MAX_KEYSIZES_BINS);
+            ctx->delta_allocsizes_hist[kv->type][allocBin]++;
+        }
+    }
+    kvstoreIteratorReset(&kvs_it);
+}
+
 /* Release a database from the lazyfree thread. The 'db' pointer is the
  * database which was substituted with a fresh one in the main thread
- * when the database was logically deleted. */
-void lazyfreeFreeDatabase(void *args[]) {
+ * when the database was logically deleted.
+ *
+ * If args[3] is provided, it's an asmTrimCtx for tracking histogram deltas
+ * during ASM background trim. */
+void kvsLazyfreeFree(void *args[]) {
     kvstore *da1 = args[0];
     kvstore *da2 = args[1];
     estore *subexpires = args[2];
+    dict *stream_idmp_keys = args[3];
+    asmTrimCtx *ctx = args[4];  /* Optional: ASM trim context */
+
+    /* If ASM context provided, populate delta histograms */
+    if (ctx) populateDeltaHistograms(da1, ctx);
+
     estoreRelease(subexpires);
+    dictRelease(stream_idmp_keys);
     size_t numkeys = kvstoreSize(da1);
     kvstoreRelease(da1);
     kvstoreRelease(da2);
@@ -168,6 +207,9 @@ size_t lazyfreeGetFreeEffort(robj *key, robj *obj, int dbid) {
         /* If the module's free_effort returns 0, we will use asynchronous free
          * memory by default. */
         return effort == 0 ? ULONG_MAX : effort;
+    } else if (obj->type == OBJ_ARRAY) {
+        redisArray *ar = obj->ptr;
+        return arCount(ar);
     } else {
         return 1; /* Everything else is a single allocation. */
     }
@@ -195,6 +237,88 @@ void freeObjAsync(robj *key, robj *obj, int dbid) {
     }
 }
 
+/* Duplicate client reply objects that reference database objects to avoid race
+ * conditions with bio threads during async flushdb.
+ *
+ * Since incrRefCount/decrRefCount are not thread-safe, and bio thread may
+ * free database objects while main thread/IO threads send client replies, we need to
+ * create independent copies of the string objects to avoid concurrent access. */
+static void protectClientReplyObjects(void) {
+    /* If there are no clients with pending ref replies, exit ASAP. */
+    if (!listLength(server.clients_with_pending_ref_reply))
+        return;
+
+    /* Pause all IO threads to safely duplicate string objects. */
+    int allpaused = 0;
+    if (server.io_threads_num > 1) {
+        serverAssert(pthread_equal(server.main_thread_id, pthread_self()));
+        allpaused = 1;
+        pauseAllIOThreads();
+    }
+
+    listNode *ln;
+    listIter li;
+    listRewind(server.clients_with_pending_ref_reply, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        client *c = listNodeValue(ln);
+
+        /* Process c->buf if it's encoded */
+        if (c->buf_encoded && c->bufpos > 0) {
+            char *ptr = c->buf;
+            while (ptr < c->buf + c->bufpos) {
+                payloadHeader *header = (payloadHeader *)ptr;
+                ptr += sizeof(payloadHeader);
+
+                if (header->payload_type == BULK_STR_REF) {
+                    bulkStrRef *str_ref = (bulkStrRef *)ptr;
+                    if (str_ref->obj != NULL) {
+                        /* Duplicate the string object */
+                        robj *new_obj = dupStringObject(str_ref->obj);
+                        decrRefCount(str_ref->obj);
+                        str_ref->obj = new_obj;
+                    }
+                }
+                ptr += header->payload_len;
+            }
+        }
+
+        /* Process reply list */
+        if (c->reply && listLength(c->reply)) {
+            listIter reply_li;
+            listNode *reply_ln;
+            listRewind(c->reply, &reply_li);
+            while ((reply_ln = listNext(&reply_li))) {
+                clientReplyBlock *block = listNodeValue(reply_ln);
+                if (block && block->buf_encoded) {
+                    char *ptr = block->buf;
+                    while (ptr < block->buf + block->used) {
+                        payloadHeader *header = (payloadHeader *)ptr;
+                        ptr += sizeof(payloadHeader);
+
+                        if (header->payload_type == BULK_STR_REF) {
+                            bulkStrRef *str_ref = (bulkStrRef *)ptr;
+                            if (str_ref->obj != NULL) {
+                                /* Duplicate the string object */
+                                robj *new_obj = dupStringObject(str_ref->obj);
+                                decrRefCount(str_ref->obj);
+                                str_ref->obj = new_obj;
+                            }
+                        }
+                        ptr += header->payload_len;
+                    }
+                }
+            }
+        }
+
+        /* Process references in IO deferred objects and remove client from
+         * pending ref list since all refs have been duplicated above. */
+        freeClientIODeferredObjects(c, 0);
+        tryUnlinkClientFromPendingRefReply(c, 1);
+    }
+
+    if (allpaused) resumeAllIOThreads();
+}
+
 /* Empty a Redis DB asynchronously. What the function does actually is to
  * create a new empty set of hash tables and scheduling the old ones for
  * lazy freeing. */
@@ -207,16 +331,19 @@ void emptyDbAsync(redisDb *db) {
     }
     kvstore *oldkeys = db->keys, *oldexpires = db->expires;
     estore *oldsubexpires = db->subexpires;
+    dict *old_stream_idmp_keys = db->stream_idmp_keys;
     db->keys = kvstoreCreate(&kvstoreExType, &dbDictType, slot_count_bits, flags);
     db->expires = kvstoreCreate(&kvstoreBaseType, &dbExpiresDictType, slot_count_bits, flags);
     db->subexpires = estoreCreate(&subexpiresBucketsType, slot_count_bits);
-    emptyDbDataAsync(oldkeys, oldexpires, oldsubexpires);
+    db->stream_idmp_keys = dictCreate(&objectKeyNoValueDictType);
+    protectClientReplyObjects(); /* Protect client reply objects before async free. */
+    emptyDbDataAsync(oldkeys, oldexpires, oldsubexpires, old_stream_idmp_keys, NULL);
 }
 
-/* Empty a Redis DB data asynchronously. */
-void emptyDbDataAsync(kvstore *keys, kvstore *expires, ebuckets hexpires) {
+/* Empty a kvstore data asynchronously. */
+void emptyDbDataAsync(kvstore *keys, kvstore *expires, ebuckets hexpires, dict *stream_idmp_keys, asmTrimCtx *ctx) {
     atomicIncr(lazyfree_objects, kvstoreSize(keys));
-    bioCreateLazyFreeJob(lazyfreeFreeDatabase, 3, keys, expires, hexpires);
+    bioCreateLazyFreeJob(kvsLazyfreeFree, 5, keys, expires, hexpires, stream_idmp_keys, ctx);
 }
 
 /* Free the key tracking table.

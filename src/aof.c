@@ -2042,8 +2042,9 @@ int rewriteSortedSetObject(rio *r, robj *key, robj *o) {
 
         dictInitIterator(&di, zs->dict);
         while((de = dictNext(&di)) != NULL) {
-            sds ele = dictGetKey(de);
-            double *score = dictGetVal(de);
+            zskiplistNode *znode = dictGetKey(de);
+            sds ele = zslGetNodeElement(znode);
+            double score = znode->score;
 
             if (count == 0) {
                 int cmd_items = (items > AOF_REWRITE_ITEMS_PER_CMD) ?
@@ -2057,7 +2058,7 @@ int rewriteSortedSetObject(rio *r, robj *key, robj *o) {
                     return 0;
                 }
             }
-            if (!rioWriteBulkDouble(r,*score) ||
+            if (!rioWriteBulkDouble(r,score) ||
                 !rioWriteBulkString(r,ele,sdslen(ele)))
             {
                 dictResetIterator(&di);
@@ -2196,6 +2197,35 @@ int rioWriteStreamPendingEntry(rio *r, robj *key, const char *groupname, size_t 
     return 1;
 }
 
+/* Helper for rewriteStreamObject(): emit a single XNACK FORCE command that
+ * reconstructs one or more NACKed (unowned) PEL entries sharing the same
+ * delivery_count. `ids` points to an array of `count` streamIDs (at most
+ * AOF_REWRITE_ITEMS_PER_CMD). Returns 0 on error, 1 on success. */
+int rioWriteStreamNackedEntries(rio *r, robj *key, const char *groupname,
+                                size_t groupname_len, streamID *ids,
+                                int count, uint64_t delivery_count) {
+    serverAssert(count > 0 && count <= AOF_REWRITE_ITEMS_PER_CMD);
+
+    /* XNACK <key> <group> FAIL IDS <n> <id..> RETRYCOUNT <cnt> FORCE
+     * 6 fixed tokens before IDs + count IDs + 3 fixed tokens after. */
+    if (rioWriteBulkCount(r,'*',6+count+3) == 0) return 0;
+    if (rioWriteBulkString(r,"XNACK",5) == 0) return 0;
+    if (rioWriteBulkObject(r,key) == 0) return 0;
+    if (rioWriteBulkString(r,groupname,groupname_len) == 0) return 0;
+    if (rioWriteBulkString(r,"FAIL",4) == 0) return 0;
+    if (rioWriteBulkString(r,"IDS",3) == 0) return 0;
+    if (rioWriteBulkLongLong(r,count) == 0) return 0;
+
+    for (int i = 0; i < count; i++) {
+        if (rioWriteBulkStreamID(r,&ids[i]) == 0) return 0;
+    }
+
+    if (rioWriteBulkString(r,"RETRYCOUNT",10) == 0) return 0;
+    if (rioWriteBulkLongLong(r,delivery_count) == 0) return 0;
+    if (rioWriteBulkString(r,"FORCE",5) == 0) return 0;
+    return 1;
+}
+
 /* Helper for rewriteStreamObject(): emit the XGROUP CREATECONSUMER is
  * needed in order to create consumers that do not have any pending entries.
  * All this in the context of the specified key and group. */
@@ -2210,17 +2240,31 @@ int rioWriteStreamEmptyConsumer(rio *r, robj *key, const char *groupname, size_t
     return 1;
 }
 
+/* Helper for rewriteStreamObject(): emit the XIDMPRECORD needed to
+ * restore an IDMP entry for the given producer in the context of the
+ * specified key. */
+int rioWriteStreamIdmpEntry(rio *r, robj *key, const char *pid, size_t pid_len, idmpEntry *entry) {
+    /* XIDMPRECORD <key> <pid> <iid> <streamID> */
+    if (rioWriteBulkCount(r,'*',5) == 0) return 0;
+    if (rioWriteBulkString(r,"XIDMPRECORD",11) == 0) return 0;
+    if (rioWriteBulkObject(r,key) == 0) return 0;
+    if (rioWriteBulkString(r,pid,pid_len) == 0) return 0;
+    if (rioWriteBulkString(r,entry->iid,entry->iid_len) == 0) return 0;
+    if (rioWriteBulkStreamID(r,&entry->id) == 0) return 0;
+    return 1;
+}
+
 /* Emit the commands needed to rebuild a stream object.
  * The function returns 0 on error, 1 on success. */
 int rewriteStreamObject(rio *r, robj *key, robj *o) {
     stream *s = o->ptr;
-    streamIterator si;
-    streamIteratorStart(&si,s,NULL,NULL,0);
     streamID id;
-    int64_t numfields;
 
     if (s->length) {
         /* Reconstruct the stream data using XADD commands. */
+        streamIterator si;
+        int64_t numfields;
+        streamIteratorStart(&si,s,NULL,NULL,0);
         while(streamIteratorGetID(&si,&id,&numfields)) {
             /* Emit a two elements array for each item. The first is
              * the ID, the second is an array of field-value pairs. */
@@ -2246,6 +2290,7 @@ int rewriteStreamObject(rio *r, robj *key, robj *o) {
                 }
             }
         }
+        streamIteratorStop(&si);
     } else {
         /* Use the XADD MAXLEN 0 trick to generate an empty stream if
          * the key we are serializing is an empty string, which is possible
@@ -2260,7 +2305,6 @@ int rewriteStreamObject(rio *r, robj *key, robj *o) {
             !rioWriteBulkString(r,"x",1) ||
             !rioWriteBulkString(r,"y",1))
         {
-            streamIteratorStop(&si);
             return 0;     
         }
     }
@@ -2276,10 +2320,8 @@ int rewriteStreamObject(rio *r, robj *key, robj *o) {
         !rioWriteBulkString(r,"MAXDELETEDID",12) ||
         !rioWriteBulkStreamID(r,&s->max_deleted_entry_id)) 
     {
-        streamIteratorStop(&si);
         return 0; 
     }
-
 
     /* Create all the stream consumer groups. */
     if (s->cgroups) {
@@ -2299,7 +2341,6 @@ int rewriteStreamObject(rio *r, robj *key, robj *o) {
                 !rioWriteBulkLongLong(r,group->entries_read))
             {
                 raxStop(&ri);
-                streamIteratorStop(&si);
                 return 0;
             }
 
@@ -2318,7 +2359,6 @@ int rewriteStreamObject(rio *r, robj *key, robj *o) {
                     {
                         raxStop(&ri_cons);
                         raxStop(&ri);
-                        streamIteratorStop(&si);
                         return 0;
                     }
                     continue;
@@ -2337,20 +2377,109 @@ int rewriteStreamObject(rio *r, robj *key, robj *o) {
                         raxStop(&ri_pel);
                         raxStop(&ri_cons);
                         raxStop(&ri);
-                        streamIteratorStop(&si);
                         return 0;
                     }
                 }
                 raxStop(&ri_pel);
             }
             raxStop(&ri_cons);
+
+            /* Emit XNACK FORCE for NACKed (unowned) entries from the
+             * NACK zone of the PEL time-ordered list
+             * (pel_time_head..pel_nack_tail). Consecutive entries with
+             * the same delivery_count are batched into a single command.
+             *
+             * nack_stop is the first node outside the NACK zone (or NULL
+             * when the zone extends to the end of the PEL). When
+             * pel_nack_tail is NULL (no NACKed entries) the guard below
+             * skips the whole block. */
+            streamNACK *nack_end = group->pel_nack_tail;
+            if (nack_end != NULL) {
+                streamID batch_ids[AOF_REWRITE_ITEMS_PER_CMD];
+                streamNACK *nack_stop = nack_end->pel_next;
+                streamNACK *nack = group->pel_time_head;
+                int batch_count = 0;
+                uint64_t batch_dc = 0;
+                while (nack && nack != nack_stop) {
+                    if (batch_count == 0) batch_dc = nack->delivery_count;
+                    batch_ids[batch_count++] = nack->id;
+                    streamNACK *next = nack->pel_next;
+                    if (batch_count >= AOF_REWRITE_ITEMS_PER_CMD ||
+                        !next || next == nack_stop ||
+                        next->delivery_count != batch_dc)
+                    {
+                        if (rioWriteStreamNackedEntries(r,key,(char*)ri.key,
+                                                        ri.key_len,batch_ids,
+                                                        batch_count,batch_dc) == 0)
+                        {
+                            raxStop(&ri);
+                            return 0;
+                        }
+                        batch_count = 0;
+                    }
+                    nack = next;
+                }
+            }
         }
         raxStop(&ri);
     }
 
-    streamIteratorStop(&si);
+    /* Emit XCFGSET to restore per-stream IDMP configuration if it differs
+     * from the server defaults, so that AOF rewrite preserves custom settings. */
+    if (s->idmp_duration != (uint64_t)server.stream_idmp_duration ||
+        s->idmp_max_entries != (uint64_t)server.stream_idmp_maxsize)
+    {
+        if (!rioWriteBulkCount(r,'*',6) ||
+            !rioWriteBulkString(r,"XCFGSET",7) ||
+            !rioWriteBulkObject(r,key) ||
+            !rioWriteBulkString(r,"IDMP-DURATION",13) ||
+            !rioWriteBulkLongLong(r,s->idmp_duration) ||
+            !rioWriteBulkString(r,"IDMP-MAXSIZE",12) ||
+            !rioWriteBulkLongLong(r,s->idmp_max_entries))
+        {
+            return 0;
+        }
+    }
+
+    /* Emit XIDMPRECORD for each IDMP entry. Entries whose stream ID no
+     * longer exists (removed by XDEL/trim) are skipped, since
+     * xidmprecordCommand() rejects references to missing IDs and would
+     * cause AOF replay errors. */
+    if (s->idmp_producers) {
+        raxIterator ri_idmp;
+        raxStart(&ri_idmp,s->idmp_producers);
+        raxSeek(&ri_idmp,"^",NULL,0);
+        while(raxNext(&ri_idmp)) {
+            idmpProducer *producer = ri_idmp.data;
+            for (idmpEntry *entry = producer->idmp_head; entry != NULL; entry = entry->next) {
+                if (!streamEntryExists(s, &entry->id)) continue;
+                if (rioWriteStreamIdmpEntry(r,key,(char*)ri_idmp.key,
+                                            ri_idmp.key_len,entry) == 0)
+                {
+                    raxStop(&ri_idmp);
+                    return 0;
+                }
+            }
+        }
+        raxStop(&ri_idmp);
+    }
+
     return 1;
 }
+
+#ifdef ENABLE_GCRA
+int rewriteGCRAObject(rio *r, robj *key, robj *o) {
+    long long val;
+    getLongLongFromGCRAObject(o, &val);
+
+    /* GCRASETVALUE <key> <tat> */
+    if (rioWriteBulkCount(r,'*',3) == 0) return 0;
+    if (rioWriteBulkString(r,"GCRASETVALUE",12) == 0) return 0;
+    if (rioWriteBulkObject(r,key) == 0) return 0;
+    if (rioWriteBulkLongLong(r,val) == 0) return 0;
+    return 1;
+}
+#endif
 
 /* Call the module type callback in order to rewrite a data type
  * that is exported by a module and is not handled by Redis itself.
@@ -2388,6 +2517,116 @@ werr:
     return 0;
 }
 
+/* Write unsigned 64-bit integer as bulk string.
+ * Unlike rioWriteBulkLongLong which uses signed representation,
+ * this correctly handles values >= 2^63 (e.g., array indices). */
+static int rioWriteBulkUnsignedLongLong(rio *r, uint64_t value) {
+    char buf[24];
+    int len = ull2string(buf, sizeof(buf), value);
+    return rioWriteBulkString(r, buf, len);
+}
+
+/* Helper to emit a single array element for AOF rewrite.
+ * Returns 0 on error, 1 on success. Updates count and items. */
+static int aofEmitArrayElement(rio *r, robj *key, uint64_t idx, void *v,
+                               long long *count, long long *items) {
+    if (*count == 0) {
+        int cmd_items = (*items > AOF_REWRITE_ITEMS_PER_CMD/2) ?
+            AOF_REWRITE_ITEMS_PER_CMD/2 : *items;  /* pairs of idx+val */
+        if (!rioWriteBulkCount(r,'*',2+cmd_items*2) ||
+            !rioWriteBulkString(r,"ARMSET",6) ||
+            !rioWriteBulkObject(r,key))
+        {
+            return 0;
+        }
+    }
+
+    /* Write index (unsigned to handle indices >= 2^63) */
+    if (!rioWriteBulkUnsignedLongLong(r, idx)) return 0;
+
+    /* Write value - inline types use scratch space, arString aliases directly. */
+    char buf[AR_INLINE_BUFSIZE];
+    size_t len;
+    const char *data = arDecode(v, buf, sizeof(buf), &len);
+    if (!rioWriteBulkString(r, data, len)) return 0;
+
+    if (++(*count) == AOF_REWRITE_ITEMS_PER_CMD/2) *count = 0;
+    (*items)--;
+    return 1;
+}
+
+/* Helper to emit all elements from a slice for AOF rewrite. */
+static int aofEmitSliceElements(rio *r, robj *key, arSlice *s, uint64_t slice_id,
+                                uint32_t slice_size, long long *count, long long *items) {
+    if (s->encoding == AR_SLICE_DENSE) {
+        for (uint32_t i = 0; i < s->layout.dense.winsize; i++) {
+            void *v = s->layout.dense.items[i];
+            if (arIsEmpty(v)) continue;
+            uint64_t idx = arMakeIdx(slice_id, s->layout.dense.offset + i, slice_size);
+            if (!aofEmitArrayElement(r, key, idx, v, count, items)) return 0;
+        }
+    } else {
+        /* Sparse slice */
+        uint16_t *offsets = s->layout.sparse.offsets;
+        void **values = s->layout.sparse.values;
+        for (uint32_t i = 0; i < s->count; i++) {
+            uint64_t idx = arMakeIdx(slice_id, offsets[i], slice_size);
+            if (!aofEmitArrayElement(r, key, idx, values[i], count, items)) return 0;
+        }
+    }
+    return 1;
+}
+
+/* Emit the commands needed to rebuild an array object.
+ * The function returns 0 on error, 1 on success. */
+int rewriteArrayObject(rio *r, robj *key, robj *o) {
+    redisArray *ar = o->ptr;
+    long long count = 0, items = ar->count;
+    if (items == 0) return 1;
+
+    /* Iterate through all slices, handling both flat directory mode and
+     * superdir mode. This mirrors the iteration logic in rdb.c. */
+    if (ar->superdir) {
+        /* Superdir mode: iterate through blocks */
+        for (uint32_t bi = 0; bi < ar->sdir_len; bi++) {
+            arSDirEntry *e = ar->superdir + bi;
+            uint64_t block_base = e->block_id * AR_SUPER_BLOCK_SLOTS;
+
+            for (uint32_t si = 0; si < AR_SUPER_BLOCK_SLOTS; si++) {
+                arSlice *s = e->slots[si];
+                if (!s) continue;
+                uint64_t slice_id = block_base + si;
+                if (!aofEmitSliceElements(r, key, s, slice_id, ar->slice_size,
+                                          &count, &items)) return 0;
+            }
+        }
+    } else {
+        /* Flat directory mode */
+        for (uint64_t slice_id = 0; slice_id <= ar->dir_highest_used && slice_id < ar->dir_alloc; slice_id++) {
+            arSlice *s = ar->dir[slice_id];
+            if (!s) continue;
+            if (!aofEmitSliceElements(r, key, s, slice_id, ar->slice_size,
+                                      &count, &items)) return 0;
+        }
+    }
+
+    /* If insert_idx is set, emit ARSEEK command to restore it.
+     * When insert_idx == UINT64_MAX-1, we emit ARSEEK UINT64_MAX which
+     * correctly sets insert_idx back to UINT64_MAX-1 (terminal state). */
+    if (ar->insert_idx != AR_INSERT_IDX_NONE) {
+        /* ARSEEK key insert_idx+1 (ARSEEK sets position for next insert) */
+        if (!rioWriteBulkCount(r,'*',3) ||
+            !rioWriteBulkString(r,"ARSEEK",6) ||
+            !rioWriteBulkObject(r,key) ||
+            !rioWriteBulkUnsignedLongLong(r, ar->insert_idx + 1))
+        {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
 int rewriteObject(rio *r, robj *key, robj *o, int dbid, long long expiretime) {
     /* Save the key and associated value */
     if (o->type == OBJ_STRING) {
@@ -2407,6 +2646,12 @@ int rewriteObject(rio *r, robj *key, robj *o, int dbid, long long expiretime) {
         if (rewriteHashObject(r,key,o) == 0) return C_ERR;
     } else if (o->type == OBJ_STREAM) {
         if (rewriteStreamObject(r,key,o) == 0) return C_ERR;
+#ifdef ENABLE_GCRA
+    } else if (o->type == OBJ_GCRA) {
+        if (rewriteGCRAObject(r,key,o) == 0) return C_ERR;
+#endif
+    } else if (o->type == OBJ_ARRAY) {
+        if (rewriteArrayObject(r,key,o) == 0) return C_ERR;
     } else if (o->type == OBJ_MODULE) {
         if (rewriteModuleObject(r,key,o,dbid) == 0) return C_ERR;
     } else {
@@ -2455,10 +2700,20 @@ int rewriteAppendOnlyFileRio(rio *aof) {
         if (rioWriteBulkLongLong(aof,j) == 0) goto werr;
 
         kvstoreIteratorInit(&kvs_it, db->keys);
+        int last_slot = -1;
         /* Iterate this DB writing every entry */
         while((de = kvstoreIteratorNext(&kvs_it)) != NULL) {
             long long expiretime;
             size_t aof_bytes_before_key = aof->processed_bytes;
+            int curr_slot = kvstoreIteratorGetCurrentDictIndex(&kvs_it);
+
+            /* In cluster mode, dismiss bucket arrays of the previous slot
+             * which won't be accessed again, to avoid CoW. */
+            if (server.cluster_enabled && curr_slot != last_slot) {
+                if (server.in_fork_child && last_slot != -1)
+                    dismissDictBucketsMemory(kvstoreGetDict(db->keys, last_slot));
+                last_slot = curr_slot;
+            }
 
             /* Get the value object (of type kvobj) */
             kvobj *o = dictGetKV(de);
@@ -2467,12 +2722,9 @@ int rewriteAppendOnlyFileRio(rio *aof) {
             expiretime = kvobjGetExpire(o);
 
             /* Skip keys that are being trimmed */
-            if (server.cluster_enabled) {
-                int curr_slot = kvstoreIteratorGetCurrentDictIndex(&kvs_it);
-                if (isSlotInTrimJob(curr_slot)) {
-                    skipped++;
-                    continue;
-                }
+            if (server.cluster_enabled && isSlotInTrimJob(curr_slot)) {
+                skipped++;
+                continue;
             }
             
             /* Set on stack string object for key */
@@ -2485,7 +2737,8 @@ int rewriteAppendOnlyFileRio(rio *aof) {
              * OS and possibly avoid or decrease COW. We give the dismiss
              * mechanism a hint about an estimated size of the object we stored. */
             size_t dump_size = aof->processed_bytes - aof_bytes_before_key;
-            if (server.in_fork_child) dismissObject(o, dump_size);
+            if (server.in_fork_child && dump_size > server.page_size/2)
+                dismissObject(o, dump_size);
 
             /* Update info every 1 second (approximately).
              * in order to avoid calling mstime() on each iteration, we will
@@ -2503,6 +2756,10 @@ int rewriteAppendOnlyFileRio(rio *aof) {
                 debugDelay(server.rdb_key_save_delay);
         }
         kvstoreIteratorReset(&kvs_it);
+
+        /* Dismiss bucket arrays of kvstore in standalone mode. */
+        if (server.in_fork_child && !server.cluster_enabled)
+            dismissKvstoreBucketsMemory(db->keys);
     }
     serverLog(LL_NOTICE, "AOF rewrite done, %ld keys saved, %llu keys skipped.", key_count, skipped);
     return C_OK;

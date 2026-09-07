@@ -123,6 +123,16 @@ void mixStringObjectDigest(unsigned char *digest, robj *o) {
     decrRefCount(o);
 }
 
+#ifdef ENABLE_GCRA
+void mixGCRAObjectDigest(unsigned char *digest, robj *o) {
+    char buf[LONG_STR_SIZE];
+    long long val;
+    getLongLongFromGCRAObject(o, &val);
+    int len = ll2string(buf, sizeof(buf), val);
+    mixDigest(digest,buf,len);
+}
+#endif
+
 /* This function computes the digest of a data structure stored in the
  * object 'o'. It is the core of the DEBUG DIGEST command: when taking the
  * digest of a whole dataset, we take the digest of the key and the value
@@ -199,9 +209,9 @@ void xorObjectDigest(redisDb *db, robj *keyobj, unsigned char *digest, robj *o) 
 
             dictInitIterator(&di, zs->dict);
             while((de = dictNext(&di)) != NULL) {
-                sds sdsele = dictGetKey(de);
-                double *score = dictGetVal(de);
-                const int len = fpconv_dtoa(*score, buf);
+                zskiplistNode *znode = dictGetKey(de);
+                sds sdsele = zslGetNodeElement(znode);
+                const int len = fpconv_dtoa(znode->score, buf);
                 buf[len] = '\0';
                 memset(eledigest,0,20);
                 mixDigest(eledigest,sdsele,sdslen(sdsele));
@@ -255,6 +265,10 @@ void xorObjectDigest(redisDb *db, robj *keyobj, unsigned char *digest, robj *o) 
             }
         }
         streamIteratorStop(&si);
+#ifdef ENABLE_GCRA
+    } else if (o->type == OBJ_GCRA) {
+        mixGCRAObjectDigest(digest, o);
+#endif
     } else if (o->type == OBJ_MODULE) {
         RedisModuleDigest md = {{0},{0},keyobj,db->id};
         moduleValue *mv = o->ptr;
@@ -263,6 +277,21 @@ void xorObjectDigest(redisDb *db, robj *keyobj, unsigned char *digest, robj *o) 
         if (mt->digest) {
             mt->digest(&md,mv->value);
             xorDigest(digest,md.x,sizeof(md.x));
+        }
+    } else if (o->type == OBJ_ARRAY) {
+        redisArray *ar = o->ptr;
+        uint64_t len = arLen(ar);
+        for (uint64_t idx = 0; idx < len; idx++) {
+            void *v = arGet(ar, idx);
+            if (arIsEmpty(v)) {
+                /* For empty slots, contribute "(null)" */
+                mixDigest(digest, "(null)", 6);
+            } else {
+                char vbuf[AR_INLINE_BUFSIZE];
+                size_t vlen;
+                const char *data = arDecode(v, vbuf, sizeof(vbuf), &vlen);
+                mixDigest(digest, data, vlen);
+            }
         }
     } else {
         serverPanic("Unknown object type");
@@ -436,6 +465,8 @@ void debugCommand(client *c) {
 "    Show low level info about `key` and associated value.",
 "DROP-CLUSTER-PACKET-FILTER <packet-type>",
 "    Drop all packets that match the filtered type. Set to -1 allow all packets.",
+"ENABLE-KEYMETA-RUNTIME-REGISTRATION <0|1>",
+"    Allow keymeta class registration outside server startup (for testing).",
 "OOM",
 "    Crash the server simulating an out-of-memory error.",
 "PANIC",
@@ -502,6 +533,8 @@ void debugCommand(client *c) {
 "    In case RESET is provided the peak reset time will be restored to the default value",
 "REPLYBUFFER RESIZING <0|1>",
 "    Enable or disable the reply buffer resize cron job",
+"REPLY-COPY-AVOIDANCE <0|1>",
+"    Enable/disable reply copy avoidance optimization.",
 "REPL-PAUSE <clear|after-fork|before-rdb-channel|on-streaming-repl-buf>",
 "    Pause the server's main process during various replication steps.",
 "DICT-RESIZING <0|1>",
@@ -551,13 +584,19 @@ NULL
         long long flag;
         if (getLongLongFromObjectOrReply(c, c->argv[2], &flag, NULL) != C_OK)
             return;
-        server.dbg_assert_keysizes = (flag != 0);
+        if (flag)
+            server.dbg_assert_flags |= DBG_ASSERT_KEYSIZES;
+        else
+            server.dbg_assert_flags &= ~DBG_ASSERT_KEYSIZES;
         addReply(c, shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr,"ALLOCSIZE-SLOTS-ASSERT") && c->argc == 3) {
         long long flag;
         if (getLongLongFromObjectOrReply(c, c->argv[2], &flag, NULL) != C_OK)
             return;
-        server.dbg_assert_alloc_per_slot = (flag != 0);
+        if (flag)
+            server.dbg_assert_flags |= DBG_ASSERT_ALLOC_SLOT;
+        else
+            server.dbg_assert_flags &= ~DBG_ASSERT_ALLOC_SLOT;
         addReply(c, shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr,"log") && c->argc == 3) {
         serverLog(LL_WARNING, "DEBUG LOG: %s", (char*)c->argv[2]->ptr);
@@ -785,7 +824,7 @@ NULL
                 memcpy(val->ptr, buf, valsize<=buflen? valsize: buflen);
             }
             dbAdd(c->db, key, &val);
-            keyModified(c,c->db,key,NULL,1);
+            keyModified(c,c->db,key,val,1);
             decrRefCount(key);
         }
         addReply(c,shared.ok);
@@ -886,7 +925,7 @@ NULL
             addReplyError(c,"Wrong protocol type name. Please use one of the following: string|integer|double|bignum|null|array|set|map|attrib|push|verbatim|true|false");
         }
     } else if (!strcasecmp(c->argv[1]->ptr,"sleep") && c->argc == 3) {
-        double dtime = fast_float_strtod(c->argv[2]->ptr,NULL);
+        double dtime = fast_float_strtod(c->argv[2]->ptr,sdslen(c->argv[2]->ptr),NULL);
         long long utime = dtime*1000000;
         struct timespec tv;
 
@@ -918,6 +957,11 @@ NULL
                c->argc == 3)
     {
         server.skip_checksum_validation = atoi(c->argv[2]->ptr);
+        addReply(c,shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr,"enable-keymeta-runtime-registration") &&
+               c->argc == 3)
+    {
+        server.allow_keymeta_registration = atoi(c->argv[2]->ptr);
         addReply(c,shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr,"aof-flush-sleep") &&
                c->argc == 3)
@@ -1075,6 +1119,9 @@ NULL
             return;
         }
         addReply(c, shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr,"reply-copy-avoidance") && c->argc == 3) {
+        server.reply_copy_avoidance_enabled = atoi(c->argv[2]->ptr);
+        addReply(c,shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr, "repl-pause") && c->argc == 3) {
         if (!strcasecmp(c->argv[2]->ptr, "clear")) {
             server.repl_debug_pause = REPL_DEBUG_PAUSE_NONE;
@@ -1093,6 +1140,10 @@ NULL
         server.dict_resizing = atoi(c->argv[2]->ptr);
         addReply(c, shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr,"script") && c->argc == 3) {
+        if (server.hide_user_data_from_log) {
+            addReplyError(c, "DEBUG SCRIPT is disabled when hide-user-data-from-log is enabled");
+            return;
+        }
         if (!strcasecmp(c->argv[2]->ptr,"list")) {
             dictIterator di;
             dictEntry *de;
@@ -1263,7 +1314,7 @@ void serverLogObjectDebugInfo(const robj *o) {
      * random memory portion to be "leaked" into the logfile. */
     if (o->type == OBJ_STRING && sdsEncodedObject(o)) {
         serverLog(LL_WARNING,"Object raw string len: %zu", sdslen(o->ptr));
-        if (sdslen(o->ptr) < 4096) {
+        if (!server.hide_user_data_from_log && sdslen(o->ptr) < 4096) {
             sds repr = sdscatrepr(sdsempty(),o->ptr,sdslen(o->ptr));
             serverLog(LL_WARNING,"Object raw string content: %s", repr);
             sdsfree(repr);
@@ -1280,6 +1331,12 @@ void serverLogObjectDebugInfo(const robj *o) {
             serverLog(LL_WARNING,"Skiplist level: %d", (int) ((const zset*)o->ptr)->zsl->level);
     } else if (o->type == OBJ_STREAM) {
         serverLog(LL_WARNING,"Stream size: %d", (int) streamLength(o));
+#ifdef ENABLE_GCRA
+    } else if (o->type == OBJ_GCRA) {
+#if UINTPTR_MAX == 0xffffffffffffffff
+        serverLog(LL_WARNING, "GCRA object: %lld", (long long)o->ptr);
+#endif
+#endif
     }
 #endif
 }
@@ -1391,6 +1448,8 @@ static void* getAndSetMcontextEip(ucontext_t *uc, void *eip) {
     GET_SET_RETURN(uc->uc_mcontext.arm_pc, eip);
     #elif defined(__aarch64__) /* Linux AArch64 */
     GET_SET_RETURN(uc->uc_mcontext.pc, eip);
+    #elif defined(__loongarch_lp64) /* Linux LoongArch64 */
+    GET_SET_RETURN(uc->uc_mcontext.__pc, eip);
     #else
     NOT_SUPPORTED();
     #endif
@@ -1724,6 +1783,50 @@ void logRegisters(ucontext_t *uc) {
 	      (unsigned long) uc->uc_mcontext.fault_address
 		      );
 	      logStackContent((void**)uc->uc_mcontext.arm_sp);
+    #elif defined(__loongarch_lp64) /* Linux LoongArch64 */
+    serverLog(LL_WARNING,
+        "\n"
+        "ra:%016llx tp:%016llx\nsp:%016llx a0:%016llx\n"
+        "a1:%016llx a2:%016llx\na3:%016llx a4:%016llx\n"
+        "a5:%016llx a6:%016llx\na7:%016llx t0:%016llx\n"
+        "t1:%016llx t2:%016llx\nt3:%016llx t4:%016llx\n"
+        "t5:%016llx t6:%016llx\nt7:%016llx t8:%016llx\n"
+        "fp:%016llx s0:%016llx\ns1:%016llx s2:%016llx\n"
+        "s3:%016llx s4:%016llx\ns5:%016llx s6:%016llx\n"
+        "s7:%016llx s8:%016llx\npc:%016llx\n",
+        (unsigned long long) uc->uc_mcontext.__gregs[1],
+        (unsigned long long) uc->uc_mcontext.__gregs[2],
+        (unsigned long long) uc->uc_mcontext.__gregs[3],
+        (unsigned long long) uc->uc_mcontext.__gregs[4],
+        (unsigned long long) uc->uc_mcontext.__gregs[5],
+        (unsigned long long) uc->uc_mcontext.__gregs[6],
+        (unsigned long long) uc->uc_mcontext.__gregs[7],
+        (unsigned long long) uc->uc_mcontext.__gregs[8],
+        (unsigned long long) uc->uc_mcontext.__gregs[9],
+        (unsigned long long) uc->uc_mcontext.__gregs[10],
+        (unsigned long long) uc->uc_mcontext.__gregs[11],
+        (unsigned long long) uc->uc_mcontext.__gregs[12],
+        (unsigned long long) uc->uc_mcontext.__gregs[13],
+        (unsigned long long) uc->uc_mcontext.__gregs[14],
+        (unsigned long long) uc->uc_mcontext.__gregs[15],
+        (unsigned long long) uc->uc_mcontext.__gregs[16],
+        (unsigned long long) uc->uc_mcontext.__gregs[17],
+        (unsigned long long) uc->uc_mcontext.__gregs[18],
+        (unsigned long long) uc->uc_mcontext.__gregs[19],
+        (unsigned long long) uc->uc_mcontext.__gregs[20],
+        (unsigned long long) uc->uc_mcontext.__gregs[22],
+        (unsigned long long) uc->uc_mcontext.__gregs[23],
+        (unsigned long long) uc->uc_mcontext.__gregs[24],
+        (unsigned long long) uc->uc_mcontext.__gregs[25],
+        (unsigned long long) uc->uc_mcontext.__gregs[26],
+        (unsigned long long) uc->uc_mcontext.__gregs[27],
+        (unsigned long long) uc->uc_mcontext.__gregs[28],
+        (unsigned long long) uc->uc_mcontext.__gregs[29],
+        (unsigned long long) uc->uc_mcontext.__gregs[30],
+        (unsigned long long) uc->uc_mcontext.__gregs[31],
+        (unsigned long long) uc->uc_mcontext.__pc
+    );
+    logStackContent((void**)uc->uc_mcontext.__gregs[3]);
     #else
 	NOT_SUPPORTED();
     #endif
@@ -2245,7 +2348,7 @@ void logCurrentClient(client *cc, const char *title) {
         robj *key = getDecodedObject(cc->argv[1]);
         kvobj *kv = dbFind(cc->db, key->ptr);
         if (kv) {
-            serverLog(LL_WARNING,"key '%s' found in DB containing the following object:", (char*)key->ptr);
+            serverLog(LL_WARNING,"key '%s' found in DB containing the following object:", redactLogCstr((char*)key->ptr));
             serverLogObjectDebugInfo(kv);
         }
         decrRefCount(key);

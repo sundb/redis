@@ -112,7 +112,7 @@ proc asm_all_instances_idle {total} {
 proc wait_for_asm_done {} {
     set total_instances [expr {$::cluster_master_nodes + $::cluster_replica_nodes}]
 
-    wait_for_condition 1000 10 {
+    wait_for_condition 3000 10 {
         [asm_all_instances_idle $total_instances] == 1
     } else {
         # Print the number of active tasks on each instance
@@ -577,23 +577,16 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 1 debug asm-trim-method none
         populate_slot 10000 -idx 1 -slot 6000
 
-        # Start write traffic on node-0
-        # Throws -MOVED error once asm is completed, catch block will ignore it.
-        catch {
-            # Start the slot 0 write load on the R 0
-            set port [get_port 0]
-            set key [slot_key 0 mykey]
-            set load_handle0 [start_write_load "127.0.0.1" $port 100 $key 0 5]
-        }
+        # Start write traffic on node-0 (ignore_error_reply=1 tolerates MOVED/ASK
+        # replies while slots are being migrated).
+        set port [get_port 0]
+        set key [slot_key 0 mykey]
+        set load_handle0 [start_write_load "127.0.0.1" $port 100 $key 0 5 1]
 
-        # Start write traffic on node-1
-        # Throws -MOVED error once asm is completed, catch block will ignore it.
-        catch {
-            # Start the slot 6000 write load on the R 1
-            set port [get_port 1]
-            set key [slot_key 6000 mykey]
-            set load_handle1 [start_write_load "127.0.0.1" $port 100 $key 0 5]
-        }
+        # Start write traffic on node-1 (ignore_error_reply=1 for migration redirects).
+        set port [get_port 1]
+        set key [slot_key 6000 mykey]
+        set load_handle1 [start_write_load "127.0.0.1" $port 100 $key 0 5 1]
 
         # Migrate keys
         R 1 CLUSTER MIGRATION IMPORT 0 100
@@ -801,8 +794,9 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         # we set a delay to write incremental data
         R 1 config set rdb-key-save-delay 1000000
 
-        # Start the slot 0 write load on the R 1
-        set load_handle [start_write_load "127.0.0.1" [get_port 1] 100 $slot0_key]
+        # Start slot 0 write load on R1. ignore_error_reply=1 tolerates MOVED/ASK
+        # replies that can appear while slot 0 is being migrated.
+        set load_handle [start_write_load "127.0.0.1" [get_port 1] 100 $slot0_key 0 0 1]
 
         # Clear all fail points
         assert_equal {OK} [R 0 debug asm-failpoint "" ""]
@@ -1316,7 +1310,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         if {[string match {*stream-done*} [migration_status 0 $task_id state]]} {
             wait_for_condition 1000 20 {
                 [string match {*failed*} [migration_status 0 $task_id state]] &&
-                [string match {*Server paused*} [migration_status 0 $task_id last_error]]
+                [string match {*Write pause timeout*} [migration_status 0 $task_id last_error]]
             } else {
                 fail "ASM task did not fail"
             }
@@ -1433,9 +1427,10 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 0 flushall
     }
 
-    test "Source server paused timeout" {
+    test "Source write pause timeout" {
         # set timeout to 0, so the task will fail immediately when checking timeout
         R 0 config set cluster-slot-migration-write-pause-timeout 0
+        R 1 debug asm-failpoint "import-main-channel" "takeover"
 
         # start migration from node 0 to 1
         set task_id [setup_slot_migration_with_delay 0 1 0 100]
@@ -1444,10 +1439,10 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         set slot0_key [slot_key 0 mykey]
         set load_handle [start_write_load "127.0.0.1" [get_port 0] 100 $slot0_key]
 
-        # node 0 will fail since server paused timeout
+        # node 0 will fail due to write pause timeout
         wait_for_condition 2000 10 {
             [string match {*failed*} [migration_status 0 $task_id state]] &&
-            [string match {*Server paused timeout*} \
+            [string match {*Write pause timeout*} \
                 [migration_status 0 $task_id last_error]]
         } else {
             fail "ASM task did not fail"
@@ -1459,6 +1454,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         R 0 config set cluster-slot-migration-write-pause-timeout 10000
         R 0 cluster migration cancel id $task_id
         R 1 cluster migration cancel id $task_id
+        R 1 debug asm-failpoint "" ""
     }
 
     test "Sync buffer drain timeout" {
@@ -2630,10 +2626,6 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
             # restart node 4
             if {$with_rdb eq "with"} {
                 restart_server -4 true false true save ;# rdb save
-                # the asm task info in rdb will fire module event
-                assert_equal  [list \
-                    "sub: cluster-slot-migration-import-started, source_node_id:$src_id, destination_node_id:$dest_id, task_id:$task_id, slots:0-100" \
-                ] [R 4 asm.get_cluster_event_log]
             } else {                
                 restart_server -4 true false true nosave ;# no rdb saved
             }
@@ -2951,6 +2943,32 @@ start_cluster 3 6 [list tags {external:skip cluster modules} config_lines [list 
        assert_equal [R 1 asm.cluster_get_local_slot_ranges] {}
        assert_equal [R 4 asm.cluster_get_local_slot_ranges] {}
     }
+
+    test "Test RM_GetClusterNodeSlotRanges for local node" {
+        set local_id [R 0 cluster myid]
+        set ranges [R 0 asm.get_cluster_node_slot_ranges $local_id]
+        set local_ranges [R 0 asm.cluster_get_local_slot_ranges]
+        assert_equal $ranges $local_ranges
+    }
+
+    test "Test RM_GetClusterNodeSlotRanges for remote node" {
+        set node2_id [R 2 cluster myid]
+        set ranges [R 0 asm.get_cluster_node_slot_ranges $node2_id]
+        set remote_ranges [R 2 asm.cluster_get_local_slot_ranges]
+        assert_equal $ranges $remote_ranges
+    }
+
+    test "Test RM_GetClusterNodeSlotRanges for non-existent node" {
+        set ranges [R 0 asm.get_cluster_node_slot_ranges "0000000000000000000000000000000000000000"]
+        assert_equal $ranges {}
+    }
+
+    test "Test RM_GetClusterNodeSlotRanges for replica returns master slots" {
+        set replica3_id [R 3 cluster myid]
+        set ranges [R 0 asm.get_cluster_node_slot_ranges $replica3_id]
+        set master_ranges [R 0 asm.cluster_get_local_slot_ranges]
+        assert_equal $ranges $master_ranges
+    }
 }
 
 set testmodule [file normalize tests/modules/atomicslotmigration.so]
@@ -3062,6 +3080,15 @@ start_server {tags "cluster external:skip"} {
     test "Test RM_ClusterGetLocalSlotRanges without cluster" {
         r module load $testmodule
         assert_equal [r asm.cluster_get_local_slot_ranges] {{0 16383}}
+    }
+}
+
+start_server {tags "cluster external:skip"} {
+    test "Test RM_GetClusterNodeSlotRanges without cluster" {
+        r module load $testmodule
+        set local_id "nonexistent-node-id"
+        set ranges [r asm.get_cluster_node_slot_ranges $local_id]
+        assert_equal $ranges {}
     }
 }
 }

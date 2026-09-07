@@ -272,13 +272,17 @@ raxNode *raxAddChild(rax *rax, raxNode *n, unsigned char c, raxNode **childptr, 
     raxNode *child = raxNewNode(rax,0,0);
     if (child == NULL) return NULL;
 
-    /* Make space in the original node. */
-    raxNode *newn = raxNodeRealloc(rax,n,newlen);
-    if (newn == NULL) {
-        raxFreeNode(rax,child);
-        return NULL;
+    /* Make space in the original node. If the current allocation already
+     * has enough usable bytes (common with jemalloc size-class rounding),
+     * skip the realloc entirely. */
+    if (rax_malloc_usable_size(n) < newlen) {
+        raxNode *newn = raxNodeRealloc(rax,n,newlen);
+        if (newn == NULL) {
+            raxFreeNode(rax,child);
+            return NULL;
+        }
+        n = newn;
     }
-    n = newn;
 
     /* After the reallocation, we have up to 8/16 (depending on the system
      * pointer size, and the required node padding) bytes at the end, that is,
@@ -309,8 +313,12 @@ raxNode *raxAddChild(rax *rax, raxNode *n, unsigned char c, raxNode **childptr, 
      * a child "c" in our case pos will be = 2 after the end of the following
      * loop. */
     int pos;
-    for (pos = 0; pos < n->size; pos++) {
-        if (n->data[pos] > c) break;
+    if (n->size > 0 && c > n->data[n->size - 1]) {
+        pos = n->size;
+    } else {
+        for (pos = 0; pos < n->size; pos++) {
+            if (n->data[pos] > c) break;
+        }
     }
 
     /* Now, if present, move auxiliary data pointer at the end
@@ -478,13 +486,24 @@ static inline size_t raxLowWalk(rax *rax, unsigned char *s, size_t len, raxNode 
             }
             if (j != h->size) break;
         } else {
-            /* Even when h->size is large, linear scan provides good
-             * performances compared to other approaches that are in theory
-             * more sounding, like performing a binary search. */
-            for (j = 0; j < h->size; j++) {
-                if (v[j] == s[i]) break;
+            /* Children are sorted. Check the last child first: for
+             * sequential inserts the match is almost always at the end,
+             * and for random keys the extra compare is negligible vs
+             * the O(n) scan that follows on miss. */
+            if (v[h->size - 1] == s[i]) {
+                j = h->size - 1;
+            } else if (s[i] > v[h->size - 1]) {
+                j = h->size;
+                break;
+            } else {
+                /* Even when h->size is large, linear scan provides good
+                 * performances compared to other approaches that are in theory
+                 * more sounding, like performing a binary search. */
+                for (j = 0; j < h->size; j++) {
+                    if (v[j] == s[i]) break;
+                }
+                if (j == h->size) break;
             }
-            if (j == h->size) break;
             i++;
         }
 
@@ -505,25 +524,54 @@ static inline size_t raxLowWalk(rax *rax, unsigned char *s, size_t len, raxNode 
     return i;
 }
 
-/* Insert the element 's' of size 'len', setting as auxiliary data
- * the pointer 'data'. If the element is already present, the associated
- * data is updated (only if 'overwrite' is set to 1), and 0 is returned,
- * otherwise the element is inserted and 1 is returned. On out of memory the
- * function returns 0 as well but sets errno to ENOMEM, otherwise errno will
- * be set to 0.
- */
-int raxGenericInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old, int overwrite) {
-    size_t i, usable;
-    int j = 0; /* Split position. If raxLowWalk() stops in a compressed
-                  node, the index 'j' represents the char we stopped within the
-                  compressed node, that is, the position where to split the
-                  node for insertion. */
-    raxNode *h, **parentlink;
+#ifdef DEBUG_ASSERTIONS
+/* Re-walk the tree and verify `link` still matches the current state,
+ * i.e. no rax mutation happened between raxFindLink() and the current
+ * raxInsertAt(). Returns 1 if the link is still valid, 0 otherwise.
+ * Used only from a debugAssert(). */
+static int raxLinkStillValid(rax *rax, unsigned char *s, size_t len, raxNodeLink *link) {
+    raxNode *stopnode, **parentlink;
+    int splitpos = 0;
+    size_t consumed = raxLowWalk(rax,s,len,&stopnode,&parentlink,&splitpos,NULL);
+    return stopnode == link->stopnode &&
+           parentlink == link->parentlink &&
+           consumed == link->consumed &&
+           splitpos == link->splitpos;
+}
+#endif
+
+/* Commit an insert at the position recorded in `link`. The link must
+ * have come from an immediately-preceding raxFindLink() on (rax, s, len)
+ * with no intervening rax mutation.
+ *
+ * If the link lands on an existing key, the associated data is
+ * overwritten with `data`, the prior value is stored at *old (when old
+ * is non-NULL), and 0 is returned. Otherwise the element is inserted
+ * and 1 is returned. Callers wanting try-insert semantics (preserve
+ * existing) should check raxFindLink's return first and skip this call
+ * when it reports 1.
+ *
+ * On out of memory the function returns 0 and sets errno to ENOMEM;
+ * otherwise errno is set to 0. */
+int raxInsertAt(rax *rax, unsigned char *s, size_t len, void *data, void **old, raxNodeLink *link) {
+    size_t usable;
+    /* Pull walk state from `link`. */
+    size_t i = link->consumed;
+    int j = link->splitpos; /* Split position. If raxLowWalk() stopped in
+                               a compressed node, 'j' is the char index
+                               within the compressed node where we
+                               stopped; i.e. the position where to split
+                               the node for insertion. Only meaningful
+                               when h->iscompr. */
+    raxNode *h = link->stopnode, **parentlink = link->parentlink;
     size_t dummy, *alloc_size = &dummy;
+
+    /* The link must reflect the current tree: no rax mutation is allowed
+     * between the raxFindLink() that produced it and this commit. */
+    debugAssert(raxLinkStillValid(rax,s,len,link));
 
     if (rax->alloc_size) alloc_size = rax->alloc_size;
     debugf("### Insert %.*s with value %p\n", (int)len, s, data);
-    i = raxLowWalk(rax,s,len,&h,&parentlink,&j,NULL);
 
     /* If i == len we walked following the whole string. If we are not
      * in the middle of a compressed node, the string is either already
@@ -533,7 +581,7 @@ int raxGenericInsert(rax *rax, unsigned char *s, size_t len, void *data, void **
     if (i == len && (!h->iscompr || j == 0 /* not in the middle if j is 0 */)) {
         debugf("### Insert: node representing key exists\n");
         /* Make space for the value pointer if needed. */
-        if (!h->iskey || (h->isnull && overwrite)) {
+        if (!h->iskey || h->isnull) {
             h = raxReallocForData(rax,h,data);
             if (h) memcpy(parentlink,&h,sizeof(h));
         }
@@ -545,9 +593,9 @@ int raxGenericInsert(rax *rax, unsigned char *s, size_t len, void *data, void **
         /* Update the existing key if there is already one. */
         if (h->iskey) {
             if (old) *old = raxGetData(h);
-            if (overwrite) raxSetData(h,data);
+            raxSetData(h,data);
             errno = 0;
-            return 0; /* Element already exists. */
+            return 0; /* Element already exists, overwritten. */
         }
 
         /* Otherwise set the node as a key. Note that raxSetData()
@@ -912,32 +960,65 @@ oom:
     return 0;
 }
 
-/* Overwriting insert. Just a wrapper for raxGenericInsert() that will
- * update the element if there is already one for the same key. */
-int raxInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old) {
-    return raxGenericInsert(rax,s,len,data,old,1);
+/* Walk the rax once and record the stop position in `link`. Returns 1 if
+ * `s` is an existing key (and, if `value` is non-NULL, stores the value
+ * at *value); 0 otherwise. The link is populated either way so a caller
+ * that meant "find or insert" can commit via raxInsertAt() without a
+ * second walk.
+ *
+ * Invalidation contract: `link->h` and `link->parentlink` are interior
+ * pointers into the tree. They become stale on ANY intervening rax
+ * mutation. Callers MUST commit (or discard) immediately after the
+ * find; do not interleave other rax calls on the same tree, do not
+ * retain across yield points. */
+int raxFindLink(rax *rax, unsigned char *s, size_t len,
+                void **value, raxNodeLink *link) {
+    debugf("### FindLink: %.*s\n", (int)len, s);
+    link->splitpos = 0;
+    link->consumed = raxLowWalk(rax,s,len,
+                         &link->stopnode,&link->parentlink,
+                         &link->splitpos,NULL);
+    /* Match condition: query fully consumed, stopped at a clean node
+     * boundary (not mid-prefix on a compressed node), and the stop node
+     * is a key. */
+    if (link->consumed != len ||
+        (link->stopnode->iscompr && link->splitpos != 0) ||
+        !link->stopnode->iskey)
+        return 0;
+    if (value != NULL) *value = raxGetData(link->stopnode);
+    return 1;
 }
 
-/* Non overwriting insert function: if an element with the same key
- * exists, the value is not updated and the function returns 0.
- * This is just a wrapper for raxGenericInsert(). */
+/* Overwriting insert. One walk via raxFindLink, then commit at the
+ * recorded position. Existing element is updated. */
+int raxInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old) {
+    raxNodeLink link;
+    raxFindLink(rax, s, len, NULL, &link);
+    return raxInsertAt(rax,s,len,data,old,&link);
+}
+
+/* Non-overwriting insert. If an element with the same key exists, the
+ * value is not updated and 0 is returned (with *old set, if non-NULL,
+ * to the existing value). raxFindLink already tells us whether the key
+ * exists, so we skip raxInsertAt's overwrite path entirely in that
+ * case. */
 int raxTryInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old) {
-    return raxGenericInsert(rax,s,len,data,old,0);
+    raxNodeLink link;
+    void *existing;
+    if (raxFindLink(rax, s, len, &existing, &link)) {
+        if (old) *old = existing;
+        errno = 0;
+        return 0;
+    }
+    return raxInsertAt(rax,s,len,data,old,&link);
 }
 
 /* Find a key in the rax: return 1 if the item is found, 0 otherwise.
- * If there is an item and 'value' is passed in a non-NULL pointer,
- * the value associated with the item is set at that address. */
+ * If there is an item and 'value' is passed in a non-NULL pointer, the
+ * value associated with the item is set at that address. */
 int raxFind(rax *rax, unsigned char *s, size_t len, void **value) {
-    raxNode *h;
-
-    debugf("### Lookup: %.*s\n", (int)len, s);
-    int splitpos = 0;
-    size_t i = raxLowWalk(rax,s,len,&h,NULL,&splitpos,NULL);
-    if (i != len || (h->iscompr && splitpos != 0) || !h->iskey)
-        return 0;
-    if (value != NULL) *value = raxGetData(h);
-    return 1;
+    raxNodeLink link;
+    return raxFindLink(rax, s, len, value, &link);
 }
 
 /* Return the memory address where the 'parent' node stores the specified
@@ -1235,48 +1316,48 @@ int raxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
     return 1;
 }
 
-/* This is the core of raxFree(): performs a depth-first scan of the
- * tree and releases all the nodes found. */
-void raxRecursiveFree(rax *rax, raxNode *n, void (*free_callback)(void*)) {
-    debugnode("free traversing",n);
-    int numchildren = n->iscompr ? 1 : n->size;
-    raxNode **cp = raxNodeLastChildPtr(n);
-    while(numchildren--) {
-        raxNode *child;
-        memcpy(&child,cp,sizeof(child));
-        raxRecursiveFree(rax,child,free_callback);
-        cp--;
-    }
-    debugnode("free depth-first",n);
-    if (free_callback && n->iskey && !n->isnull)
-        free_callback(raxGetData(n));
-    raxFreeNode(rax,n);
-    rax->numnodes--;
-}
+/* This is the core of raxFree(): performs an iterative depth-first scan
+ * of the tree and frees all the nodes found. Uses an explicit heap stack
+ * to avoid stack overflow on deep trees. The caller passes exactly one
+ * callback variant and the non-NULL one is invoked. */
+static void raxFreeNodesWithCallback(rax *rax, raxNode *n,
+                                     void (*free_callback)(void *item),
+                                     void (*free_callback_withctx)(void *item, void *ctx),
+                                     void *ctx)
+{
+    raxStack stack;
+    raxStackInit(&stack);
+    raxStackPush(&stack, n);
 
-/* Same as raxRecursiveFree() with context argument */
-void raxRecursiveFreeWithCtx(rax *rax, raxNode *n,
-                            void (*free_callback)(void *item, void *ctx), void *ctx) {
-    debugnode("free traversing",n);
-    int numchildren = n->iscompr ? 1 : n->size;
-    raxNode **cp = raxNodeLastChildPtr(n);
-    while(numchildren--) {
-        raxNode *child;
-        memcpy(&child,cp,sizeof(child));
-        raxRecursiveFreeWithCtx(rax,child,free_callback, ctx);
-        cp--;
+    while (stack.items > 0) {
+        raxNode *curr = raxStackPop(&stack);
+        debugnode("free traversing",curr);
+        int numchildren = curr->iscompr ? 1 : curr->size;
+        raxNode **cp = raxNodeFirstChildPtr(curr);
+        for (int i = 0; i < numchildren; i++) {
+            raxNode *child;
+            memcpy(&child, cp + i, sizeof(child));
+            raxStackPush(&stack, child);
+        }
+        debugnode("free depth-first",curr);
+        if (curr->iskey && !curr->isnull) {
+            void *data = raxGetData(curr);
+            if (free_callback_withctx)
+                free_callback_withctx(data, ctx);
+            else if (free_callback)
+                free_callback(data);
+        }
+        raxFreeNode(rax, curr);
+        rax->numnodes--;
     }
-    debugnode("free depth-first",n);
-    if (free_callback && n->iskey && !n->isnull)
-        free_callback(raxGetData(n), ctx);
-    raxFreeNode(rax,n);
-    rax->numnodes--;
+
+    raxStackFree(&stack);
 }
 
 /* Free a whole radix tree, calling the specified callback in order to
  * free the auxiliary data. */
 void raxFreeWithCallback(rax *rax, void (*free_callback)(void*)) {
-    raxRecursiveFree(rax,rax->head,free_callback);
+    raxFreeNodesWithCallback(rax, rax->head, free_callback, NULL, NULL);
     assert(rax->numnodes == 0);
     size_t *alloc_size = rax->alloc_size;
     size_t usable;
@@ -1288,7 +1369,7 @@ void raxFreeWithCallback(rax *rax, void (*free_callback)(void*)) {
  * free the auxiliary data. */
 void raxFreeWithCbAndContext(rax *rax,
                              void (*free_callback)(void *item, void *ctx), void *ctx) {
-    raxRecursiveFreeWithCtx(rax,rax->head,free_callback,ctx);
+    raxFreeNodesWithCallback(rax, rax->head, NULL, free_callback, ctx);
     assert(rax->numnodes == 0);
     size_t *alloc_size = rax->alloc_size;
     size_t usable;
@@ -2084,6 +2165,81 @@ int raxTest(int argc, char **argv, int flags) {
         rax_free(old);
         err += _rax_verify_alloc_size(r, alloc_size);
 
+        raxFreeWithCallback(r, rax_free);
+    }
+
+    TEST("raxNodeLink: insert paths via raxFindLink + raxInsertAt") {
+        /* Three not-found scenarios in one tree: empty insert, ALGO 1
+         * mid-prefix split, ALGO 2 end-of-prefix split. */
+        rax *r = raxNew();
+        void *vK  = createTestValue(8);
+        void *vAB = createTestValue(8);
+        void *vXX = createTestValue(8);
+        void *vAN = createTestValue(8);
+        raxNodeLink link;
+        void *val;
+
+        /* (a) Empty tree: link points at head, InsertAt commits. */
+        assert(raxFindLink(r, (unsigned char*)"K", 1, NULL, &link) == 0);
+        assert(raxInsertAt(r, (unsigned char*)"K", 1, vK, NULL, &link) == 1);
+        assert(raxFind(r, (unsigned char*)"K", 1, &val) == 1 && val == vK);
+
+        /* Seed compressed node "ANNIBALE". */
+        assert(raxInsert(r, (unsigned char*)"ANNIBALE", 8, vAB, NULL) == 1);
+
+        /* (b) ALGO 1: mismatch mid-prefix. "ANXX" stops at splitpos > 0
+         * inside the compressed "ANNIBALE" node. */
+        assert(raxFindLink(r, (unsigned char*)"ANXX", 4, NULL, &link) == 0);
+        assert(link.stopnode->iscompr && link.splitpos > 0);
+        assert(raxInsertAt(r, (unsigned char*)"ANXX", 4, vXX, NULL, &link) == 1);
+
+        /* (c) ALGO 2: query exhausts mid-prefix (i == len, splitpos > 0). */
+        assert(raxFindLink(r, (unsigned char*)"ANNI", 4, NULL, &link) == 0);
+        assert(raxInsertAt(r, (unsigned char*)"ANNI", 4, vAN, NULL, &link) == 1);
+
+        /* All four keys reachable with the correct values. */
+        assert(raxFind(r, (unsigned char*)"K",        1, &val) == 1 && val == vK);
+        assert(raxFind(r, (unsigned char*)"ANNIBALE", 8, &val) == 1 && val == vAB);
+        assert(raxFind(r, (unsigned char*)"ANXX",     4, &val) == 1 && val == vXX);
+        assert(raxFind(r, (unsigned char*)"ANNI",     4, &val) == 1 && val == vAN);
+        raxFreeWithCallback(r, rax_free);
+    }
+
+    TEST("raxNodeLink: existing-key paths (overwrite vs try-insert vs not-found)") {
+        /* Three exists/not-exists scenarios on the same tree. */
+        rax *r = raxNew();
+        void *v1 = createTestValue(8), *v2 = createTestValue(8);
+        void *v3 = createTestValue(8), *vNew = createTestValue(8);
+        assert(raxInsert(r, (unsigned char*)"FOO", 3, v1, NULL) == 1);
+        assert(raxInsert(r, (unsigned char*)"BAR", 3, v3, NULL) == 1);
+
+        raxNodeLink link;
+        void *val, *existing = NULL;
+
+        /* (a) Overwrite path: FindLink returns 1, caller calls InsertAt
+         * anyway -- value replaced, *old carries the prior pointer. */
+        assert(raxFindLink(r, (unsigned char*)"FOO", 3, &existing, &link) == 1);
+        assert(existing == v1);
+        void *old = NULL;
+        assert(raxInsertAt(r, (unsigned char*)"FOO", 3, v2, &old, &link) == 0);
+        assert(old == v1);
+        assert(raxFind(r, (unsigned char*)"FOO", 3, &val) == 1 && val == v2);
+        rax_free(v1);
+
+        /* (b) Try-insert path: FindLink reports existing -- caller
+         * skips InsertAt entirely. No overwrite flag needed. */
+        existing = NULL;
+        assert(raxFindLink(r, (unsigned char*)"BAR", 3, &existing, &link) == 1);
+        assert(existing == v3);
+        /* Deliberately skip raxInsertAt -- v3 must survive. */
+        rax_free(vNew);
+        assert(raxFind(r, (unsigned char*)"BAR", 3, &val) == 1 && val == v3);
+
+        /* (c) Not-found: FindLink on a missing key returns 0 and leaves
+         * the tree untouched (caller didn't commit). */
+        assert(raxFindLink(r, (unsigned char*)"BAZ", 3, NULL, &link) == 0);
+        assert(raxFind(r, (unsigned char*)"BAZ", 3, NULL) == 0);
+        assert(raxSize(r) == 2);
         raxFreeWithCallback(r, rax_free);
     }
 

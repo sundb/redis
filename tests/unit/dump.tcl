@@ -42,9 +42,13 @@ start_server {tags {"dump"}} {
         set encoded [r dump foo]
         set now [clock milliseconds]
         r debug set-active-expire 0
+        set expiredkeys [s expired_keys]
         r restore foo [expr $now-3000] $encoded absttl REPLACE
         catch {r debug object foo} e
         r debug set-active-expire 1
+        # Verify that expired_keys was incremented, even though
+        # the key was not added to the DB actually.
+        assert_equal [expr $expiredkeys + 1] [s expired_keys]
         set e
     } {ERR no such key} {needs:debug}
 
@@ -153,6 +157,19 @@ start_server {tags {"dump"}} {
 
         close_replication_stream $repl
     } {} {needs:repl}
+
+    test {RESTORE fail with invalid payload size} {
+        # Payload with mismatched size: claims 0xFFFFFFFFFFFFFFF7 bytes (max uint64 - 8) but provides no data
+        # \x00 = String type
+        # \x81 = 64-bit length marker
+        # \xFF\xFF\xFF\xFF\xFF\xFF\xFF\xF7 = 18446744073709551607 in big-endian
+        # \x0c\x00 = RDB version
+        # \x00... = fake CRC64
+        set encoded "\x00\x81\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xF7\x0c\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        r del test
+        catch {r restore test 0 $encoded} e
+        set e
+    } {*Bad data format*}
 
     test {DUMP of non existing key returns nil} {
         r dump nonexisting_key

@@ -237,7 +237,11 @@ int blockedClientMayTimeout(client *c) {
  * unblockClient() will be called with the same client as argument. */
 void replyToBlockedClientTimedOut(client *c) {
     if (c->bstate.btype == BLOCKED_LAZYFREE) {
-        addReply(c, shared.ok); /* No reason lazy-free to fail */
+        /* SFLUSH: reply with empty array, FLUSH*: reply with OK */
+        if (c->cmd && c->cmd->proc == sflushCommand)
+            addReplyArrayLen(c, 0);
+        else
+            addReply(c, shared.ok); /* No reason lazy-free to fail */
     } else if (c->bstate.btype == BLOCKED_LIST ||
         c->bstate.btype == BLOCKED_ZSET ||
         c->bstate.btype == BLOCKED_STREAM) {
@@ -297,7 +301,11 @@ void disconnectAllBlockedClients(void) {
                 continue;
 
             if (c->bstate.btype == BLOCKED_LAZYFREE) {
-                addReply(c, shared.ok); /* No reason lazy-free to fail */
+                /* SFLUSH: reply with empty array, FLUSH*: reply with OK */
+                if (c->cmd && c->cmd->proc == sflushCommand)
+                    addReplyArrayLen(c, 0);
+                else
+                    addReply(c, shared.ok);
                 updateStatsOnUnblock(c, 0, 0, 0);
                 c->flags &= ~CLIENT_PENDING_COMMAND;
                 unblockClient(c, 1);
@@ -691,7 +699,13 @@ static void unblockClientOnKey(client *c, robj *key) {
         client *old_client = server.current_client;
         server.current_client = c;
         enterExecutionUnit(1, 0);
-        processCommandAndResetClient(c);
+        if (processCommandAndResetClient(c) == C_ERR) {
+            /* Client was freed during command processing, exit immediately */
+            exitExecutionUnit();
+            server.current_client = old_client;
+            return;
+        }
+
         if (!(c->flags & CLIENT_BLOCKED)) {
             if (c->flags & CLIENT_MODULE) {
                 moduleCallCommandUnblockedHandler(c);

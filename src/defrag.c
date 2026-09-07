@@ -382,7 +382,7 @@ dict *dictDefragTables(dict *d) {
     return ret;
 }
 
-/* Internal function used by zslDefrag */
+/* Internal function used by activeDefragZsetNode */
 void zslUpdateNode(zskiplist *zsl, zskiplistNode *oldnode, zskiplistNode *newnode, zskiplistNode **update) {
     int i;
     for (i = 0; i < zsl->level; i++) {
@@ -399,60 +399,40 @@ void zslUpdateNode(zskiplist *zsl, zskiplistNode *oldnode, zskiplistNode *newnod
     }
 }
 
-/* Defrag helper for sorted set.
- * Update the robj pointer, defrag the skiplist struct and return the new score
- * reference. We may not access oldele pointer (not even the pointer stored in
- * the skiplist), as it was already freed. Newele may be null, in which case we
- * only need to defrag the skiplist, but not update the obj pointer.
- * When return value is non-NULL, it is the score reference that must be updated
- * in the dict record. */
-double *zslDefrag(zskiplist *zsl, double score, sds oldele, sds newele) {
-    zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x, *newx;
+/* Defrag a single zset node, update dictEntry and skiplist struct */
+void activeDefragZsetNode(zset *zs, dictEntry *de, dictEntryLink plink) {
+    zskiplistNode *znode = dictGetKey(de);
+
+    /* Try to defrag the skiplist node first */
+    zskiplistNode *newnode = activeDefragAllocWithoutFree(znode);
+    if (!newnode) return; /* No defrag needed */
+
+    /* Node was defragged, now we need to update all skiplist pointers */
+    zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *iter;
     int i;
-    sds ele = newele? newele: oldele;
+    double score = newnode->score;
+    sds ele = zslGetNodeElement(newnode);
 
-    /* find the skiplist node referring to the object that was moved,
-     * and all pointers that need to be updated if we'll end up moving the skiplist node. */
-    x = zsl->header;
-    for (i = zsl->level-1; i >= 0; i--) {
-        while (x->level[i].forward &&
-            x->level[i].forward->ele != oldele && /* make sure not to access the
-                                                     ->obj pointer if it matches
-                                                     oldele */
-            (x->level[i].forward->score < score ||
-                (x->level[i].forward->score == score &&
-                sdscmp(x->level[i].forward->ele,ele) < 0)))
-            x = x->level[i].forward;
-        update[i] = x;
+    /* Find all pointers that need to be updated */
+    iter = zs->zsl->header;
+    for (i = zs->zsl->level-1; i >= 0; i--) {
+        while (iter->level[i].forward &&
+            iter->level[i].forward != znode &&
+            zslCompareWithNode(score, ele, iter->level[i].forward) > 0)
+            iter = iter->level[i].forward;
+        update[i] = iter;
     }
 
-    /* update the robj pointer inside the skip list record. */
-    x = x->level[0].forward;
-    serverAssert(x && score == x->score && x->ele==oldele);
-    if (newele)
-        x->ele = newele;
+    /* Verify we found the right node */
+    iter = iter->level[0].forward;
+    serverAssert(iter && iter == znode);
 
-    /* try to defrag the skiplist record itself */
-    newx = activeDefragAlloc(x);
-    if (newx) {
-        zslUpdateNode(zsl, x, newx, update);
-        return &newx->score;
-    }
-    return NULL;
-}
+    /* Update all skiplist pointers and dict key */
+    zslUpdateNode(zs->zsl, znode, newnode, update);
+    dictSetKeyAtLink(zs->dict, newnode, &plink, 0);
 
-/* Defrag helper for sorted set.
- * Defrag a single dict entry key name, and corresponding skiplist struct */
-void activeDefragZsetEntry(zset *zs, dictEntry *de) {
-    sds newsds;
-    double* newscore;
-    sds sdsele = dictGetKey(de);
-    if ((newsds = activeDefragSds(sdsele)))
-        dictSetKey(zs->dict, de, newsds);
-    newscore = zslDefrag(zs->zsl, *(double*)dictGetVal(de), sdsele, newsds);
-    if (newscore) {
-        dictSetVal(zs->dict, de, newscore);
-    }
+    /* Free the old node now that all pointers have been updated */
+    activeDefragFree(znode);
 }
 
 #define DEFRAG_SDS_DICT_NO_VAL 0
@@ -627,11 +607,10 @@ typedef struct {
     zset *zs;
 } scanLaterZsetData;
 
-void scanLaterZsetCallback(void *privdata, const dictEntry *_de, dictEntryLink plink) {
-    UNUSED(plink);
+void scanZsetCallback(void *privdata, const dictEntry *_de, dictEntryLink plink) {
     dictEntry *de = (dictEntry*)_de;
     scanLaterZsetData *data = privdata;
-    activeDefragZsetEntry(data->zs, de);
+    activeDefragZsetNode(data->zs, de, plink);
     server.stat_active_defrag_scanned++;
 }
 
@@ -641,7 +620,7 @@ void scanLaterZset(robj *ob, unsigned long *cursor) {
     dict *d = zs->dict;
     scanLaterZsetData data = {zs};
     dictDefragFunctions defragfns = {.defragAlloc = activeDefragAlloc};
-    *cursor = dictScanDefrag(d, *cursor, scanLaterZsetCallback, &defragfns, &data);
+    *cursor = dictScanDefrag(d, *cursor, scanZsetCallback, &defragfns, &data);
 }
 
 /* Used as scan callback when all the work is done in the dictDefragFunctions. */
@@ -723,7 +702,6 @@ void defragZsetSkiplist(defragKeysCtx *ctx, kvobj *ob) {
     zset *newzs;
     zskiplist *newzsl;
     dict *newdict;
-    dictEntry *de;
     struct zskiplistNode *newheader;
     serverAssert(ob->type == OBJ_ZSET && ob->encoding == OBJ_ENCODING_SKIPLIST);
     if ((newzs = activeDefragAlloc(zs)))
@@ -735,12 +713,15 @@ void defragZsetSkiplist(defragKeysCtx *ctx, kvobj *ob) {
     if (dictSize(zs->dict) > server.active_defrag_max_scan_fields)
         defragLater(ctx, ob);
     else {
-        dictIterator di;
-        dictInitIterator(&di, zs->dict);
-        while((de = dictNext(&di)) != NULL) {
-            activeDefragZsetEntry(zs, de);
-        }
-        dictResetIterator(&di);
+        /* Use dictScanDefrag to iterate and defrag both dictEntry structures and skiplist nodes.
+         * dictScanDefrag handles defragging dictEntry/dictEntryNoValue structures via defragfns,
+         * and calls our callback with plink for each entry so we can defrag skiplist nodes. */
+        scanLaterZsetData data = {zs};
+        dictDefragFunctions defragfns = {.defragAlloc = activeDefragAlloc};
+        unsigned long cursor = 0;
+        do {
+            cursor = dictScanDefrag(zs->dict, cursor, scanZsetCallback, &defragfns, &data);
+        } while (cursor != 0);
     }
     /* defrag the dict struct and tables */
     if ((newdict = dictDefragTables(zs->dict)))
@@ -771,6 +752,32 @@ void defragSet(defragKeysCtx *ctx, kvobj *ob) {
     /* defrag the dict struct and tables */
     if ((newd = dictDefragTables(ob->ptr)))
         ob->ptr = newd;
+}
+
+/* Arrays can be expensive to defrag in one shot because they may contain many
+ * independently allocated slices. Small arrays are defragmented immediately,
+ * while large arrays are queued for later and processed one slice per step. */
+void defragArray(defragKeysCtx *ctx, kvobj *ob) {
+    serverAssert(ob->type == OBJ_ARRAY);
+    /* Maybe arCount() is not the best possible value to check against
+     * server.active_defrag_max_scan_fields, also because anyway when we
+     * defrag incrementally, we defrag a since slice per call. Yet it makes
+     * sense in a non very obvious way, for several reasons:
+     *
+     * 1. If the array is very sparse, it is an upper bound to the max
+     *    number of slices it is composed to.
+     * 2. If the array is dense, we will scan in the default case at most 4096
+     *    entries, and the default defrag limit for max scans is 1000. They
+     *    are kinda comparable numbers.
+     * 3. In case of a highly sparse array with huge indexes, in superdir mode,
+     *    yet the super blocks are going to be at max arCount().
+     *
+     * So regardless of the fact we later will defrag in slice units, this
+     * is a good trigger for the one shot or incremental selection. */
+    if (arCount(ob->ptr) > server.active_defrag_max_scan_fields)
+        defragLater(ctx, ob);
+    else
+        ob->ptr = arDefrag(ob->ptr, activeDefragAlloc);
 }
 
 /* Defrag callback for radix tree iterator, called for each node,
@@ -874,36 +881,52 @@ void defragRadixTree(rax **raxref, int defrag_data, raxDefragFunction *element_c
     raxStop(&ri);
 }
 
-typedef struct {
-    streamCG *cg;
-    streamConsumer *c;
-} PendingEntryContext;
-
 void* defragStreamConsumerPendingEntry(raxIterator *ri, void *privdata) {
-    PendingEntryContext *ctx = privdata;
+    streamConsumer *c = privdata;
+    streamNACK *nack = ri->data;
+    /* NACKs are already defragged by the CG PEL walk (defragStreamCGPendingEntry).
+     * cgroup_ref_node->value is also updated there for all NACKs (including
+     * unowned NACK-zone entries that have no consumer PEL walk).
+     * Here we only fix up the back-pointer to the possibly-relocated consumer. */
+    nack->consumer = c;
+    return NULL;
+}
+
+void* defragStreamCGPendingEntry(raxIterator *ri, void *privdata) {
+    streamCG *cg = privdata;
     streamNACK *nack = ri->data, *newnack;
-    nack->consumer = ctx->c; /* update nack pointer to consumer */
-    nack->cgroup_ref_node->value = ctx->cg; /* Update the value of cgroups_ref node to the consumer group. */
+    /* Update cgroup_ref_node to the possibly-relocated CG for every NACK.
+     * Consumer-owned entries will get this overwritten again redundantly by
+     * defragStreamConsumerPendingEntry; unowned (NACK zone) entries have no
+     * consumer PEL walk, so this is their only chance. */
+    nack->cgroup_ref_node->value = cg;
     newnack = activeDefragAlloc(nack);
     if (newnack) {
-        /* Update consumer group pointer to the nack.
-         * pel_by_time doesn't need updating since delivery time is unchanged. */
-        void *prev;
-        raxInsert(ctx->cg->pel, ri->key, ri->key_len, newnack, &prev);
-        serverAssert(prev==nack);
+        /* If this NACK is owned by a consumer, update the consumer's PEL. */
+        if (newnack->consumer) {
+            void *prev;
+            raxInsert(newnack->consumer->pel, ri->key, ri->key_len, newnack, &prev);
+            serverAssert(prev == nack);
+        }
+        if (newnack->pel_prev) {
+            newnack->pel_prev->pel_next = newnack;
+        } else {
+            cg->pel_time_head = newnack;
+        }
+        if (newnack->pel_next) {
+            newnack->pel_next->pel_prev = newnack;
+        } else {
+            cg->pel_time_tail = newnack;
+        }
+        if (cg->pel_nack_tail == nack) {
+            cg->pel_nack_tail = newnack;
+        }
     }
     return newnack;
 }
 
-typedef struct {
-    stream *s;
-    streamCG *cg;
-} StreamConsumerContext;
-
 void* defragStreamConsumer(raxIterator *ri, void *privdata) {
-    StreamConsumerContext *ctx = privdata;
-    stream *s = ctx->s;
-    streamCG *cg = ctx->cg;
+    stream *s = privdata;
     streamConsumer *c = ri->data;
     void *newc = activeDefragAlloc(c);
     if (newc) {
@@ -915,8 +938,7 @@ void* defragStreamConsumer(raxIterator *ri, void *privdata) {
     if (c->pel) {
         /* Update pel back-pointer to new stream */
         c->pel->alloc_size = &s->alloc_size;
-        PendingEntryContext pel_ctx = {cg, c};
-        defragRadixTree(&c->pel, 0, defragStreamConsumerPendingEntry, &pel_ctx);
+        defragRadixTree(&c->pel, 0, defragStreamConsumerPendingEntry, c);
     }
     return newc; /* returns NULL if c was not defragged */
 }
@@ -929,18 +951,12 @@ void* defragStreamConsumerGroup(raxIterator *ri, void *privdata) {
     if (cg->pel) {
         /* Update pel back-pointer to new stream */
         cg->pel->alloc_size = &s->alloc_size;
-        defragRadixTree(&cg->pel, 0, NULL, NULL);
-    }
-    if (cg->pel_by_time) {
-        /* Update pel_by_time back-pointer to new stream */
-        cg->pel_by_time->alloc_size = &s->alloc_size;
-        defragRadixTree(&cg->pel_by_time, 0, NULL, NULL);
+        defragRadixTree(&cg->pel, 0, defragStreamCGPendingEntry, cg);
     }
     if (cg->consumers) {
         /* Update consumers back-pointer to new stream */
         cg->consumers->alloc_size = &s->alloc_size;
-        StreamConsumerContext consumer_ctx = {s, cg};
-        defragRadixTree(&cg->consumers, 0, defragStreamConsumer, &consumer_ctx);
+        defragRadixTree(&cg->consumers, 0, defragStreamConsumer, s);
     }
     return cg;
 }
@@ -976,34 +992,15 @@ static void defragIdmpProducer(idmpProducer *producer) {
     }
 }
 
-/* Defrag all IDMP producers and their dict/linked list entries. */
-void defragStreamIdmpProducers(stream *s) {
-    if (s->idmp_producers == NULL) return;
-
-    /* Defrag the producers rax tree itself */
-    rax *newrax = activeDefragAlloc(s->idmp_producers);
-    if (newrax)
-        s->idmp_producers = newrax;
-
-    /* Defrag the rax head node */
-    defragRaxNode(&s->idmp_producers->head, NULL);
-
-    /* Iterate through all producers and defrag each one */
-    raxIterator ri;
-    raxStart(&ri, s->idmp_producers);
-    /* Set the node callback to defrag internal rax nodes */
-    ri.node_cb = defragRaxNode;
-    raxSeek(&ri, "^", NULL, 0);
-    while (raxNext(&ri)) {
-        idmpProducer *producer = ri.data;
-        idmpProducer *newproducer = activeDefragAlloc(producer);
-        if (newproducer) {
-            raxSetData(ri.node, ri.data=newproducer);
-            producer = newproducer;
-        }
-        defragIdmpProducer(producer);
+static void* defragIdmpProducerCallback(raxIterator *ri, void *privdata) {
+    UNUSED(privdata);
+    idmpProducer *producer = ri->data;
+    idmpProducer *newproducer = activeDefragAlloc(producer);
+    if (newproducer) {
+        producer = newproducer;
     }
-    raxStop(&ri);
+    defragIdmpProducer(producer);
+    return newproducer; /* returns NULL if producer was not defragged */
 }
 
 void defragStream(defragKeysCtx *ctx, kvobj *ob) {
@@ -1036,8 +1033,9 @@ void defragStream(defragKeysCtx *ctx, kvobj *ob) {
     }
 
     if (s->idmp_producers) {
-        /* Defrag the producers and all idmpEntry structures in their linked lists */
-        defragStreamIdmpProducers(s);
+        /* Update idmp_producers back-pointer to new stream */
+        s->idmp_producers->alloc_size = &s->alloc_size;
+        defragRadixTree(&s->idmp_producers, 0, defragIdmpProducerCallback, NULL);
     }
 }
 
@@ -1110,7 +1108,7 @@ void defragKey(defragKeysCtx *ctx, dictEntry *de, dictEntryLink link) {
     int slot = ctx->kvstate.slot;
     unsigned char *newzl;
 
-    if (server.memory_tracking_per_slot)
+    if (server.memory_tracking_enabled)
         oldsize = kvobjAllocSize(ob);
 
     long long expire = kvobjGetExpire(ob);
@@ -1191,13 +1189,24 @@ void defragKey(defragKeysCtx *ctx, dictEntry *de, dictEntryLink link) {
         }
     } else if (ob->type == OBJ_STREAM) {
         defragStream(ctx, ob);
+#ifdef ENABLE_GCRA
+    } else if (ob->type == OBJ_GCRA) {
+        /* GCRA object is just an allocation to a long long value */
+#if UINTPTR_MAX == 0xffffffff
+        void *newptr, *ptr = ob->ptr;
+        if ((newptr = activeDefragAlloc(ptr)))
+            ob->ptr = newptr;
+#endif
+#endif
     } else if (ob->type == OBJ_MODULE) {
         defragModule(ctx,db, ob);
+    } else if (ob->type == OBJ_ARRAY) {
+        defragArray(ctx, ob);
     } else {
         serverPanic("Unknown object type");
     }
-    if (server.memory_tracking_per_slot)
-        updateSlotAllocSize(db, slot, oldsize, kvobjAllocSize(ob));
+    if (server.memory_tracking_enabled)
+        updateSlotAllocSize(db, slot, ob, oldsize, kvobjAllocSize(ob));
 }
 
 /* Defrag scan callback for the main db dictionary. */
@@ -1309,6 +1318,10 @@ int defragLaterItem(kvobj *ob, unsigned long *cursor, monotime endtime, int dbid
             robj keyobj;
             initStaticStringObject(keyobj, kvobjGetKey(ob));
             return moduleLateDefrag(&keyobj, ob, cursor, endtime, dbid);
+        } else if (ob->type == OBJ_ARRAY) {
+            redisArray *ar = ob->ptr;
+            *cursor = arDefragIncremental(&ar, *cursor, activeDefragAlloc);
+            ob->ptr = ar;
         } else {
             *cursor = 0; /* object type/encoding may have changed since we schedule it for later */
         }
@@ -1340,11 +1353,11 @@ static doneStatus defragLaterStep(void *ctx, monotime endtime) {
         kvobj *kv = de ? dictGetKV(de) : NULL;
 
         long long key_defragged = server.stat_active_defrag_hits;
-        if (server.memory_tracking_per_slot && kv)
+        if (server.memory_tracking_enabled && kv)
             oldsize = kvobjAllocSize(kv);
         int timeout = (defragLaterItem(kv, &defrag_keys_ctx->defrag_later_cursor, endtime, defrag_keys_ctx->dbid) == 1);
-        if (server.memory_tracking_per_slot && kv)
-            updateSlotAllocSize(db, slot, oldsize, kvobjAllocSize(kv));
+        if (server.memory_tracking_enabled && kv)
+            updateSlotAllocSize(db, slot, kv, oldsize, kvobjAllocSize(kv));
         if (key_defragged != server.stat_active_defrag_hits) {
             server.stat_active_defrag_key_hits++;
         } else {

@@ -16,6 +16,21 @@ DEPS_CFLAGS := $(CFLAGS)
 DEPS_LDFLAGS := $(LDFLAGS)
 CLANG := $(findstring clang,$(shell sh -c '$(CC) --version | head -1'))
 
+# Make sure the dependencies honor SANITIZER as well. Otherwise top-level
+# sanitized Redis builds can end up linking unsanitized vendored libraries.
+ifeq ($(SANITIZER),address)
+	DEPS_CFLAGS+=-fsanitize=address -fno-sanitize-recover=all -fno-omit-frame-pointer
+	DEPS_LDFLAGS+=-fsanitize=address
+else
+ifeq ($(SANITIZER),undefined)
+	DEPS_CFLAGS+=-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+	DEPS_LDFLAGS+=-fsanitize=undefined
+else
+ifeq ($(SANITIZER),thread)
+	DEPS_CFLAGS+=-fsanitize=thread -fno-sanitize-recover=all -fno-omit-frame-pointer
+	DEPS_LDFLAGS+=-fsanitize=thread
+else
+
 # MSan looks for errors related to uninitialized memory.
 # Make sure to build the dependencies with MSan as it needs all the code to be instrumented.
 # A library could be used to initialize memory but if it's not build with --fsanitize=memory then
@@ -26,6 +41,9 @@ ifeq (clang, $(CLANG))
 	DEPS_LDFLAGS+=-fsanitize=memory
 else
     $(error "MemorySanitizer needs to be compiled and linked with clang. Please use CC=clang")
+endif
+endif
+endif
 endif
 endif
 
@@ -59,7 +77,7 @@ distclean:
 	-(cd jemalloc && [ -f Makefile ] && $(MAKE) distclean) > /dev/null || true
 	-(cd hdr_histogram && $(MAKE) clean) > /dev/null || true
 	-(cd fpconv && $(MAKE) clean) > /dev/null || true
-	-(cd fast_float && $(MAKE) clean) > /dev/null || true
+	-(cd tre && $(MAKE) clean) > /dev/null || true
 	-(cd xxhash && $(MAKE) clean) > /dev/null || true
 	-(rm -f .make-*)
 
@@ -95,11 +113,12 @@ fpconv: .make-prerequisites
 
 .PHONY: fpconv
 
-fast_float: .make-prerequisites
+tre: .make-prerequisites
 	@printf '%b %b\n' $(MAKECOLOR)MAKE$(ENDCOLOR) $(BINCOLOR)$@$(ENDCOLOR)
-	cd fast_float && $(MAKE) libfast_float CFLAGS="$(DEPS_CFLAGS)" LDFLAGS="$(DEPS_LDFLAGS)"
+	cd tre && $(MAKE) CFLAGS="$(DEPS_CFLAGS)" LDFLAGS="$(DEPS_LDFLAGS)"
 
-.PHONY: fast_float
+.PHONY: tre
+
 
 XXHASH_CFLAGS = -fPIC $(DEPS_CFLAGS)
 xxhash: .make-prerequisites
@@ -114,6 +133,13 @@ endif
 
 LUA_CFLAGS+= -Wall -DLUA_ANSI -DENABLE_CJSON_GLOBAL -DREDIS_STATIC='' -DLUA_USE_MKSTEMP $(DEPS_CFLAGS)
 LUA_LDFLAGS+= $(DEPS_LDFLAGS)
+# Lua's table/index code intentionally casts possibly out-of-range lua_Numbers
+# to int (it then validates via a round-trip comparison, e.g. luaH_get), which
+# is benign but trips UBSan's float-cast-overflow check and aborts under
+# -fno-sanitize-recover. Disable that sub-check for Lua only.
+ifeq ($(SANITIZER),undefined)
+LUA_CFLAGS+= -fno-sanitize=float-cast-overflow
+endif
 ifeq ($(LUA_DEBUG),yes)
 	LUA_CFLAGS+= -O0 -g -DLUA_USE_APICHECK
 else
@@ -136,8 +162,8 @@ lua: .make-prerequisites
 
 .PHONY: lua
 
-JEMALLOC_CFLAGS=$(CFLAGS)
-JEMALLOC_LDFLAGS=$(LDFLAGS)
+JEMALLOC_CFLAGS=$(ENABLE_LTO) $(CFLAGS)
+JEMALLOC_LDFLAGS=$(ENABLE_LTO) $(LDFLAGS)
 
 ifneq ($(DEB_HOST_GNU_TYPE),)
 JEMALLOC_CONFIGURE_OPTS += --host=$(DEB_HOST_GNU_TYPE)

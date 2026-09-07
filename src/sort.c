@@ -340,11 +340,11 @@ void sortCommandGeneric(client *c, int readonly) {
 
     /* Destructively convert encoded sorted sets for SORT. */
     if (sortval->type == OBJ_ZSET) {
-        if (server.memory_tracking_per_slot)
-            oldsize = zsetAllocSize(sortval);
+        if (server.memory_tracking_enabled)
+            oldsize = kvobjAllocSize(sortval);
         zsetConvert(sortval, OBJ_ENCODING_SKIPLIST);
-        if (server.memory_tracking_per_slot)
-            updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), oldsize, zsetAllocSize(sortval));
+        if (server.memory_tracking_enabled)
+            updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), sortval, oldsize, kvobjAllocSize(sortval));
     }
 
     /* Obtain the length of the object to sort. */
@@ -424,8 +424,8 @@ void sortCommandGeneric(client *c, int readonly) {
         }
         listTypeResetIterator(&li);
     } else if (sortval->type == OBJ_SET) {
-        if (server.memory_tracking_per_slot)
-            oldsize = setTypeAllocSize(sortval);
+        if (server.memory_tracking_enabled)
+            oldsize = kvobjAllocSize(sortval);
         setTypeIterator si;
         sds sdsele;
         setTypeInitIterator(&si, sortval);
@@ -436,8 +436,8 @@ void sortCommandGeneric(client *c, int readonly) {
             j++;
         }
         setTypeResetIterator(&si);
-        if (server.memory_tracking_per_slot)
-            updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), oldsize, setTypeAllocSize(sortval));
+        if (server.memory_tracking_enabled)
+            updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), sortval, oldsize, kvobjAllocSize(sortval));
     } else if (sortval->type == OBJ_ZSET && dontsort) {
         /* Special handling for a sorted set, if 'dontsort' is true.
          * This makes sure we return elements in the sorted set original
@@ -467,7 +467,7 @@ void sortCommandGeneric(client *c, int readonly) {
 
         while(rangelen--) {
             serverAssertWithInfo(c,sortval,ln != NULL);
-            sdsele = ln->ele;
+            sdsele = zslGetNodeElement(ln);
             vector[j].obj = createStringObject(sdsele,sdslen(sdsele));
             vector[j].u.score = 0;
             vector[j].u.cmpobj = NULL;
@@ -483,19 +483,19 @@ void sortCommandGeneric(client *c, int readonly) {
         dictEntry *setele;
         sds sdsele;
 
-        if (server.memory_tracking_per_slot)
-            oldsize = zsetAllocSize(sortval);
+        if (server.memory_tracking_enabled)
+            oldsize = kvobjAllocSize(sortval);
         dictInitIterator(&di, set);
         while((setele = dictNext(&di)) != NULL) {
-            sdsele =  dictGetKey(setele);
+            sdsele = zslGetNodeElement(dictGetKey(setele));
             vector[j].obj = createStringObject(sdsele,sdslen(sdsele));
             vector[j].u.score = 0;
             vector[j].u.cmpobj = NULL;
             j++;
         }
         dictResetIterator(&di);
-        if (server.memory_tracking_per_slot)
-            updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), oldsize, zsetAllocSize(sortval));
+        if (server.memory_tracking_enabled)
+            updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), sortval, oldsize, kvobjAllocSize(sortval));
     } else {
         serverPanic("Unknown type");
     }
@@ -518,12 +518,7 @@ void sortCommandGeneric(client *c, int readonly) {
                 if (sortby) vector[j].u.cmpobj = getDecodedObject(byval);
             } else {
                 if (sdsEncodedObject(byval)) {
-                    char *eptr;
-
-                    vector[j].u.score = fast_float_strtod(byval->ptr,&eptr);
-                    if (eptr[0] != '\0' || errno == ERANGE ||
-                        isnan(vector[j].u.score))
-                    {
+                    if (string2d(byval->ptr,sdslen(byval->ptr),&vector[j].u.score) == 0) {
                         int_conversion_error = 1;
                     }
                 } else if (byval->encoding == OBJ_ENCODING_INT) {
