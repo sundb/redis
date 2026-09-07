@@ -20,6 +20,7 @@
  *      UNLINKFREE     - Use unlink callback for async free
  *      RDBLOAD        - Enable rdb_load callback (metadata can be loaded from RDB)
  *      RDBSAVE        - Enable rdb_save callback (metadata can be saved to RDB)
+ *      NOAOF          - Disable aof_rewrite callback
  *      ALLOWIGNORE    - Enable ALLOW_IGNORE flag (graceful discard on load if
  *                       class not registered or no rdb_load callback)
  *
@@ -173,11 +174,11 @@ static int KeyMetaMoveDiscardCallback(RedisModuleKeyOptCtx *ctx, uint64_t *meta)
  *
  * Parameters:
  *   - rdb: RedisModuleIO context for writing to RDB
- *   - value: The kvobj (key-value object) - not used in this implementation
+ *   - reserved: Reserved for future use
  *   - meta: Pointer to the 8-byte metadata value (pointer to our string)
  */
-static void KeyMetaRDBSaveCallback(RedisModuleIO *rdb, void *value, uint64_t *meta) {
-    REDISMODULE_NOT_USED(value);
+static void KeyMetaRDBSaveCallback(RedisModuleIO *rdb, void *reserved, uint64_t *meta) {
+    REDISMODULE_NOT_USED(reserved);
 
     /* If metadata is NULL (reset_value), don't save anything */
     if (*meta == 0) return;
@@ -252,12 +253,12 @@ static int KeyMetaRDBLoadCallback(RedisModuleIO *rdb, uint64_t *meta, int encver
  *
  * Parameters:
  *   - aof: RedisModuleIO context for writing to AOF
- *   - value: The kvobj (key-value object) - not used in this implementation
+ *   - reserved: Reserved for future use
  *   - meta: The 8-byte metadata value (pointer to our string)
  *   - class_id: The class ID for this metadata
  */
-static void KeyMetaAOFRewriteCallback_Class(RedisModuleIO *aof, void *value, uint64_t meta, RedisModuleKeyMetaClassId class_id) {
-    REDISMODULE_NOT_USED(value);
+static void KeyMetaAOFRewriteCallback_Class(RedisModuleIO *aof, void *reserved, uint64_t meta, RedisModuleKeyMetaClassId class_id) {
+    REDISMODULE_NOT_USED(reserved);
 
     /* If metadata is NULL (reset_value), don't emit anything */
     if (meta == 0) return;
@@ -289,35 +290,35 @@ static void KeyMetaAOFRewriteCallback_Class(RedisModuleIO *aof, void *value, uin
 
 /* Individual AOF rewrite callbacks for each class (1-7)
  * Each callback wraps the common implementation with its specific class ID */
-static void KeyMetaAOFRewriteCb1(RedisModuleIO *aof, void *value, uint64_t meta) {
-    KeyMetaAOFRewriteCallback_Class(aof, value, meta, 1);
+static void KeyMetaAOFRewriteCb1(RedisModuleIO *aof, void *reserved, uint64_t meta) {
+    KeyMetaAOFRewriteCallback_Class(aof, reserved, meta, 1);
 }
 
-static void KeyMetaAOFRewriteCb2(RedisModuleIO *aof, void *value, uint64_t meta) {
-    KeyMetaAOFRewriteCallback_Class(aof, value, meta, 2);
+static void KeyMetaAOFRewriteCb2(RedisModuleIO *aof, void *reserved, uint64_t meta) {
+    KeyMetaAOFRewriteCallback_Class(aof, reserved, meta, 2);
 }
 
-static void KeyMetaAOFRewriteCb3(RedisModuleIO *aof, void *value, uint64_t meta) {
-    KeyMetaAOFRewriteCallback_Class(aof, value, meta, 3);
+static void KeyMetaAOFRewriteCb3(RedisModuleIO *aof, void *reserved, uint64_t meta) {
+    KeyMetaAOFRewriteCallback_Class(aof, reserved, meta, 3);
 }
 
-static void KeyMetaAOFRewriteCb4(RedisModuleIO *aof, void *value, uint64_t meta) {
-    KeyMetaAOFRewriteCallback_Class(aof, value, meta, 4);
+static void KeyMetaAOFRewriteCb4(RedisModuleIO *aof, void *reserved, uint64_t meta) {
+    KeyMetaAOFRewriteCallback_Class(aof, reserved, meta, 4);
 }
 
-static void KeyMetaAOFRewriteCb5(RedisModuleIO *aof, void *value, uint64_t meta) {
-    KeyMetaAOFRewriteCallback_Class(aof, value, meta, 5);
+static void KeyMetaAOFRewriteCb5(RedisModuleIO *aof, void *reserved, uint64_t meta) {
+    KeyMetaAOFRewriteCallback_Class(aof, reserved, meta, 5);
 }
 
-static void KeyMetaAOFRewriteCb6(RedisModuleIO *aof, void *value, uint64_t meta) {
-    KeyMetaAOFRewriteCallback_Class(aof, value, meta, 6);
+static void KeyMetaAOFRewriteCb6(RedisModuleIO *aof, void *reserved, uint64_t meta) {
+    KeyMetaAOFRewriteCallback_Class(aof, reserved, meta, 6);
 }
 
-static void KeyMetaAOFRewriteCb7(RedisModuleIO *aof, void *value, uint64_t meta) {
-    KeyMetaAOFRewriteCallback_Class(aof, value, meta, 7);
+static void KeyMetaAOFRewriteCb7(RedisModuleIO *aof, void *reserved, uint64_t meta) {
+    KeyMetaAOFRewriteCallback_Class(aof, reserved, meta, 7);
 }
 
-/* KEYMETA.REGISTER <4-char-id> <version> [KEEPONCOPY:KEEPONRENAME:UNLINKFREE:ALLOWIGNORE:NORDBLOAD:NORDBSAVE] */
+/* KEYMETA.REGISTER <4-char-id> <version> [KEEPONCOPY:KEEPONRENAME:UNLINKFREE:ALLOWIGNORE:RDBLOAD:RDBSAVE:NOAOF] */
 static int KeyMetaRegister_RedisCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     if (argc < 3 || argc > 4) {
         return RedisModule_WrongArity(ctx);
@@ -339,6 +340,7 @@ static int KeyMetaRegister_RedisCommand(RedisModuleCtx *ctx, RedisModuleString *
     int allow_ignore = 0;  /* Default: ALLOW_IGNORE disabled */
     int rdb_load = 0;      /* Default: rdb_load disabled */
     int rdb_save = 0;      /* Default: rdb_save disabled */
+    int aof_rewrite = 1;   /* Default: aof_rewrite enabled */
 
     if (argc == 4) {
         const char *flags = RedisModule_StringPtrLen(argv[3], NULL);
@@ -349,6 +351,7 @@ static int KeyMetaRegister_RedisCommand(RedisModuleCtx *ctx, RedisModuleString *
         if (strstr(flags, "ALLOWIGNORE")) allow_ignore = 1;   /* Enable ALLOW_IGNORE */
         if (strstr(flags, "RDBLOAD")) rdb_load = 1;           /* Enable rdb_load */
         if (strstr(flags, "RDBSAVE")) rdb_save = 1;           /* Enable rdb_save */
+        if (strstr(flags, "NOAOF")) aof_rewrite = 0;          /* Disable aof_rewrite */
     }
 
     /* Setup configuration */
@@ -358,7 +361,7 @@ static int KeyMetaRegister_RedisCommand(RedisModuleCtx *ctx, RedisModuleString *
     config.reset_value = (uint64_t)NULL;  /* NULL pointer means no resource to free */
     config.rdb_load = rdb_load ? KeyMetaRDBLoadCallback : NULL;
     config.rdb_save = rdb_save ? KeyMetaRDBSaveCallback : NULL;
-    switch (num_class_mappings + 1) { /* distinct cb per class */
+    switch (aof_rewrite ? num_class_mappings + 1 : 0) { /* distinct cb per class */
         case 1: config.aof_rewrite = KeyMetaAOFRewriteCb1; break;
         case 2: config.aof_rewrite = KeyMetaAOFRewriteCb2; break;
         case 3: config.aof_rewrite = KeyMetaAOFRewriteCb3; break;
@@ -541,7 +544,7 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
     REDISMODULE_NOT_USED(argv);
     REDISMODULE_NOT_USED(argc);
 
-    if (RedisModule_Init(ctx, "test_metakey", 1, REDISMODULE_APIVER_1) == REDISMODULE_ERR) {
+    if (RedisModule_Init(ctx, "test_keymeta", 1, REDISMODULE_APIVER_1) == REDISMODULE_ERR) {
         return REDISMODULE_ERR;
     }
 

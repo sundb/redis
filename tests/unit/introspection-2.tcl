@@ -159,6 +159,13 @@ start_server {tags {"introspection"}} {
 
     test {COMMAND GETKEYSANDFLAGS invalid args} {
         assert_error "ERR Invalid arguments*" {r command getkeysandflags ZINTERSTORE zz 1443677133621497600 asdf}
+        # A numkeys near LONG_MAX must be rejected as a syntax error, not trigger a signed integer overflow (#15403).
+        set huge 9223372036854775807
+        assert_error "ERR Invalid arguments*" {r command getkeys LMPOP $huge k LEFT}
+        assert_error "ERR Invalid arguments*" {r command getkeys ZMPOP $huge k MIN}
+        assert_error "ERR Invalid arguments*" {r command getkeys ZUNION $huge k}
+        assert_error "ERR Invalid arguments*" {r command getkeys SINTERCARD $huge k}
+        assert_error "ERR Invalid arguments*" {r command getkeysandflags ZINTERSTORE dst $huge k}
     }
 
     test {COMMAND GETKEYSANDFLAGS MSETEX} {
@@ -187,6 +194,17 @@ start_server {tags {"introspection"}} {
 
     test {COMMAND GETKEYS LCS} {
         assert_equal {key1 key2} [r command getkeys lcs key1 key2]
+    }
+
+    test {COMMAND GETKEYS PFMERGE with and without source keys} {
+        # dest + sources: both key specs yield keys
+        assert_equal {dest src1 src2} [r command getkeys PFMERGE dest src1 src2]
+
+        # dest only, no source keys: spec[1] yields empty range (last < first).
+        # Without pfmergeGetKeys this returned "Invalid arguments" because
+        # getKeysUsingKeySpecs treated the empty range as invalid_spec,
+        # discarding the dest key found by spec[0].
+        assert_equal {dest} [r command getkeys PFMERGE dest]
     }
 
     test {COMMAND GETKEYS MORE THAN 256 KEYS} {

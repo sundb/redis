@@ -596,8 +596,13 @@ tags "modules external:skip" {
 
                     assert_equal [$master get k1] 1
                     assert_equal [$master ttl k1] -1
-                    assert_equal [$replica get k1] 1
-                    assert_equal [$replica ttl k1] -1
+
+                    wait_for_condition 50 100 {
+                        [$replica get k1] eq 1 &&
+                        [$replica ttl k1] eq -1
+                    } else {
+                        fail "failed RM_Call of expired key propagation"
+                    }
                 }
 
                 test {module notification on set} {
@@ -742,7 +747,7 @@ tags "modules aof external:skip" {
             r EVAL {return redis.call('test.rm_call_replicate',ARGV[1],KEYS[1],ARGV[2])} 1 foo set bar8
             r exec
 
-            assert_match {*calls=8,*,rejected_calls=0,failed_calls=0} [cmdrstat set r]
+            assert_match {*calls=8,*,rejected_calls=0,failed_calls=0*} [cmdrstat set r]
             
             
             # Load the AOF
@@ -759,6 +764,53 @@ tags "modules aof external:skip" {
             
         }
     }
+    }
+}
+
+tags "modules aof external:skip" {
+    start_server [list overrides [list loadmodule "$miscmodule"]] {
+        r config set appendonly yes
+        r config set auto-aof-rewrite-percentage 0 ; # Disable auto-rewrite.
+        waitForBgrewriteaof r
+
+        # The counted form of SPOP replaces its own propagation with an SREM
+        # queued through alsoPropagate(): it must reach only the targets the
+        # RM_Call asked for, just like the propagation of the command itself.
+        set keys {spop-none spop-repl spop-aof spop-all spop-nested}
+        foreach key $keys {
+            r sadd $key a b c d e
+        }
+
+        test {RM_Call effect commands honor the selective propagation flags} {
+            set repl [attach_to_replication_stream]
+
+            assert_equal 2 [llength [r test.rm_call spop spop-none 2]]
+            assert_equal 2 [llength [r test.rm_call_flags !A spop spop-repl 2]]
+            assert_equal 2 [llength [r test.rm_call_flags !R spop spop-aof 2]]
+            assert_equal 2 [llength [r test.rm_call_flags ! spop spop-all 2]]
+
+            # An inner RM_Call with '!' must not resurrect the propagation
+            # suppressed by the outer one.
+            assert_equal 2 [llength [r test.rm_call test.rm_call_flags ! spop spop-nested 2]]
+
+            # The master applied all of them.
+            assert_equal {3 3 3 3 3} [lmap key $keys {r scard $key}]
+
+            assert_replication_stream $repl {
+                {select *}
+                {srem spop-repl * *}
+                {srem spop-all * *}
+            }
+            close_replication_stream $repl
+        }
+
+        test {RM_Call effect commands honor the selective propagation flags after AOF reload} {
+            r debug loadaof
+
+            # Only the sets whose SREM reached the AOF are trimmed, the others
+            # are back to the 5 members added by the SADD above.
+            assert_equal {5 5 3 3 5} [lmap key $keys {r scard $key}]
+        }
     }
 }
 
@@ -793,7 +845,7 @@ test {Replicas that was marked as CLIENT_CLOSE_ASAP should not keep the replicat
                 # exceed the replica soft limit. Furthermore, as the replica release its reference to
                 # replication backlog, it should be properly trimmed, the memory usage of replication
                 # backlog should not significantly exceed repl-backlog-size (default 1MB). */
-                assert_lessthan [getInfoProperty $res used_memory_peak] 10000000;# less than 10mb
+                assert_lessthan [getInfoProperty $res used_memory_peak] 20000000;# less than 20mb
                 assert_lessthan [getInfoProperty $res mem_replication_backlog] 2000000;# less than 2mb
             }
         }

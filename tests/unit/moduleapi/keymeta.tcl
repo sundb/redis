@@ -99,6 +99,7 @@ proc flushallAndVerifyCleanup {} {
 
 start_server {tags {"modules" "external:skip" "cluster:skip"} overrides {enable-debug-command yes}} {
     r module load $testmodule
+    r debug enable-keymeta-runtime-registration 1
 
     array set classesSpec {}
     set classesSpec(1) "KEEPONCOPY:KEEPONRENAME:KEEPONMOVE:ALLOWIGNORE:RDBLOAD:RDBSAVE"
@@ -297,7 +298,7 @@ start_server {tags {"modules" "external:skip" "cluster:skip"} overrides {enable-
         }
     }
 
-    test "KEYMETA - Verify metadta cleanup on lazyfree" {
+    test "KEYMETA - Verify metadata cleanup on lazyfree" {
         r config set lazyfree-lazy-user-del yes
         # Class 2 has UNLINKFREE flag, so it should call unlink callback when lazyfree is enabled
         # Class 1 does not have UNLINKFREE flag, so it should only call free callback
@@ -763,6 +764,7 @@ test "RDB: Load with different module registration order preserves metadata corr
     # metadata values should still be correctly associated with their classes.
     start_server {tags {"modules" "external:skip" "cluster:skip"} overrides {enable-debug-command yes}} {
         r module load $testmodule
+        r debug enable-keymeta-runtime-registration 1
 
         # Helper function to generate class names (needed in inner scope)
         proc cname {id} { return "CLS$id" }
@@ -805,6 +807,7 @@ test "RDB: Load with different module registration order preserves metadata corr
         # INNER SERVER: Start new server, register classes in DIFFERENT order, then load RDB
         start_server [list overrides [list dir $rdb_dir enable-debug-command yes]] {
             r module load $testmodule
+            r debug enable-keymeta-runtime-registration 1
 
             # Helper function to generate class names (needed in inner scope)
             proc cname {id} { return "CLS$id" }
@@ -866,6 +869,7 @@ test "RDB: File size same with/without metadata when no rdb_save callback" {
 
     start_server {tags {"modules" "external:skip" "cluster:skip"} overrides {enable-debug-command yes}} {
         r module load $testmodule
+        r debug enable-keymeta-runtime-registration 1
 
         # Get RDB directory
         set rdb_dir [lindex [r config get dir] 1]
@@ -899,12 +903,48 @@ test "RDB: File size same with/without metadata when no rdb_save callback" {
     }
 } {} {external:skip needs:save}
 
+test "RESTORE-based AOF payload omits KeyMeta" {
+    start_server {tags {"modules" "external:skip" "cluster:skip"} overrides {enable-debug-command yes}} {
+        r module load $testmodule
+        r debug enable-keymeta-runtime-registration 1
+
+        # Class 1 can restore itself through either RDB or AOF. Class 2 is
+        # RDB-only, and class 3 is AOF-only.
+        assert_equal 1 [r keymeta.register [cname 1] 1 \
+            "ALLOWIGNORE:RDBLOAD:RDBSAVE"]
+        assert_equal 2 [r keymeta.register [cname 2] 1 \
+            "ALLOWIGNORE:RDBLOAD:RDBSAVE:NOAOF"]
+        assert_equal 3 [r keymeta.register [cname 3] 1 "ALLOWIGNORE"]
+
+        r set source value
+        r keymeta.set [cname 1] source dual-path
+        r keymeta.set [cname 2] source rdb-only
+        r keymeta.set [cname 3] source aof-only
+
+        set normal_payload [r dump source]
+        set aof_payload [r debug keymeta-aof-dump source]
+
+        # Normal DUMP keeps every RDB-saveable metadata class.
+        r restore normal-copy 0 $normal_payload
+        assert_equal dual-path [r keymeta.get [cname 1] normal-copy]
+        assert_equal rdb-only [r keymeta.get [cname 2] normal-copy]
+        assert_equal "" [r keymeta.get [cname 3] normal-copy]
+
+        # The AOF payload omits all metadata. keyMetaOnAof() is the sole
+        # metadata persistence path for command-form AOF rewrites.
+        r restore aof-copy 0 $aof_payload
+        assert_equal "" [r keymeta.get [cname 1] aof-copy]
+        assert_equal "" [r keymeta.get [cname 2] aof-copy]
+        assert_equal "" [r keymeta.get [cname 3] aof-copy]
+    }
+} {} {external:skip}
+
 test "Creating key metadata not during OnLoad should fail" {
-    # This time start_server without "enable-debug-command yes"
+    # Start server without enabling keymeta runtime registration debug flag
     start_server {tags {"modules" "external:skip" "cluster:skip"} overrides {enable-debug-command no}} {
         r module load $testmodule
-        # Creating a class not during OnLoad should fail
+        # Creating a class not during server startup should fail
         catch {r keymeta.register [cname 1] 1 "ALLOWIGNORE"} err
-        assert_match {*failed to create metadata class*} $err        
+        assert_match {*failed to create metadata class*} $err
     }
 } {} {external:skip needs:save}

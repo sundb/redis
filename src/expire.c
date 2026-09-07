@@ -45,6 +45,7 @@ int activeExpireCycleTryExpire(redisDb *db, kvobj *kv, long long now) {
     sds key = kvobjGetKey(kv);
     robj *keyobj = createStringObject(key,sdslen(key));
     deleteExpiredKeyAndPropagate(db,keyobj);
+    server.stat_expiredkeys_active++;
     decrRefCount(keyobj);
     exitExecutionUnit();
     /* Propagate the DEL command */
@@ -177,8 +178,7 @@ static ExpireAction activeSubexpiresCb(eItem item, void *ctx) {
 
     /* currently we only support hash type sub-expire */
     assert(kv->type == OBJ_HASH);
-    uint64_t nextExpTime = hashTypeActiveExpire(subexCtx->db,kv,
-                                          &subexCtx->fieldsToExpireQuota, 0);
+    uint64_t nextExpTime = hashTypeExpire(subexCtx->db, kv, &subexCtx->fieldsToExpireQuota, 0, 1);
 
     /* If hash has no more fields to expire or got deleted, indicate
      * to remove it from HFE DB to the caller ebExpire() */
@@ -215,6 +215,14 @@ uint64_t activeSubexpires(redisDb *db, int slot, uint32_t maxFieldsToExpire) {
             .itemsExpired = 0};
 
     estoreActiveExpire(db->subexpires, slot, &info);
+
+    /* Drain module post-notification jobs queued by the "hexpired"/"del" events.
+     * The per-field propagation in propagateHashFieldDeletion() runs before those
+     * notifications fire, so its own drain cannot pick them up and they would
+     * otherwise linger until the tail of the next command's call(). No execution
+     * unit is wrapped around the walk: that would suppress the per-field drains
+     * and batch the HDELs into a single MULTI/EXEC. */
+    postExecutionUnitOperations();
 
     /* Return number of fields active-expired */
     return maxFieldsToExpire - ctx.fieldsToExpireQuota;
@@ -321,7 +329,7 @@ void activeExpireCycle(int type) {
          * too high. Also never repeat a fast cycle for the same period
          * as the fast cycle total duration itself. */
         if (!timelimit_exit &&
-            server.stat_expired_stale_perc < config_cycle_acceptable_stale)
+            server.stat_expired_stale_perc * 100 < config_cycle_acceptable_stale)
             return;
 
         if (start < last_fast_cycle + (long long)config_cycle_fast_duration*2)
@@ -836,6 +844,7 @@ void expireGenericCommand(client *c, long long basetime, int unit) {
 
         keyModified(c,c->db,key,kv,1);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"expire",key,c->db->id);
+        KSN_INVALIDATE_KVOBJ(kv);
         server.dirty++;
         return;
     }
@@ -913,6 +922,7 @@ void persistCommand(client *c) {
         if (removeExpire(c->db,c->argv[1])) {
             keyModified(c,c->db,c->argv[1],kv,1);
             notifyKeyspaceEvent(NOTIFY_GENERIC,"persist",c->argv[1],c->db->id);
+            KSN_INVALIDATE_KVOBJ(kv);
             addReply(c,shared.cone);
             server.dirty++;
         } else {

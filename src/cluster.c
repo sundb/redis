@@ -24,6 +24,7 @@
 #include "cluster_slot_stats.h"
 
 #include <ctype.h>
+#include "bio.h"
 
 /* -----------------------------------------------------------------------------
  * Key space handling
@@ -71,6 +72,10 @@ int getSlotOrReply(client *c, robj *o) {
     return (int) slot;
 }
 
+int clusterDefaultClientPortIsTLS(void) {
+    return server.tls_cluster;
+}
+
 ConnectionType *connTypeOfCluster(void) {
     if (server.tls_cluster) {
         return connectionTypeTls();
@@ -84,20 +89,40 @@ ConnectionType *connTypeOfCluster(void) {
  * -------------------------------------------------------------------------- */
 
 /* Generates a DUMP-format representation of the object 'o', adding it to the
- * io stream pointed by 'rio'. This function can't fail. */
-void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int skip_checksum) {
+ * io stream pointed by 'rio'. Flags can omit the checksum or key metadata.
+ * This function can't fail. */
+void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int flags, size_t size_hint) {
     unsigned char buf[2];
     uint64_t crc = 0;
 
     /* Serialize the object in an RDB-like format. It consist of an object type
-     * byte followed by the serialized object. This is understood by RESTORE. */
-    rioInitWithBuffer(payload,sdsempty());
+     * byte followed by the serialized object. This is understood by RESTORE.
+     * 'size_hint', when non-zero, sizes the buffer to the caller's estimate of
+     * the payload in a single allocation to avoid reallocations. */
+    sds buffer;
+    if (size_hint) {
+        buffer = sdsnewlen(SDS_NOINIT, size_hint);
+        sdssetlen(buffer, 0);
+        buffer[0] = '\0';
+    } else {
+        buffer = sdsempty();
+    }
+    rioInitWithBuffer(payload,buffer);
+    payload->flags |= RIO_FLAG_DUMP_PAYLOAD;
 
-    /* Save key metadata if present without (handles TTL separately via command args) */
-    if (getModuleMetaBits(o->metabits))
+    /* Skip compression when the caller asked for raw bytes. */
+    int prev_comp = server.rdb_compression;
+    if (flags & DUMP_PAYLOAD_DONT_COMPRESS) server.rdb_compression = 0;
+
+    /* Save key metadata if present (TTL is handled separately via command
+     * args). AOF RESTORE payloads omit it because AOF rewrite handles module
+     * metadata separately through keyMetaOnAof(). */
+    if (!(flags & DUMP_PAYLOAD_SKIP_KEY_META) && getModuleMetaBits(o->metabits))
         serverAssert(rdbSaveKeyMetadata(payload, key, o, dbid) != -1);
     serverAssert(rdbSaveObjectType(payload,o));
     serverAssert(rdbSaveObject(payload,o,key,dbid));
+
+    server.rdb_compression = prev_comp;
 
     /* Write the footer, this is how it looks like:
      * ----------------+---------------------+---------------+
@@ -113,13 +138,22 @@ void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int skip_chec
 
     /* If crc checksum is disabled, crc is set to 0 and no checksum validation
      * will be performed on RESTORE. */
-    if (!skip_checksum) {
+    if (!(flags & DUMP_PAYLOAD_SKIP_CHECKSUM)) {
         /* CRC64 */
         crc = crc64(0,(unsigned char*)payload->io.buffer.ptr,
                     sdslen(payload->io.buffer.ptr));
         memrev64ifbe(&crc);
     }
     payload->io.buffer.ptr = sdscatlen(payload->io.buffer.ptr,&crc,8);
+}
+
+/* CRC-less, compression-less DUMP payload for RESTORE; returns an sds the caller
+ * owns. size_hint (if nonzero) presizes. */
+sds createRawDumpPayload(robj *o, robj *key, int dbid, int flags, size_t size_hint) {
+    rio payload;
+    createDumpPayload(&payload, o, key, dbid,
+                      DUMP_PAYLOAD_SKIP_CHECKSUM | DUMP_PAYLOAD_DONT_COMPRESS | flags, size_hint);
+    return payload.io.buffer.ptr;
 }
 
 /* Verify that the RDB version of the dump payload matches the one of this Redis
@@ -171,7 +205,7 @@ void dumpCommand(client *c) {
     }
 
     /* Create the DUMP encoded representation. */
-    createDumpPayload(&payload,o,c->argv[1],c->db->id,0);
+    createDumpPayload(&payload,o,c->argv[1],c->db->id,0,0);
 
     /* Transfer to the client */
     addReplyBulkSds(c,payload.io.buffer.ptr);
@@ -221,9 +255,7 @@ void restoreCommand(client *c) {
 
     /* Make sure this key does not already exist here... */
     robj *key = c->argv[1];
-    kvobj *oldval = lookupKeyWrite(c->db,key);
-    int oldtype = oldval ? oldval->type : -1;
-    if (!replace && oldval) {
+    if (!replace && lookupKeyWrite(c->db,key) != NULL) {
         addReplyErrorObject(c,shared.busykeyerr);
         return;
     }
@@ -244,6 +276,7 @@ void restoreCommand(client *c) {
     }
 
     rioInitWithBuffer(&payload,c->argv[3]->ptr);
+    payload.flags |= RIO_FLAG_DUMP_PAYLOAD;
 
     /* Initialize metadata spec to collect metadata+expiry from payload. */
     KeyMetaSpec keymeta;
@@ -270,10 +303,21 @@ void restoreCommand(client *c) {
         return;
     }
 
-    /* Remove the old key if needed. */
+    /* Resolve the key's existence and its insertion link. On the common new-key
+     * path dbAddInternal() below reuses the link instead of probing again. */
+    dictEntryLink link = NULL;
+    kvobj *oldval = lookupKeyWriteWithLink(c->db, key, &link);
+    int oldtype = oldval ? oldval->type : -1;
+
+    /* Call dbDelete() only when a key is actually present:
+     *   oldval != NULL -> key exists.
+     *   link  == NULL  -> an expired key might still be physically present and 
+     *                     must be deleted. */
     int deleted = 0;
-    if (replace)
+    if (replace && (oldval || !link)) {
         deleted = dbDelete(c->db,key);
+        link = NULL; /* dbDelete invalidated the link */
+    }
 
     if (ttl && checkAlreadyExpired(ttl)) {
         if (deleted) {
@@ -283,6 +327,8 @@ void restoreCommand(client *c) {
             notifyKeyspaceEvent(NOTIFY_GENERIC,"del",key,c->db->id);
             server.dirty++;
         }
+        /* Update the stats, see setGenericCommand for details. */
+        server.stat_expiredkeys++;
         keyMetaSpecCleanup(&keymeta);
         decrRefCount(obj);
         addReply(c, shared.ok);
@@ -290,15 +336,21 @@ void restoreCommand(client *c) {
     }
 
     /* Create the key and set the TTL if any */
-    kvobj *kv = dbAddInternal(c->db, key, &obj, NULL, &keymeta);
+    kvobj *kv = dbAddInternal(c->db, key, &obj, &link, &keymeta);
+
+    /* Save type: kv may be reallocated by module callbacks during notifyKeyspaceEvent below. */
+    int kvtype = kv->type;
 
     /* If minExpiredField was set, then the object is hash with expiration
      * on fields and need to register it in global HFE DS */
-    if (kv->type == OBJ_HASH) {
+    if (kvtype == OBJ_HASH) {
         uint64_t minExpiredField = hashTypeGetMinExpire(kv, 1);
         if (minExpiredField != EB_EXPIRE_TIME_INVALID)
             estoreAdd(c->db->subexpires, getKeySlot(key->ptr), kv, minExpiredField);
     }
+
+    if (kvtype == OBJ_STREAM)
+        streamKeyLoaded(c->db, key, kv);
 
     if (ttl) {
         if (!absttl) {
@@ -312,12 +364,13 @@ void restoreCommand(client *c) {
     objectSetLRUOrLFU(kv, lfu_freq, lru_idle, lru_clock, 1000);
     keyModified(c,c->db,key,NULL,1);
     notifyKeyspaceEvent(NOTIFY_GENERIC,"restore",key,c->db->id);
+    KSN_INVALIDATE_KVOBJ(kv);
 
     /* If we deleted a key that means REPLACE parameter was passed and the
      * destination key existed. */
     if (deleted) {
         notifyKeyspaceEvent(NOTIFY_OVERWRITTEN, "overwritten", key, c->db->id);
-        if (oldtype != kv->type) {
+        if (oldtype != kvtype) {
             notifyKeyspaceEvent(NOTIFY_TYPE_CHANGED, "type_changed", key, c->db->id);
         }
     }
@@ -602,7 +655,7 @@ void migrateCommand(client *c) {
 
         /* Emit the payload argument, that is the serialized object using
          * the DUMP format. */
-        createDumpPayload(&payload,kvArray[j],keyArray[j],dbid,0);
+        createDumpPayload(&payload,kvArray[j],keyArray[j],dbid,0,0);
         serverAssertWithInfo(c,NULL,
                              rioWriteBulkString(&cmd,payload.io.buffer.ptr,
                                                 sdslen(payload.io.buffer.ptr)));
@@ -794,7 +847,12 @@ int verifyClusterNodeId(const char *name, int length) {
 }
 
 int isValidAuxChar(int c) {
-    return isalnum(c) || (strchr("!#$%&()*+:;<>?@[]^{|}~", c) == NULL);
+    /* Reject control characters (0x00-0x1F and 0x7F). */
+    if (iscntrl(c)) {
+        return 0;
+    }
+    /* Reject forbidden characters including nodes.conf delimiters and special parsing characters */
+    return isalnum(c) || (strchr("!#$%&()*+:;<>?@[]^{|}~,= \"'\\", c) == NULL);
 }
 
 int isValidAuxString(char *s, unsigned int length) {
@@ -831,17 +889,28 @@ void clusterCommandMyShardId(client *c) {
  * a Lua script or RM_call, there is no connection in the fake client, so we use
  * server.current_client here to get the real client if available. And if it is not
  * available (modules may call commands without a real client), we return the default
- * info, which is determined by server.tls_cluster. */
+ * info, which is determined by clusterDefaultClientPortIsTLS(). */
 static int shouldReturnTlsInfo(void) {
     if (server.current_client && server.current_client->conn) {
         return connIsTLS(server.current_client->conn);
     } else {
-        return server.tls_cluster;
+        return clusterDefaultClientPortIsTLS();
     }
 }
 
 unsigned int countKeysInSlot(unsigned int slot) {
     return kvstoreDictSize(server.db->keys, slot);
+}
+
+void removeChannelsInSlot(unsigned int slot) {
+    if (countChannelsInSlot(slot) == 0) return;
+
+    pubsubShardUnsubscribeAllChannelsInSlot(slot);
+}
+
+/* Get the count of the channels for a given slot. */
+unsigned int countChannelsInSlot(unsigned int hashslot) {
+    return kvstoreDictSize(server.pubsubshard_channels, hashslot);
 }
 
 /* Add detailed information of a node to the output buffer of the given client. */
@@ -1175,6 +1244,8 @@ int extractSlotFromKeysResult(robj **argv, getKeysResult *keys_result) {
  * already "down" but it is fragile to rely on the update of the global state,
  * so we also handle it here.
  *
+ * CLUSTER_REDIR_TRIMMING if the request addresses a slot that is being trimmed.
+ *
  * CLUSTER_REDIR_DOWN_STATE and CLUSTER_REDIR_DOWN_RO_STATE if the cluster is
  * down but the user attempts to execute a command that addresses one or more keys. */
 clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, int argc, int *hashslot,
@@ -1265,6 +1336,7 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
             /* The command has keys and was checked for cross-slot between its keys in preprocessCommand() */
             if (pcmd->read_error == CLIENT_READ_CROSS_SLOT) {
                 /* Error: multiple keys from different slots. */
+                if (!use_cache_keys_result) getKeysFreeResult(&result);
                 if (error_code)
                     *error_code = CLUSTER_REDIR_CROSS_SLOT;
                 return NULL;
@@ -1416,6 +1488,15 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
         return myself;
     }
 
+    /* If this node is responsible for the slot and is currently trimming it,
+     * SFLUSH may have triggered active trimming and it could still be in progress.
+     * Here we reject any write commands as no writes should be accepted for
+     * trimming slots while active trimming is in progress. */
+    if (n == myself && is_write_command && isSlotInTrimJob(slot)) {
+        if (error_code) *error_code = CLUSTER_REDIR_TRIMMING;
+        return NULL;
+    }
+
     /* Base case: just return the right node. However, if this node is not
      * myself, set error_code to MOVED since we need to issue a redirection. */
     if (n != myself && error_code) *error_code = CLUSTER_REDIR_MOVED;
@@ -1452,6 +1533,8 @@ void clusterRedirectClient(client *c, clusterNode *n, int hashslot, int error_co
                                         "-%s %d %s:%d",
                                         (error_code == CLUSTER_REDIR_ASK) ? "ASK" : "MOVED",
                                         hashslot, clusterNodePreferredEndpoint(n), port));
+    } else if (error_code == CLUSTER_REDIR_TRIMMING) {
+        addReplyError(c,"-TRYAGAIN Slot is being trimmed");
     } else {
         serverPanic("getNodeByQuery() unknown error.");
     }
@@ -1472,6 +1555,7 @@ int clusterRedirectBlockedClientIfNeeded(client *c) {
     clusterNode *myself = getMyClusterNode();
     if (c->flags & CLIENT_BLOCKED &&
         (c->bstate.btype == BLOCKED_LIST ||
+         c->bstate.btype == BLOCKED_LIST_NONEMPTY ||
          c->bstate.btype == BLOCKED_ZSET ||
          c->bstate.btype == BLOCKED_STREAM ||
          c->bstate.btype == BLOCKED_MODULE))
@@ -1717,7 +1801,7 @@ unsigned int clusterDelKeysInSlot(unsigned int hashslot, int by_command) {
              * just moved to another node. The modules needs to know that these
              * keys are no longer available locally, so just send the keyspace
              * notification to the modules, but not to clients. */
-            moduleNotifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, server.db[0].id);
+            moduleNotifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, server.db[0].id, NULL, 0);
         }
         exitExecutionUnit();
         postExecutionUnitOperations();
@@ -1744,14 +1828,13 @@ int clusterIsMySlot(int slot) {
     return getMyClusterNode() == getNodeBySlot(slot);
 }
 
-void replySlotsFlushAndFree(client *c, slotRangeArray *slots) {
+void replySlotsFlush(client *c, slotRangeArray *slots) {
     addReplyArrayLen(c, slots->num_ranges);
     for (int i = 0 ; i < slots->num_ranges ; i++) {
         addReplyArrayLen(c, 2);
         addReplyLongLong(c, slots->ranges[i].start);
         addReplyLongLong(c, slots->ranges[i].end);
     }
-    slotRangeArrayFree(slots);
 }
 
 /* Normalizes (sorts and merges adjacent ranges), checks that slot ranges are
@@ -1973,6 +2056,19 @@ void slotRangeArrayFreeGeneric(void *slots) {
     slotRangeArrayFree(slots);
 }
 
+/* Returns the number of keys in the given slot ranges. */
+unsigned long long getKeyCountInSlotRangeArray(slotRangeArray *slots) {
+    if (!slots) return 0;
+
+    unsigned long long key_count = 0;
+    for (int i = 0; i < slots->num_ranges; i++) {
+        for (int j = slots->ranges[i].start; j <= slots->ranges[i].end; j++) {
+            key_count += countKeysInSlot(j);
+        }
+    }
+    return key_count;
+}
+
 /* Slot range array iterator */
 slotRangeArrayIter *slotRangeArrayGetIterator(slotRangeArray *slots) {
     slotRangeArrayIter *it = zmalloc(sizeof(*it));
@@ -2066,17 +2162,26 @@ int clusterCanAccessKeysInSlot(int slot) {
     return 0;
 }
 
-/* Return the slot ranges that belong to the current node or its master. */
+/* Return the slot ranges that belong to the current node or its master.
+ * In non-cluster mode, returns the full slot range (0-16383). */
 slotRangeArray *clusterGetLocalSlotRanges(void) {
-    slotRangeArray *slots = NULL;
-
     if (!server.cluster_enabled) {
-        slots = slotRangeArrayCreate(1);
+        slotRangeArray *slots = slotRangeArrayCreate(1);
         slotRangeArraySet(slots, 0, 0, CLUSTER_SLOTS - 1);
         return slots;
     }
 
-    clusterNode *master = clusterNodeGetMaster(getMyClusterNode());
+    return clusterGetNodeSlotRanges(getMyClusterNode());
+}
+
+/* Returns the slot ranges owned by the given node.
+ * If the node is a replica, the master's slot ranges are returned.
+ * Returns an empty array if the node has no slots. */
+slotRangeArray *clusterGetNodeSlotRanges(clusterNode *node) {
+    slotRangeArray *slots = NULL;
+
+    serverAssert(server.cluster_enabled && node != NULL);
+    clusterNode *master = clusterNodeGetMaster(node);
     if (master) {
         for (int i = 0; i < CLUSTER_SLOTS; i++) {
             if (clusterNodeCoversSlot(master, i))
@@ -2090,16 +2195,18 @@ slotRangeArray *clusterGetLocalSlotRanges(void) {
  *
  * Usage: SFLUSH <start-slot> <end slot> [<start-slot> <end slot>]* [SYNC|ASYNC]
  *
- * This is an initial implementation of SFLUSH (slots flush) which is limited to
- * flushing a single shard as a whole, but in the future the same command may be
- * used to partially flush a shard based on hash slots. Currently only if provided
- * slots cover entirely the slots of a node, the node will be flushed and the
- * return value will be pairs of slot ranges. Otherwise, a single empty set will 
- * be returned. If possible, SFLUSH SYNC will be run as blocking ASYNC as an 
+ * Redis will flush the slots that belong to this node and reply with the flushed 
+ * slot ranges. If no slot is flushed, an empty array will be returned.
+ * 
+ * e.g. Node owns slot 100-200, user issues SFLUSH 50 150
+ * Redis will flush slot 100-150 and reply with [100,150]
+ * 
+ * If possible, SFLUSH SYNC will be run as blocking ASYNC as an 
  * optimization.
  */
 void sflushCommand(client *c) {
     int flags = EMPTYDB_NO_FLAGS, argc = c->argc;
+    int trim_method = ASM_TRIM_METHOD_NONE;
 
     if (server.cluster_enabled == 0) {
         addReplyError(c,"This instance has cluster support disabled");
@@ -2127,40 +2234,87 @@ void sflushCommand(client *c) {
     slotRangeArray *slots = parseSlotRangesOrReply(c, argc, 1);
     if (!slots) return;
 
+    /* If client is AOF or master, we must obey the slot ranges. */
+    int must_obey = mustObeyClient(c);
+
     /* Iterate and find the slot ranges that belong to this node. Save them in
      * a new slotRangeArray. It is allocated on heap since there is a chance
      * that FLUSH SYNC will be running as blocking ASYNC and only later reply
      * with slot ranges */
-    unsigned char slots_to_flush[CLUSTER_SLOTS] = {0}; /* Requested slots to flush */
     slotRangeArray *myslots = NULL;
     for (int i = 0; i < slots->num_ranges; i++) {
         for (int j = slots->ranges[i].start; j <= slots->ranges[i].end; j++) {
-            if (clusterIsMySlot(j)) {
+            if (must_obey || clusterIsMySlot(j)) {
                 myslots = slotRangeArrayAppend(myslots, j);
-                slots_to_flush[j] = 1;
             }
         }
     }
 
-    /* Verify that all slots of mynode got covered. See sflushCommand() comment. */
-    int all_slots_covered = 1;
-    for (int i = 0; i < CLUSTER_SLOTS; i++) {
-        if (clusterIsMySlot(i) && !slots_to_flush[i]) {
-            all_slots_covered = 0;
-            break;
-        }
-    }
-    if (myslots == NULL || !all_slots_covered) {
+    /* If no slots belong to this node, return empty array. */
+    if (myslots == NULL) {
         addReplyArrayLen(c, 0);
         slotRangeArrayFree(slots);
-        slotRangeArrayFree(myslots);
         return;
     }
     slotRangeArrayFree(slots);
+    
+    /* takes ownership of myslots */
+    asmTrimCtx *trim_ctx = asmTrimCtxCreate(myslots, server.db[0].keys);
 
-    /* Flush selected slots. If not flush as blocking async, then reply immediately */
-    if (flushCommandCommon(c, FLUSH_TYPE_SLOTS, flags, myslots) == 0)
-        replySlotsFlushAndFree(c, myslots);
+    /* If the selected slots are exactly the same as the local slots, we can
+     * simply flush the entire DB by flushCommandCommon. */
+    slotRangeArray *local_slots = clusterGetLocalSlotRanges();
+    int all_slots_covered = slotRangeArrayIsEqual(myslots, local_slots);
+    slotRangeArrayFree(local_slots);
+    if (all_slots_covered) {
+        /* If not flush as blocking async, then reply immediately */
+        if (flushCommandCommon(c, FLUSH_TYPE_SLOTS, flags, trim_ctx) == 0) {
+            replySlotsFlush(c, trim_ctx->slots);
+        }
+        asmTrimCtxRelease(trim_ctx);
+        return;
+    }
+
+    /* Cancel all ASM tasks that overlap with the given slot ranges. */
+    clusterAsmCancelBySlotRangeArray(myslots, c->argv[0]->ptr);
+
+    /* In case of SYNC, check if we can optimize and run it in bg as blocking ASYNC */
+    int blocking_async = 0;
+    if ((!(flags & EMPTYDB_ASYNC)) && (!(c->flags & CLIENT_AVOID_BLOCKING_ASYNC_FLUSH))) {
+        flags |= EMPTYDB_ASYNC; /* Run as ASYNC */
+        blocking_async = 1;
+    }
+
+    /* Trim the slots if running in async mode and not loading from AOF,
+     * otherwise delete the keys synchronously. */
+    if (flags & EMPTYDB_ASYNC && server.loading == 0) {
+        /* Update dirty stats before trimming. */
+        server.dirty += getKeyCountInSlotRangeArray(myslots);
+        /* Pass client id for active trim to unblock client when trim completes. */
+        trim_method = asmTrimSlots(trim_ctx, blocking_async ? c->id : CLIENT_ID_NONE, 0);
+    } else {
+        clusterDelKeysInSlotRangeArray(myslots, 1);
+    }
+
+    /* Without the forceCommandPropagation, when DB was already empty,
+     * SFLUSH will not be replicated nor put into the AOF. */
+    forceCommandPropagation(c, PROPAGATE_REPL | PROPAGATE_AOF);
+
+    /* Handle waiting for trim job to complete in case of blocking async flush.
+     * Block the client and schedule completion callback based on trim method:
+     * - BG trim uses BIO lazyfree worker to trim the slots, so schedule a new
+     *   BIO lazyfree worker to wait for completion, then unblock client and reply.
+     * - Active trim works in cron job of the main thread, it will automatically
+     *   unblock client and reply in active trim completion. */
+    if (blocking_async && trim_method != ASM_TRIM_METHOD_NONE) {
+        blockClientForAsyncFlush(c);
+    } else {
+        /* Reply with slot ranges that were flushed. SYNC and ASYNC mode will be
+         * replied here immediately. */
+        replySlotsFlush(c, trim_ctx->slots);
+    }
+
+    asmTrimCtxRelease(trim_ctx); /* if bg trim, released later by kvsAsyncFreeDoneCB() */
 }
 
 /* The READWRITE command just clears the READONLY command state. */
@@ -2260,4 +2414,92 @@ int verifyClusterConfigWithData(void) {
     /* Delete keys in unowned slots */
     clusterDeleteKeysInUnownedSlots();
     return C_OK;
+}
+
+/* Notify Redis that the cluster topology changed. (cluster impl --> redis)
+ *
+ * When CLUSTER_TOPOLOGY_CHANGE_FLAG_SLOT is set, arg points to a
+ * slotRangeArray identifying the changed slots. If arg is NULL,
+ * all slots are checked against the current topology.
+ */
+int clusterNotifyTopologyChanged(int flags, void *arg) {
+    if (!server.cluster_enabled) return C_OK;
+    server.cluster_topology_change_flags |= flags;
+
+    if (flags & CLUSTER_TOPOLOGY_CHANGE_FLAG_SLOT) {
+        clusterNode *myself = getMyClusterNode();
+        if (!myself) return C_OK; /* The local cluster node is not initialized. */
+        clusterNode *master = clusterNodeGetMaster(myself);
+        slotRangeArray *changed_slots = arg;
+        int num_ranges = changed_slots ? changed_slots->num_ranges : 1;
+
+        for (int i = 0; i < num_ranges; i++) {
+            /* Without a changed-slot list, check every slot. */
+            int start = changed_slots ? changed_slots->ranges[i].start : 0;
+            int end = changed_slots ? changed_slots->ranges[i].end : CLUSTER_SLOTS-1;
+
+            for (int slot = start; slot <= end; slot++) {
+                int owned = master && clusterNodeCoversSlot(master, slot);
+
+                /* Per-slot state remains valid while this shard owns the slot. */
+                if (owned) continue;
+
+                /* Statistics and subscriptions are stale once this shard no longer
+                 * owns the slot. */
+                clusterSlotStatReset(slot);
+                removeChannelsInSlot(slot);
+            }
+        }
+    }
+
+    /* Cancel ASM tasks that are no longer valid in the updated topology. */
+    if (flags & (CLUSTER_TOPOLOGY_CHANGE_FLAG_NODE |
+                 CLUSTER_TOPOLOGY_CHANGE_FLAG_ROLE))
+    {
+        clusterAsmCancelInvalidTasks();
+    }
+
+    return C_OK;
+}
+
+/* Fire the cluster topology-change notification to modules, if one is pending.
+ * Called once per event-loop iteration from clusterCommonBeforeSleep().
+ * Topology mutation paths record the relevant reasons, including slot, role,
+ * node, and OK/FAIL state changes. This debounces a reshuffle that touches many
+ * slots into a single notification, and reports every reason that contributed
+ * via the change_flags bitmask in the event data. The check here makes redundant
+ * calls a harmless no-op.
+ *
+ * The cluster first becoming ready is delivered through this same path: the
+ * OK/FAIL transition records a STATE reason (slot assignment at startup records
+ * a SLOT reason too), so no dedicated "startup" notification is needed. */
+static void clusterFireTopologyChangeEventIfNeeded(void) {
+    if (!server.cluster_topology_change_flags) return;
+
+    uint64_t module_flags = 0;
+    if (server.cluster_topology_change_flags & CLUSTER_TOPOLOGY_CHANGE_FLAG_SLOT)
+        module_flags |= REDISMODULE_CLUSTER_TOPOLOGY_CHANGE_FLAG_SLOT;
+    if (server.cluster_topology_change_flags & CLUSTER_TOPOLOGY_CHANGE_FLAG_ROLE)
+        module_flags |= REDISMODULE_CLUSTER_TOPOLOGY_CHANGE_FLAG_ROLE;
+    if (server.cluster_topology_change_flags & CLUSTER_TOPOLOGY_CHANGE_FLAG_STATE)
+        module_flags |= REDISMODULE_CLUSTER_TOPOLOGY_CHANGE_FLAG_STATE;
+    if (server.cluster_topology_change_flags & CLUSTER_TOPOLOGY_CHANGE_FLAG_NODE)
+        module_flags |= REDISMODULE_CLUSTER_TOPOLOGY_CHANGE_FLAG_NODE;
+
+    /* No data payload beyond the change reasons: a subscribing module reads
+     * whatever else it needs about the new topology via the cluster info module
+     * APIs (CLUSTER SLOTS, RedisModule_GetClusterNodesList/NodeInfo,
+     * RedisModule_GetClusterSize, ...). */
+    RedisModuleClusterTopologyChangeInfo info = {
+        .version = REDISMODULE_CLUSTER_TOPOLOGY_CHANGE_INFO_VERSION,
+        .change_flags = module_flags,
+    };
+    server.cluster_topology_change_flags = 0;
+    moduleFireServerEvent(REDISMODULE_EVENT_CLUSTER_TOPOLOGY_CHANGE, 0, &info);
+}
+
+/* Handle common cluster work after cluster implementation-specific beforeSleep(). */
+void clusterCommonBeforeSleep(void) {
+    asmBeforeSleep();
+    clusterFireTopologyChangeEventIfNeeded();
 }
