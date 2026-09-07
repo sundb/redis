@@ -147,6 +147,30 @@ void setGenericCommand(client *c, int flags, robj *key, robj **valref, robj *exp
         }
     }
 
+    /* If the expire time is already elapsed, we don't need to add the key,
+     * but we still need to update the stats, and we also need to delete the
+     * key if it exists.
+     *
+     * From stats perspective, we behave as if we inserted a new key (possibly
+     * an overwrite) and later expired it, but from the per-key KSN observability,
+     * we reflect what we've actually done in the db (deletion of old key, and
+     * no insertion of new one), so we don't confuse modules. */
+    if (expire && checkAlreadyExpired(milliseconds)) {
+        if (found) {
+            dbDelete(c->db, key);
+            robj *aux = server.lazyfree_lazy_server_del ? shared.unlink : shared.del;
+            rewriteClientCommandVector(c, 2, aux, key);
+            keyModified(c, c->db, key, NULL, 1);
+            notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, c->db->id);
+            server.dirty++;
+        }
+        server.stat_expiredkeys++;
+        if (!(flags & OBJ_SET_GET)) {
+            addReply(c, ok_reply ? ok_reply : shared.ok);
+        }
+        return;
+    }
+
     /* When expire is not NULL, we avoid deleting the TTL so it can be updated later instead of being deleted and then created again. */
     setkey_flags |= ((flags & OBJ_KEEPTTL) || expire) ? SETKEY_KEEPTTL : 0;
     setkey_flags |= found ? SETKEY_ALREADY_EXIST : SETKEY_DOESNT_EXIST;
@@ -608,11 +632,11 @@ void setrangeCommand(client *c) {
 
     if (value_len > 0) {
         size_t oldsize = 0;
-        if (server.memory_tracking_per_slot)
-            oldsize = stringObjectAllocSize(kv);
+        if (server.memory_tracking_enabled)
+            oldsize = kvobjAllocSize(kv);
         kv->ptr = sdsgrowzero(kv->ptr,offset+value_len);
-        if (server.memory_tracking_per_slot)
-            updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), oldsize, stringObjectAllocSize(kv));
+        if (server.memory_tracking_enabled)
+            updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), kv, oldsize, kvobjAllocSize(kv));
         memcpy((char*)kv->ptr+offset,value,value_len);
         keyModified(c,c->db,c->argv[1],kv,1);
         notifyKeyspaceEvent(NOTIFY_STRING,
@@ -927,11 +951,11 @@ void appendCommand(client *c) {
 
         /* Append the value */
         o = dbUnshareStringValueByLink(c->db,c->argv[1],o,link);
-        if (server.memory_tracking_per_slot)
-            oldsize = stringObjectAllocSize(o);
+        if (server.memory_tracking_enabled)
+            oldsize = kvobjAllocSize(o);
         o->ptr = sdscatlen(o->ptr,append->ptr,append_len);
-        if (server.memory_tracking_per_slot)
-            updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), oldsize, stringObjectAllocSize(o));
+        if (server.memory_tracking_enabled)
+            updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), o, oldsize, kvobjAllocSize(o));
         totlen = sdslen(o->ptr);
         int64_t oldlen = totlen - append_len;
         updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_STRING, oldlen, totlen);

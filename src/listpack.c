@@ -123,7 +123,7 @@ static inline void lpAssertValidEntry(unsigned char* lp, size_t lpbytes, unsigne
 #define LISTPACK_MAX_SAFETY_SIZE (1<<30)
 int lpSafeToAdd(unsigned char* lp, size_t add) {
     size_t len = lp? lpGetTotalBytes(lp): 0;
-    if (len + add > LISTPACK_MAX_SAFETY_SIZE)
+    if (add > LISTPACK_MAX_SAFETY_SIZE || len > LISTPACK_MAX_SAFETY_SIZE - add)
         return 0;
     return 1;
 }
@@ -388,18 +388,49 @@ static inline unsigned long lpEncodeBacklenBytes(uint64_t l) {
 }
 
 /* Decode the backlen and returns it. If the encoding looks invalid (more than
- * 5 bytes are used), UINT64_MAX is returned to report the problem. */
+ * 5 bytes are used), UINT64_MAX is returned to report the problem.
+ *
+ * Optimized for the common case: most backlen values fit in one or two bytes
+ * due to listpack size limits. This version avoids a loop and pointer
+ * mutation, reducing overhead in hot paths while keeping the same encoding
+ * semantics.
+ *
+ * Note: the caller guarantees that up to 5 bytes preceding 'p' are readable,
+ * as ensured by listpack invariants. */
 static inline uint64_t lpDecodeBacklen(unsigned char *p) {
-    uint64_t val = 0;
-    uint64_t shift = 0;
-    do {
-        val |= (uint64_t)(p[0] & 127) << shift;
-        if (!(p[0] & 128)) break;
-        shift += 7;
-        p--;
-        if (shift > 28) return UINT64_MAX;
-    } while(1);
-    return val;
+    uint64_t val;
+
+    /* Fast path: single byte (most common for small entries <= 127 bytes) */
+    if (likely(!(p[0] & 128))) {
+        return p[0] & 127;
+    }
+
+    /* Two bytes */
+    val = (uint64_t)(p[0] & 127);
+    if (!(p[-1] & 128)) {
+        return val | ((uint64_t)(p[-1] & 127) << 7);
+    }
+
+    /* Three bytes */
+    val |= (uint64_t)(p[-1] & 127) << 7;
+    if (!(p[-2] & 128)) {
+        return val | ((uint64_t)(p[-2] & 127) << 14);
+    }
+
+    /* Four bytes */
+    val |= (uint64_t)(p[-2] & 127) << 14;
+    if (!(p[-3] & 128)) {
+        return val | ((uint64_t)(p[-3] & 127) << 21);
+    }
+
+    /* Five bytes */
+    val |= (uint64_t)(p[-3] & 127) << 21;
+    if (!(p[-4] & 128)) {
+        return val | ((uint64_t)(p[-4] & 127) << 28);
+    }
+
+    /* Invalid: more than 5 bytes */
+    return UINT64_MAX;
 }
 
 /* Encode the string element pointed by 's' of size 'len' in the target

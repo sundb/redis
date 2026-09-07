@@ -780,6 +780,8 @@ ssize_t rdbSaveStreamPEL(rio *rdb, rax *pel, int nacks) {
 
 /* Serialize the IDMP entries for a stream into the RDB file.
  * This saves all the idempotent producer tracking entries (IID -> stream ID mappings).
+ * Expired entries are filtered out. Producers whose entries all expired are still
+ * written with count=0; the load side skips them.
  * Format: num_producers, then for each producer: pid, num_entries, entries... */
 ssize_t rdbSaveStreamIdmpEntries(rio *rdb, stream *s) {
     ssize_t n, nwritten = 0;
@@ -790,6 +792,8 @@ ssize_t rdbSaveStreamIdmpEntries(rio *rdb, stream *s) {
     nwritten += n;
 
     if (num_producers == 0) return nwritten;
+
+    uint64_t expire_time = server.mstime - (s->idmp_duration * 1000);
 
     /* Iterate through all producers. */
     raxIterator ri;
@@ -805,16 +809,25 @@ ssize_t rdbSaveStreamIdmpEntries(rio *rdb, stream *s) {
         }
         nwritten += n;
 
+        /* Find the first non-expired entry. The linked list is ordered by
+         * timestamp, so all entries after the first valid one are also valid. */
+        idmpEntry *first_valid = producer->idmp_head;
+        size_t expired = 0;
+        while (first_valid && first_valid->id.ms <= expire_time) {
+            first_valid = first_valid->next;
+            expired++;
+        }
+
         /* Save the number of entries for this producer. */
-        size_t count = dictSize(producer->idmp_dict);
+        size_t count = dictSize(producer->idmp_dict) - expired;
         if ((n = rdbSaveLen(rdb, count)) == -1) {
             raxStop(&ri);
             return -1;
         }
         nwritten += n;
 
-        /* Iterate through the linked list and save each entry in insertion order. */
-        idmpEntry *entry = producer->idmp_head;
+        /* Save each non-expired entry in insertion order. */
+        idmpEntry *entry = first_valid;
         while (entry != NULL) {
             /* Save the IID string (length + data). */
             if ((n = rdbSaveRawString(rdb,(unsigned char *)entry->iid,entry->iid_len)) == -1) {
@@ -855,24 +868,34 @@ int rdbLoadStreamIdmpEntries(rio *rdb, stream *s) {
 
     if (num_producers == 0) return 0;
 
+    uint64_t expire_time = server.mstime - (s->idmp_duration * 1000);
+
     /* Create the producers rax tree. */
-    s->idmp_producers = raxNew();
+    s->idmp_producers = raxNewWithMetadata(0, &s->alloc_size);
     if (s->idmp_producers == NULL) {
         return -1;
     }
 
+    /* Track pid across error paths so cleanup can free it. */
+    char *pid = NULL;
+    size_t pid_len = 0;
+
     /* Load each producer. */
     for (uint64_t p = 0; p < num_producers; p++) {
         /* Load the producer ID (pid). */
-        size_t pid_len;
-        char *pid = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, &pid_len);
+        pid = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, &pid_len);
         if (pid == NULL) goto cleanup;
 
         /* Load the number of entries for this producer. */
         uint64_t count = rdbLoadLen(rdb, NULL);
-        if (count == RDB_LENERR) {
+        if (count == RDB_LENERR) goto cleanup;
+
+        /* Skip producers with 0 entries (written by save when all entries
+         * were expired). Just consume the RDB data and move on. */
+        if (count == 0) {
             sdsfree(pid);
-            goto cleanup;
+            pid = NULL;
+            continue;
         }
 
         /* Create the producer. */
@@ -880,7 +903,6 @@ int rdbLoadStreamIdmpEntries(rio *rdb, stream *s) {
 
         /* Insert producer into rax tree. */
         int inserted = raxTryInsert(s->idmp_producers, (unsigned char *)pid, pid_len, producer, NULL);
-        sdsfree(pid);
         if (!inserted) {
             idmpProducerFree(producer, &s->alloc_size);
             goto cleanup;
@@ -900,6 +922,12 @@ int rdbLoadStreamIdmpEntries(rio *rdb, stream *s) {
             if (rioGetReadError(rdb)) {
                 sdsfree(iid);
                 goto cleanup;
+            }
+
+            /* Skip entries that have already expired. */
+            if (id.ms <= expire_time) {
+                sdsfree(iid);
+                continue;
             }
 
             /* Create the idmpEntry. */
@@ -926,10 +954,26 @@ int rdbLoadStreamIdmpEntries(rio *rdb, stream *s) {
                 }
             }
         }
+
+        /* If all entries were expired, remove the empty producer. */
+        if (producer->idmp_head == NULL) {
+            raxRemove(s->idmp_producers, (unsigned char *)pid, pid_len, NULL);
+            idmpProducerFree(producer, &s->alloc_size);
+        }
+        sdsfree(pid);
+        pid = NULL;
     }
+
+    /* If no producers remain after filtering, free the rax tree. */
+    if (raxSize(s->idmp_producers) == 0) {
+        raxFree(s->idmp_producers);
+        s->idmp_producers = NULL;
+    }
+
     return 0;
 
 cleanup:
+    if (pid) sdsfree(pid);
     /* Clean up partially constructed producers tree on error.
      * This prevents use-after-free when the stream is later freed. */
     if (s->idmp_producers) {
@@ -1095,8 +1139,9 @@ ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key, int dbid) {
              * O(1) instead of O(log(N)). */
             zskiplistNode *zn = zsl->tail;
             while (zn != NULL) {
+                sds ele = zslGetNodeElement(zn);
                 if ((n = rdbSaveRawString(rdb,
-                    (unsigned char*)zn->ele,sdslen(zn->ele))) == -1)
+                    (unsigned char*)ele,sdslen(ele))) == -1)
                 {
                     return -1;
                 }
@@ -1627,11 +1672,11 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter, unsigned 
 
         initStaticStringObject(key,kvobjGetKey(kv));
         expire = kvobjGetExpire(kv);
-        if (server.memory_tracking_per_slot)
+        if (server.memory_tracking_enabled)
             oldsize = kvobjAllocSize(kv);
         res = rdbSaveKeyValuePair(rdb, &key, kv, expire, dbid);
-        if (server.memory_tracking_per_slot)
-            updateSlotAllocSize(db, curr_slot, oldsize, kvobjAllocSize(kv));
+        if (server.memory_tracking_enabled)
+            updateSlotAllocSize(db, curr_slot, kv, oldsize, kvobjAllocSize(kv));
         if (res < 0) goto werr2;
         written += res;
 
@@ -2374,12 +2419,13 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
             totelelen += sdslen(sdsele);
 
             znode = zslInsert(zs->zsl,score,sdsele);
-            if (dictAdd(zs->dict,sdsele,&znode->score) != DICT_OK) {
+            if (dictAdd(zs->dict, znode, NULL) != DICT_OK) {
                 rdbReportCorruptRDB("Duplicate zset fields detected");
                 decrRefCount(o);
-                /* no need to free 'sdsele', will be released by zslFree together with 'o' */
+                sdsfree(sdsele); /* zslInsert copies the sds, so we need to free the original */
                 return NULL;
             }
+            sdsfree(sdsele); /* zslInsert copies the sds into the node, so free the original */
         }
 
         /* Convert *after* loading, since sorted sets are not stored ordered. */
@@ -2837,6 +2883,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
                             rdbReportCorruptRDB("Hash zipmap with dup elements, or big length (%u)", flen);
                             dictRelease(dupSearchDict);
                             sdsfree(field);
+                            lpFree(lp);
                             zfree(encoded);
                             o->ptr = NULL;
                             decrRefCount(o);
@@ -3231,7 +3278,9 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
                     decrRefCount(o);
                     return NULL;
                 }
-                streamNACK *nack = streamCreateNACK(s, NULL);
+                streamID nack_id;
+                streamDecodeID(rawid, &nack_id);
+                streamNACK *nack = streamCreateNACK(s, NULL, &nack_id);
                 nack->delivery_time = rdbLoadMillisecondTime(rdb,RDB_VERSION);
                 nack->delivery_count = rdbLoadLen(rdb,NULL);
                 nack->cgroup_ref_node = streamLinkCGroupToEntry(s, cgroup, rawid);
@@ -3249,9 +3298,8 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
                     return NULL;
                 }
 
-                streamID id;
-                streamDecodeID(rawid, &id);
-                raxInsertPelByTime(cgroup->pel_by_time, nack->delivery_time, &id);
+                /* Insert in sorted order since RDB entries may not be time-ordered */
+                pelListInsertSorted(cgroup, nack);
             }
 
             /* Now that we loaded our global PEL, we need to load the
@@ -3529,13 +3577,13 @@ void startLoadingFile(size_t size, char* filename, int rdbflags) {
 /* Refresh the absolute loading progress info */
 void loadingAbsProgress(off_t pos) {
     server.loading_loaded_bytes = pos;
-    updatePeakMemory(zmalloc_used_memory());
+    updatePeakMemory();
 }
 
 /* Refresh the incremental loading progress info */
 void loadingIncrProgress(off_t size) {
     server.loading_loaded_bytes += size;
-    updatePeakMemory(zmalloc_used_memory());
+    updatePeakMemory();
 }
 
 /* Update the file name currently being loaded */
@@ -3547,6 +3595,7 @@ void updateLoadingFileName(char* filename) {
 void stopLoading(int success) {
     server.loading = 0;
     server.async_loading = 0;
+    server.loading_skip_checksum = 0;
     blockingOperationEnds();
     rdbFileBeingLoaded = NULL;
 
@@ -3584,7 +3633,7 @@ void stopSaving(int success) {
 /* Track loading progress in order to serve client's from time to time
    and if needed calculate rdb checksum  */
 void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
-    if (server.rdb_checksum)
+    if (server.rdb_checksum && !server.loading_skip_checksum)
         rioGenericUpdateChecksum(r, buf, len);
     if (server.loading_process_events_interval_bytes &&
         (r->processed_bytes + len)/server.loading_process_events_interval_bytes > r->processed_bytes/server.loading_process_events_interval_bytes)
@@ -3899,6 +3948,8 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
             dbExpand(db, db_size, 0);
             dbExpandExpires(db, expires_size, 0);
             should_expand_db = 0;
+            serverLog(LL_VERBOSE, "DB %d resized: %lu key buckets, %lu expire buckets",
+                        db->id, kvstoreBuckets(db->keys), kvstoreBuckets(db->expires));
         }
 
         /* With metadata, type = RDB_OPCODE_KEY_META. Layout: [<META>,]<TYPE>,<KEY>,<VALUE> */
@@ -3929,7 +3980,7 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
              * continue loading. */
             if (error == RDB_LOAD_ERR_EMPTY_KEY) {
                 if(empty_keys_skipped++ < 10)
-                    serverLog(LL_NOTICE, "rdbLoadObject skipping empty key: %s", key);
+                    serverLog(LL_NOTICE, "rdbLoadObject skipping empty key: %s", redactLogCstr(key));
                 sdsfree(key);
             } else {
                 sdsfree(key);
@@ -3985,6 +4036,16 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
                     estoreAdd(db->subexpires, getKeySlot(key), kv, minExpiredField);
             }
 
+            /* Register streams with IDMP producers for cron-based expiration. */
+            if (kv->type == OBJ_STREAM) {
+                stream *s = kv->ptr;
+                if (s->idmp_producers != NULL) {
+                    robj *kobj = createStringObject(key, sdslen(key));
+                    if (dictAddRaw(db->stream_idmp_keys, kobj, NULL) == NULL)
+                        decrRefCount(kobj);
+                }
+            }
+
             /* Set usage information (for eviction). */
             objectSetLRUOrLFU(val,lfu_freq,lru_idle,lru_clock,1000);
 
@@ -4012,7 +4073,7 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
         uint64_t cksum, expected = rdb->cksum;
 
         if (rioRead(rdb,&cksum,8) == 0) goto eoferr;
-        if (server.rdb_checksum && !server.skip_checksum_validation) {
+        if (server.rdb_checksum && !server.loading_skip_checksum && !server.skip_checksum_validation) {
             memrev64ifbe(&cksum);
             if (cksum == 0) {
                 serverLog(LL_NOTICE,"RDB file was saved with checksum disabled: no check performed.");
@@ -4296,9 +4357,12 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
         redisSetProcTitle("redis-rdb-to-slaves");
         redisSetCpuAffinity(server.bgsave_cpulist);
 
-        /* Disable RDB compression if requested. */
+        /* Disable RDB compression and checksum in the fork child if requested.
+         * The parent's configuration is not affected. */
         if (req & SLAVE_REQ_RDB_NO_COMPRESS)
             server.rdb_compression = 0;
+        if (req & SLAVE_REQ_RDB_NO_CHECKSUM)
+            server.rdb_checksum = 0;
 
         if (req & SLAVE_REQ_SLOTS_SNAPSHOT) {
             /* Slots snapshot is required */

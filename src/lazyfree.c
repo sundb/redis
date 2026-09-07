@@ -24,7 +24,9 @@ void lazyfreeFreeDatabase(void *args[]) {
     kvstore *da1 = args[0];
     kvstore *da2 = args[1];
     estore *subexpires = args[2];
+    dict *stream_idmp_keys = args[3];
     estoreRelease(subexpires);
+    dictRelease(stream_idmp_keys);
     size_t numkeys = kvstoreSize(da1);
     kvstoreRelease(da1);
     kvstoreRelease(da2);
@@ -195,6 +197,88 @@ void freeObjAsync(robj *key, robj *obj, int dbid) {
     }
 }
 
+/* Duplicate client reply objects that reference database objects to avoid race
+ * conditions with bio threads during async flushdb.
+ *
+ * Since incrRefCount/decrRefCount are not thread-safe, and bio thread may
+ * free database objects while main thread/IO threads send client replies, we need to
+ * create independent copies of the string objects to avoid concurrent access. */
+static void protectClientReplyObjects(void) {
+    /* If there are no clients with pending ref replies, exit ASAP. */
+    if (!listLength(server.clients_with_pending_ref_reply))
+        return;
+
+    /* Pause all IO threads to safely duplicate string objects. */
+    int allpaused = 0;
+    if (server.io_threads_num > 1) {
+        serverAssert(pthread_equal(server.main_thread_id, pthread_self()));
+        allpaused = 1;
+        pauseAllIOThreads();
+    }
+
+    listNode *ln;
+    listIter li;
+    listRewind(server.clients_with_pending_ref_reply, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        client *c = listNodeValue(ln);
+
+        /* Process c->buf if it's encoded */
+        if (c->buf_encoded && c->bufpos > 0) {
+            char *ptr = c->buf;
+            while (ptr < c->buf + c->bufpos) {
+                payloadHeader *header = (payloadHeader *)ptr;
+                ptr += sizeof(payloadHeader);
+
+                if (header->payload_type == BULK_STR_REF) {
+                    bulkStrRef *str_ref = (bulkStrRef *)ptr;
+                    if (str_ref->obj != NULL) {
+                        /* Duplicate the string object */
+                        robj *new_obj = dupStringObject(str_ref->obj);
+                        decrRefCount(str_ref->obj);
+                        str_ref->obj = new_obj;
+                    }
+                }
+                ptr += header->payload_len;
+            }
+        }
+
+        /* Process reply list */
+        if (c->reply && listLength(c->reply)) {
+            listIter reply_li;
+            listNode *reply_ln;
+            listRewind(c->reply, &reply_li);
+            while ((reply_ln = listNext(&reply_li))) {
+                clientReplyBlock *block = listNodeValue(reply_ln);
+                if (block && block->buf_encoded) {
+                    char *ptr = block->buf;
+                    while (ptr < block->buf + block->used) {
+                        payloadHeader *header = (payloadHeader *)ptr;
+                        ptr += sizeof(payloadHeader);
+
+                        if (header->payload_type == BULK_STR_REF) {
+                            bulkStrRef *str_ref = (bulkStrRef *)ptr;
+                            if (str_ref->obj != NULL) {
+                                /* Duplicate the string object */
+                                robj *new_obj = dupStringObject(str_ref->obj);
+                                decrRefCount(str_ref->obj);
+                                str_ref->obj = new_obj;
+                            }
+                        }
+                        ptr += header->payload_len;
+                    }
+                }
+            }
+        }
+
+        /* Process references in IO deferred objects and remove client from
+         * pending ref list since all refs have been duplicated above. */
+        freeClientIODeferredObjects(c, 0);
+        tryUnlinkClientFromPendingRefReply(c, 1);
+    }
+
+    if (allpaused) resumeAllIOThreads();
+}
+
 /* Empty a Redis DB asynchronously. What the function does actually is to
  * create a new empty set of hash tables and scheduling the old ones for
  * lazy freeing. */
@@ -207,16 +291,19 @@ void emptyDbAsync(redisDb *db) {
     }
     kvstore *oldkeys = db->keys, *oldexpires = db->expires;
     estore *oldsubexpires = db->subexpires;
+    dict *old_stream_idmp_keys = db->stream_idmp_keys;
     db->keys = kvstoreCreate(&kvstoreExType, &dbDictType, slot_count_bits, flags);
     db->expires = kvstoreCreate(&kvstoreBaseType, &dbExpiresDictType, slot_count_bits, flags);
     db->subexpires = estoreCreate(&subexpiresBucketsType, slot_count_bits);
-    emptyDbDataAsync(oldkeys, oldexpires, oldsubexpires);
+    db->stream_idmp_keys = dictCreate(&objectKeyPointerValueDictType);
+    protectClientReplyObjects(); /* Protect client reply objects before async free. */
+    emptyDbDataAsync(oldkeys, oldexpires, oldsubexpires, old_stream_idmp_keys);
 }
 
 /* Empty a Redis DB data asynchronously. */
-void emptyDbDataAsync(kvstore *keys, kvstore *expires, ebuckets hexpires) {
+void emptyDbDataAsync(kvstore *keys, kvstore *expires, ebuckets hexpires, dict *stream_idmp_keys) {
     atomicIncr(lazyfree_objects, kvstoreSize(keys));
-    bioCreateLazyFreeJob(lazyfreeFreeDatabase, 3, keys, expires, hexpires);
+    bioCreateLazyFreeJob(lazyfreeFreeDatabase, 4, keys, expires, hexpires, stream_idmp_keys);
 }
 
 /* Free the key tracking table.
