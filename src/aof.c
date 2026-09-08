@@ -1339,13 +1339,11 @@ void stopAppendOnly(void) {
     server.aof_last_incr_fsync_offset = 0;
 
     /* Reply holding (appendfsync bgalways): pinning fsynced_reploff to -1
-     * below disarms replyHoldWaitLocalAof()'s gate, so on the very next
-     * drainReplyHoldChunks() every chunk still parked on
-     * server.reply_hold_pending_clients would be released unconditionally --
-     * acking a write whose durability the flush/fsync above may not have
-     * actually secured (e.g. AOF was already erroring). Disconnect those
-     * clients first instead, the same way replicationSetMaster()'s demotion
-     * handling and beforeSleep's AOF-error check both do. */
+     * below would make the next drainReplyHoldChunks() release every parked
+     * chunk unconditionally, sending an OK for a write that was never
+     * actually confirmed durable (the flush/fsync above is best-effort and
+     * can fail). Disconnect those clients instead of lying to them with a
+     * false ack. */
     disconnectAllReplyHoldPendingClients("AOF disabled");
 
     server.fsynced_reploff = -1;
