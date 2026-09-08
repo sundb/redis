@@ -4430,23 +4430,35 @@ void call(client *c, int flags) {
  * If there's a transaction is flags it as dirty, and if the command is EXEC,
  * it aborts the transaction.
  * The duration is reset, since we reject the command, and it did not record.
- * Note: 'reply' is expected to end with \r\n */
+ * Note: 'reply' is expected to end with \r\n
+ *
+ * This never reaches call(), so it isn't covered by the reply-holding bracket
+ * there (appendfsync bgalways): bracket it here too, or a rejection replied
+ * while an earlier command's reply is still parked would jump the queue and
+ * reach the client out of order. Rejections never propagate, so this always
+ * resolves to either a no-op or a passthrough chunk queued behind whatever is
+ * already pending. */
 void rejectCommand(client *c, robj *reply) {
     flagTransaction(c);
     c->duration = 0;
     if (c->cmd) c->cmd->rejected_calls++;
+    long long pre_repl_offset = server.master_repl_offset;
+    replyHoldCookie reply_hold = replyHoldBegin(c);
     if (c->cmd && c->cmd->proc == execCommand) {
         execCommandAbort(c, reply->ptr);
     } else {
         /* using addReplyError* rather than addReply so that the error can be logged. */
         addReplyErrorObject(c, reply);
     }
+    replyHoldFinishByOffset(c, pre_repl_offset, &reply_hold);
 }
 
 void rejectCommandSds(client *c, sds s) {
     flagTransaction(c);
     c->duration = 0;
     if (c->cmd) c->cmd->rejected_calls++;
+    long long pre_repl_offset = server.master_repl_offset;
+    replyHoldCookie reply_hold = replyHoldBegin(c);
     if (c->cmd && c->cmd->proc == execCommand) {
         execCommandAbort(c, s);
         sdsfree(s);
@@ -4454,6 +4466,7 @@ void rejectCommandSds(client *c, sds s) {
         /* The following frees 's'. */
         addReplyErrorSds(c, s);
     }
+    replyHoldFinishByOffset(c, pre_repl_offset, &reply_hold);
 }
 
 void rejectCommandFormat(client *c, const char *fmt, ...) {
@@ -5001,7 +5014,14 @@ int processCommand(client *c) {
         c->cmd->proc != resetCommand)
     {
         queueMultiCommand(c, cmd_flags);
+        /* Queuing never propagates anything, but this reply still bypasses
+         * call() (see rejectCommand's comment above): bracket it too, so a
+         * QUEUED reply can't jump ahead of an earlier command's reply that is
+         * still parked waiting on its AOF fsync (appendfsync bgalways). */
+        long long pre_repl_offset = server.master_repl_offset;
+        replyHoldCookie reply_hold = replyHoldBegin(c);
         addReply(c,shared.queued);
+        replyHoldFinishByOffset(c, pre_repl_offset, &reply_hold);
     } else {
         int flags = CMD_CALL_FULL;
         call(c,flags);

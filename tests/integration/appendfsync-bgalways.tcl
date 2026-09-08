@@ -1234,4 +1234,114 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
         # the write).
         assert_equal 0 [s reply_hold_pending_clients]
     }
+
+    test {bgalways: a command-validation error reply stays in order behind an earlier parked reply} {
+        # rejectCommand()/rejectCommandSds() write straight into c->reply from
+        # processCommand(), entirely outside call() -- unlike a command's own
+        # reply, they weren't bracketed with
+        # replyHoldBegin/replyHoldFinishByOffset. On the same connection, an
+        # earlier write's reply can still be parked in a reply_hold_chunks
+        # chunk when a later command fails validation (unknown command, wrong
+        # arity, ...): without the bracket, the error reply lands directly in
+        # c->reply while the earlier chunk is still queued, so the client
+        # would see the error before the write's own reply -- a RESP ordering
+        # violation.
+        r set bgk_reject_warm v
+        assert_equal [r waitaof 1 0 5000] {1 0}
+
+        r debug aof-flush-force stall 1
+
+        set rd [redis_deferring_client]
+        $rd set bgk_reject v1
+        wait_for_condition 100 20 {
+            [s reply_hold_pending_clients] == 1
+        } else {
+            $rd close
+            r debug aof-flush-force stall 0
+            fail "SET did not park a chunk while fsync was stalled"
+        }
+
+        # This unknown command fails validation in processCommand(), before
+        # ever reaching call(); it propagates nothing, so it must be routed
+        # through the chunking path as a woff=0 passthrough behind the
+        # still-parked SET.
+        set before [s reply_hold_count]
+        $rd this_is_not_a_command
+        wait_for_condition 100 20 {
+            [s reply_hold_count] > $before
+        } else {
+            $rd close
+            r debug aof-flush-force stall 0
+            fail "the unknown-command error was not routed through the\
+                reply-holding path behind the still-parked SET"
+        }
+
+        # Release the stall -> both replies drain/arrive, in the order they
+        # were actually produced.
+        r debug aof-flush-force stall 0
+        assert_equal {OK} [$rd read]
+        assert_error {*unknown command*} {$rd read}
+        $rd close
+    }
+
+    test {bgalways: a MULTI-queued command's QUEUED reply stays in order behind an earlier parked reply} {
+        # queueMultiCommand()'s +QUEUED reply is added directly in
+        # processCommand(), entirely outside call() -- it wasn't bracketed
+        # either. On the same connection, an earlier write's reply can still
+        # be parked when a later command is queued inside MULTI: without the
+        # bracket, +QUEUED lands directly in c->reply while the earlier chunk
+        # is still queued, so the client would see QUEUED before the write's
+        # own reply -- a RESP ordering violation.
+        r set bgk_queued_warm v
+        assert_equal [r waitaof 1 0 5000] {1 0}
+
+        r debug aof-flush-force stall 1
+
+        set rd [redis_deferring_client]
+        $rd set bgk_queued v1
+        wait_for_condition 100 20 {
+            [s reply_hold_pending_clients] == 1
+        } else {
+            $rd close
+            r debug aof-flush-force stall 0
+            fail "SET did not park a chunk while fsync was stalled"
+        }
+
+        # MULTI's own reply is dispatched through call(), which already
+        # queues it behind the still-parked SET on its own.
+        $rd multi
+        wait_for_condition 100 20 {
+            [s reply_hold_pending_clients] == 1
+        } else {
+            $rd close
+            r debug aof-flush-force stall 0
+            fail "MULTI's own reply did not join the still-parked SET's chunk"
+        }
+
+        # Queuing this SET propagates nothing itself, so its +QUEUED reply
+        # must be routed through the chunking path as a woff=0 passthrough
+        # behind the SET and MULTI chunks ahead of it.
+        set before [s reply_hold_count]
+        $rd set bgk_queued v2
+        wait_for_condition 100 20 {
+            [s reply_hold_count] > $before
+        } else {
+            $rd close
+            r debug aof-flush-force stall 0
+            fail "the +QUEUED reply was not routed through the reply-holding\
+                path behind the still-parked SET"
+        }
+
+        $rd exec
+
+        # Release the stall -> every reply drains/arrives, in the order they
+        # were actually produced.
+        r debug aof-flush-force stall 0
+        assert_equal {OK} [$rd read]
+        assert_equal {OK} [$rd read]
+        assert_equal {QUEUED} [$rd read]
+        assert_equal {OK} [$rd read]
+        $rd close
+        assert_equal v2 [r get bgk_queued]
+    }
 }
