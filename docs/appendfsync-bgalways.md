@@ -217,6 +217,17 @@ differs from classic `always`, where data is on disk before it is ever observabl
   situation as the timeout twin above, just on the success path instead of the timeout one. It also
   propagates nothing itself, so it's bracketed the same way, with
   `replyHoldBegin`/`replyHoldFinishByOffset`.
+- **Command-validation rejections and MULTI's `+QUEUED` reply.** `rejectCommand()`/
+  `rejectCommandSds()`/`rejectCommandFormat()` (unknown command, wrong arity, ACL denial, EXEC abort,
+  ...) and `queueMultiCommand()`'s `+QUEUED` reply are both produced directly in `processCommand()`,
+  before the command ever reaches `call()` — so neither was covered by the bracket there. A rejected
+  command never actually runs, and queuing propagates nothing, so both get the same non-durability
+  bracketing as the timeout/error replies above (`replyHoldBegin`/`replyHoldFinishByOffset`, which
+  always resolves to either a no-op or a `woff = 0` passthrough for these). Without it, an error or
+  `+QUEUED` reply produced while an earlier write on the same connection is still parked would jump
+  ahead of it — the same RESP ordering violation, just reached from a different call site (see
+  `tests/integration/appendfsync-bgalways.tcl`'s "a command-validation error reply stays in order..."
+  and "a MULTI-queued command's QUEUED reply stays in order..." cases).
 - **Not gated:** keyspace notifications, pub/sub messages, and client-side-caching invalidations are
   pushed outside the command reply path and are not held; under `bgalways` they may be emitted
   slightly before the corresponding write is durable.
