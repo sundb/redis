@@ -3632,7 +3632,7 @@ void replicationSetMaster(char *ip, int port) {
      * may be rolled back by the new master (and a full resync pins
      * fsynced_reploff at -1, which would release them unchecked), so drop those
      * clients rather than answering +OK for a write that is about to vanish. */
-    disconnectAllReplyHoldPendingClients("instance demoted to replica, master_repl_offset will not advance");
+    disconnectAllSyncRepPendingClients("instance demoted to replica, master_repl_offset will not advance");
 
     /* Setting masterhost only after the call to freeClient since it calls
      * replicationHandleMasterDisconnection which can trigger a re-connect
@@ -5050,7 +5050,7 @@ void processClientsWaitingReplicas(void) {
          * connection -- same reasoning as replyToBlockedClientTimedOut()'s
          * BLOCKED_WAIT/BLOCKED_WAITAOF branches, this function's timeout twin. */
         long long pre_repl_offset = server.master_repl_offset;
-        replyHoldCookie reply_hold = replyHoldBegin(c);
+        syncReplCookie sync_rep = syncReplBeginCommand(c);
 
         /* Reply before unblocking, because unblock client calls reqresAppendResponse */
         if (is_wait_aof) {
@@ -5062,20 +5062,20 @@ void processClientsWaitingReplicas(void) {
             addReplyLongLong(c, numreplicas);
         }
 
-        replyHoldFinishByOffset(c, pre_repl_offset, &reply_hold);
+        syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
 
         unblockClient(c, 1);
     }
 
     /* Reply holding (appendfsync bgalways): drain any per-client pending chunks
-     * whose data is now durable. drainReplyHoldChunks() may unlink the client
-     * from server.reply_hold_pending_clients; listNext caches the next pointer
+     * whose data is now durable. drainSyncPendingReplies() may unlink the client
+     * from server.sync_clients_with_pending; listNext caches the next pointer
      * before returning the current node so iteration is safe across that
      * removal. */
-    listRewind(server.reply_hold_pending_clients, &li);
+    listRewind(server.sync_clients_with_pending, &li);
     while ((ln = listNext(&li))) {
         client *c = ln->value;
-        drainReplyHoldChunks(c);
+        drainSyncPendingReplies(c);
     }
 }
 

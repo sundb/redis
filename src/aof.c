@@ -1339,12 +1339,12 @@ void stopAppendOnly(void) {
     server.aof_last_incr_fsync_offset = 0;
 
     /* Reply holding (appendfsync bgalways): pinning fsynced_reploff to -1
-     * below would make the next drainReplyHoldChunks() release every parked
+     * below would make the next drainSyncPendingReplies() release every parked
      * chunk unconditionally, sending an OK for a write that was never
      * actually confirmed durable (the flush/fsync above is best-effort and
      * can fail). Disconnect those clients instead of lying to them with a
      * false ack. */
-    disconnectAllReplyHoldPendingClients("AOF disabled");
+    disconnectAllSyncRepPendingClients("AOF disabled");
 
     server.fsynced_reploff = -1;
     atomicSet(server.fsynced_reploff_pending, 0);
@@ -1780,7 +1780,7 @@ try_fsync:
             /* Wake the event loop when the fsync completes so held clients release
              * promptly even with no other traffic (FIFO: this comp-rq runs after
              * the fsync job on the same worker). Skip if nobody is waiting. */
-            if (listLength(server.reply_hold_pending_clients) > 0)
+            if (listLength(server.sync_clients_with_pending) > 0)
                 bioCreateCompRq(BIO_WORKER_AOF_FSYNC, aofBioFsyncNotify, 0, NULL);
         }
     } else if (server.aof_fsync == AOF_FSYNC_EVERYSEC &&
@@ -3419,7 +3419,7 @@ int rewriteAppendOnlyFileBackground(void) {
          * when AOFRW finishes (after possibly being updated by a bio thread) */
         atomicSet(server.fsynced_reploff_pending, server.master_repl_offset);
 
-        /* Use -1 here, not 0: under appendfsync bgalways, replyHoldWaitLocalAof()
+        /* Use -1 here, not 0: under appendfsync bgalways, syncReplWaitLocalAof()
          * only gates replies while fsynced_reploff != -1, so this suppresses
          * holding for the whole rewrite instead of stalling every reply behind
          * a 0 that won't advance until AOFRW finishes. */

@@ -1326,12 +1326,12 @@ void unblockClientForAsyncFlush(uint64_t client_id, struct slotRangeArray *slots
      * completion callback, outside the call() cycle where chunking normally
      * happens. The flush already advanced master_repl_offset during the
      * original call() (captured in c->woff), so bracket the reply with
-     * replyHoldBegin/replyHoldFinish to gate it on that woff
+     * syncReplBeginCommand/syncReplFinishCommand to gate it on that woff
      * instead of leaking straight to the socket -- otherwise the client gets
      * +OK for a FLUSH not yet in the AOF, and a crash would resurrect the
      * "flushed" keyspace. Non-blocking flushes (e.g. FLUSH ASYNC) reply
      * inside call() and are already gated there. */
-    replyHoldCookie reply_hold = replyHoldBegin(c);
+    syncReplCookie sync_rep = syncReplBeginCommand(c);
 
     /* Only SFLUSH command pass user data pointer. */
     if (slots)
@@ -1339,7 +1339,7 @@ void unblockClientForAsyncFlush(uint64_t client_id, struct slotRangeArray *slots
     else
         addReply(c, shared.ok);
 
-    replyHoldFinish(c, c->woff, &reply_hold);
+    syncReplFinishCommand(c, c->woff, &sync_rep);
 
     /* mark client as unblocked */
     unblockClient(c, 1);

@@ -275,7 +275,7 @@ static void protectClientReplyObjects(void) {
 
         /* Process parked reply chunks (appendfsync bgalways): a chunk's
          * reply_list can hold the same BULK_STR_REF zero-copy references as
-         * c->reply -- replyHoldFinish() moves/splices nodes into it
+         * c->reply -- syncReplFinishCommand() moves/splices nodes into it
          * verbatim, never deep-copying -- so a reference sitting in an
          * already-parked chunk needs the same protection before this async
          * flush frees the object it points to. Without this, the bio thread
@@ -283,12 +283,12 @@ static void protectClientReplyObjects(void) {
          * decrRefCount() when the chunk is later drained and sent
          * (releaseBufReferences()), which is exactly the non-atomic
          * refcount race this function exists to prevent. */
-        if (c->reply_hold_chunks) {
+        if (c->sync_pending_replies) {
             listIter chunk_li;
             listNode *chunk_ln;
-            listRewind(c->reply_hold_chunks, &chunk_li);
+            listRewind(c->sync_pending_replies, &chunk_li);
             while ((chunk_ln = listNext(&chunk_li))) {
-                replyHoldChunk *chunk = listNodeValue(chunk_ln);
+                syncReplyChunk *chunk = listNodeValue(chunk_ln);
                 protectReplyBlockList(chunk->reply_list);
             }
         }

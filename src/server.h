@@ -1184,13 +1184,13 @@ typedef struct clientReplyBlock {
  * c->reply; moving nodes between c->reply and chunk->reply_list preserves
  * BULK_STR_REF zero-copy refs (no deep copy). Used by appendfsync bgalways —
  * see docs/appendfsync-bgalways.md. */
-typedef struct replyHoldChunk {
+typedef struct syncReplyChunk {
     long long woff;            /* min offset that must be fsynced before drain */
     ustime_t  enqueue_us;      /* timestamp at enqueue, for hold-latency metric */
     size_t    bytes;           /* sum of block->size across reply_list */
     size_t    overhead;        /* chunk/list node overhead cached at creation */
     list     *reply_list;      /* list of clientReplyBlock*, same format as c->reply */
-} replyHoldChunk;
+} syncReplyChunk;
 
 /* Replication buffer blocks is the list of replBufBlock.
  *
@@ -1567,14 +1567,14 @@ typedef struct client {
     unsigned long long reply_bytes; /* Tot bytes of objects in reply list. */
     unsigned long long reply_bytes_shared; /* Bytes shared with keyspace objects in reply list. */
     unsigned long long reply_bytes_unshared; /* Cached subset of reply_bytes_shared solely owned by this client. */
-    /* Replies parked until durable. See replyHoldChunk above. When a chunk is
+    /* Replies parked until durable. See syncReplyChunk above. When a chunk is
      * enqueued, its bytes and overhead move out of reply_bytes into
-     * reply_hold_mem; on drain the reply bytes move back. */
-    list *reply_hold_chunks;   /* replyHoldChunk*, head drains first */
-    size_t reply_hold_mem;     /* every parked chunk's bytes + overhead */
-    listNode *reply_hold_pending_node; /* node in server.reply_hold_pending_clients, NULL if not linked */
-    listNode *reply_hold_boundary_node; /* c->reply tail before the current command. Prevents deferred-header backward merges and in-place extension into a prior command's reply. */
-    long long reply_hold_pre_command_repl_offset; /* server.master_repl_offset captured at processCommand entry (before performEvictions) so call() can detect propagation that started before its own scope — e.g. eviction DELs */
+     * sync_pending_mem; on drain the reply bytes move back. */
+    list *sync_pending_replies;   /* syncReplyChunk*, head drains first */
+    size_t sync_pending_mem;     /* every parked chunk's bytes + overhead */
+    listNode *sync_clients_with_pending_node; /* node in server.sync_clients_with_pending, NULL if not linked */
+    listNode *sync_rep_boundary_node; /* c->reply tail before the current command. Prevents deferred-header backward merges and in-place extension into a prior command's reply. */
+    long long sync_pre_command_repl_offset; /* server.master_repl_offset captured at processCommand entry (before performEvictions) so call() can detect propagation that started before its own scope — e.g. eviction DELs */
     list *deferred_reply_errors;    /* Used for module thread safe contexts. */
     size_t sentlen;         /* Amount of bytes already sent in the current
                                buffer or object being sent. */
@@ -2560,12 +2560,12 @@ struct redisServer {
     int get_ack_from_slaves;            /* If true we send REPLCONF GETACK. */
     /* Reply holding (appendfsync bgalways): clients with parked reply chunks,
      * plus the metrics exported in INFO stats. */
-    list *reply_hold_pending_clients;         /* clients with >=1 parked chunk */
-    long long reply_hold_pending_commands;    /* gauge: chunks currently parked */
-    long long reply_hold_count;               /* counter: chunks ever parked */
-    long long reply_hold_depth_sum;           /* counter: sum of queue depth at park time */
-    long long reply_hold_latency_usec;        /* counter: total time chunks spent parked */
-    long long reply_hold_pending_disconnects; /* counter: clients dropped while holding chunks */
+    list *sync_clients_with_pending;         /* clients with >=1 parked chunk */
+    long long sync_repl_pending_commands;    /* gauge: chunks currently parked */
+    long long sync_repl_hold_count;               /* counter: chunks ever parked */
+    long long sync_repl_hold_depth_sum;           /* counter: sum of queue depth at park time */
+    long long sync_repl_hold_latency_usec;        /* counter: total time chunks spent parked */
+    long long sync_repl_pending_disconnects; /* counter: clients dropped while holding chunks */
     long long repl_current_sync_attempts;    /* Number of times in current configuration, the replica attempted to sync since the last success. */
     long long repl_total_sync_attempts;      /* Number of times in current configuration, the replica attempted to sync to a master  */
     time_t repl_disconnect_start_time;       /* Unix time that master disconnection start */
@@ -3495,23 +3495,23 @@ int writeToClient(client *c, int handler_installed);
 void linkClient(client *c);
 
 /* Reply holding until the local AOF fsync catches up (appendfsync bgalways).
- * replyHoldBegin() bundles the clientReplyHoldActive() check together with
- * replyHoldStart()'s reply-buffer snapshot into one cookie, since every
+ * syncReplBeginCommand() bundles the clientSyncRepActive() check together with
+ * syncReplStartCommand()'s reply-buffer snapshot into one cookie, since every
  * call site needs both together and would otherwise juggle them as separate
  * locals. */
-typedef struct replyHoldCookie {
+typedef struct syncReplCookie {
     int active;
     size_t inline_start;
     listNode *list_tail_start;
-} replyHoldCookie;
-int replyHoldWaitLocalAof(void);
-replyHoldCookie replyHoldBegin(client *c);
-void replyHoldFinish(client *c, long long woff, const replyHoldCookie *sr);
-void replyHoldFinishByOffset(client *c, long long pre_work_repl_offset, const replyHoldCookie *sr);
-void replyHoldFinishOrDefer(client *c, const replyHoldCookie *sr);
-void drainReplyHoldChunks(client *c);
-void freeReplyHoldChunks(client *c);
-void disconnectAllReplyHoldPendingClients(const char *reason);
+} syncReplCookie;
+int syncReplWaitLocalAof(void);
+syncReplCookie syncReplBeginCommand(client *c);
+void syncReplFinishCommand(client *c, long long woff, const syncReplCookie *sr);
+void syncReplFinishByOffset(client *c, long long pre_work_repl_offset, const syncReplCookie *sr);
+void syncReplFinishOrDeferChunk(client *c, const syncReplCookie *sr);
+void drainSyncPendingReplies(client *c);
+void freeSyncPendingReplies(client *c);
+void disconnectAllSyncRepPendingClients(const char *reason);
 void protectClient(client *c);
 void unprotectClient(client *c);
 client *lookupClientByID(uint64_t id);
