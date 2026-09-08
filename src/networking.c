@@ -1021,14 +1021,14 @@ void setDeferredReply(client *c, void *node, const char *s, size_t length) {
      * - The prev node is non-NULL and has space in it or
      * - The next node is non-NULL,
      * - It has enough room already allocated
-     * - And not too large (avoid large memmove) */
-    /* Reply holding: never merge backward into the boundary node captured at
-     * this command's start — that node belongs to a prior command's reply
-     * and may already be unheld/in flight, so splicing this command's bytes
-     * onto it would send them out ahead of the fsync gating this command's
-     * own reply. */
-    if (ln->prev != c->reply_hold_boundary_node && ln->prev != NULL &&
-        (prev = listNodeValue(ln->prev)) &&
+     * - And not too large (avoid large memmove)
+     *
+     * One more, for reply holding: the prev node isn't the boundary captured
+     * at this command's start, i.e. a prior command's reply that may already
+     * be unheld/in flight — merging into it would send our bytes out ahead
+     * of the fsync gating this command's own reply. */
+    if (ln->prev != c->reply_hold_boundary_node &&
+        ln->prev != NULL && (prev = listNodeValue(ln->prev)) &&
         prev->used < prev->size && !prev->buf_encoded)
     {
         size_t len_to_copy = prev->size - prev->used;

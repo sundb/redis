@@ -1764,8 +1764,7 @@ try_fsync:
                 server.aof_last_fsync = server.mstime;
                 aofAdvanceFsyncedReploff(server.master_repl_offset);
                 if (server.aof_last_write_status == C_ERR) {
-                    serverLog(LL_NOTICE,
-                        "AOF write error looks solved, Redis can write again.");
+                    serverLog(LL_NOTICE, "AOF write error looks solved, Redis can write again.");
                     server.aof_last_write_status = C_OK;
                 }
                 server.aof_force_fsync_fail_offset = -1;
@@ -3420,16 +3419,10 @@ int rewriteAppendOnlyFileBackground(void) {
          * when AOFRW finishes (after possibly being updated by a bio thread) */
         atomicSet(server.fsynced_reploff_pending, server.master_repl_offset);
 
-        /* Pin fsynced_reploff at -1 (not 0) for the duration of the rewrite:
-         * aofRefreshFsyncedReploff() only advances it once aof_state is back to
-         * AOF_ON, so a plain 0 here would sit below every write's offset until
-         * the rewrite completes — under appendfsync bgalways that gates every
-         * write's reply (replyHoldWaitLocalAof() checks fsynced_reploff != -1),
-         * holding all of them for the whole rewrite instead of the intended
-         * "gating suppressed during the initial rewrite" (see beforeSleep's
-         * matching fsynced_reploff != -1 check and docs/appendfsync-bgalways.md).
-         * -1 is the same "not yet trustworthy" sentinel already used for a full
-         * resync (replicationSetMaster). */
+        /* Use -1 here, not 0: under appendfsync bgalways, replyHoldWaitLocalAof()
+         * only gates replies while fsynced_reploff != -1, so this suppresses
+         * holding for the whole rewrite instead of stalling every reply behind
+         * a 0 that won't advance until AOFRW finishes. */
         server.fsynced_reploff = -1;
     }
 
