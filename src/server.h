@@ -1575,6 +1575,7 @@ typedef struct client {
     listNode *sync_clients_with_pending_node; /* node in server.sync_clients_with_pending, NULL if not linked */
     listNode *sync_rep_boundary_node; /* c->reply tail before the current command. Prevents deferred-header backward merges and in-place extension into a prior command's reply. */
     long long sync_pre_command_repl_offset; /* server.master_repl_offset captured at processCommand entry (before performEvictions) so call() can detect propagation that started before its own scope — e.g. eviction DELs */
+    long long sync_pre_command_expire_offset; /* server.sync_repl_expire_offset at the same capture point, so call() can subtract lazy-expire's contribution back out */
     list *deferred_reply_errors;    /* Used for module thread safe contexts. */
     size_t sentlen;         /* Amount of bytes already sent in the current
                                buffer or object being sent. */
@@ -1871,6 +1872,10 @@ extern clientBufferLimitsConfig clientBufferLimitsDefaults[CLIENT_TYPE_OBUF_COUN
 typedef struct redisOp {
     robj **argv;
     int argc, dbid, target;
+    int lazy_expire; /* set by deleteKeyAndPropagate() on its NOTIFY_EXPIRED op, so
+                       * propagatePendingCommands() can attribute this op's offset
+                       * advance to server.sync_repl_expire_offset instead of a
+                       * real write (see call()'s reply-holding gate). */
 } redisOp;
 
 /* Defines an array of Redis operations. There is an API to add to this
@@ -2566,6 +2571,7 @@ struct redisServer {
     long long sync_repl_hold_depth_sum;           /* counter: sum of queue depth at park time */
     long long sync_repl_hold_latency_usec;        /* counter: total time chunks spent parked */
     long long sync_repl_pending_disconnects; /* counter: clients dropped while holding chunks */
+    long long sync_repl_expire_offset;       /* counter: master_repl_offset bytes attributable to lazy-expire DELs */
     long long repl_current_sync_attempts;    /* Number of times in current configuration, the replica attempted to sync since the last success. */
     long long repl_total_sync_attempts;      /* Number of times in current configuration, the replica attempted to sync to a master  */
     time_t repl_disconnect_start_time;       /* Unix time that master disconnection start */

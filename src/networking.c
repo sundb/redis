@@ -223,6 +223,7 @@ client *createClient(connection *conn) {
     c->sync_rep_boundary_node = NULL;
     c->sync_clients_with_pending_node = NULL;
     c->sync_pre_command_repl_offset = 0;
+    c->sync_pre_command_expire_offset = 0;
     initClientBlockingState(c);
     c->woff = 0;
     c->watched_keys = listCreate();
@@ -5681,7 +5682,12 @@ void syncReplFinishOrDeferChunk(client *c, const syncReplCookie *sr) {
         c->sync_rep_boundary_node = NULL;
         return;
     }
-    syncReplFinishByOffset(c, c->sync_pre_command_repl_offset, sr);
+    /* Raise the baseline by however much sync_repl_expire_offset moved during
+     * this command, so a lazy-expire DEL alone doesn't register as
+     * propagation: the key is already logically gone, so unlike a real
+     * write, this reply doesn't need to wait for that DEL's own ack. */
+    long long expire_advance = server.sync_repl_expire_offset - c->sync_pre_command_expire_offset;
+    syncReplFinishByOffset(c, c->sync_pre_command_repl_offset + expire_advance, sr);
 }
 
 /* Splice one releasable pending chunk's blocks back into c->reply (head-of-

@@ -1344,4 +1344,102 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
         $rd close
         assert_equal v2 [r get bgk_queued]
     }
+
+    test {bgalways: a read that lazily expires a key isn't held for that key's DEL} {
+        # expireIfNeeded()'s lazy delete propagates a DEL through the same
+        # call() cycle as the read that triggered it. Without excluding that
+        # DEL's own offset contribution, the read's reply would get parked
+        # waiting on the DEL's fsync -- pure overhead, since the key is
+        # already logically gone and a promoted replica's own expiry logic
+        # would refuse to return it too, so there's nothing left for a
+        # failover to contradict.
+        r debug set-active-expire 0
+        r set bgk_expire_warm v
+        assert_equal [r waitaof 1 0 5000] {1 0}
+
+        r set bgk_lazy_expire v
+        r pexpire bgk_lazy_expire 1
+        after 20
+
+        r debug aof-flush-force stall 1
+
+        set rd [redis_deferring_client]
+        set before_expired_keys [s expired_keys]
+        set before_expire_offset [s sync_repl_expire_offset]
+        set before_hold [s sync_repl_hold_count]
+        $rd get bgk_lazy_expire
+        # expired_keys is independent of the fix under test (bumped by
+        # deleteKeyAndPropagate() regardless of how/whether its DEL's offset
+        # gets attributed) -- use it to confirm the GET actually lazily
+        # expired the key, before checking how its reply was treated.
+        wait_for_condition 100 20 {
+            [s expired_keys] > $before_expired_keys
+        } else {
+            $rd close
+            r debug aof-flush-force stall 0
+            r debug set-active-expire 1
+            fail "GET did not lazily expire the key"
+        }
+        assert {[s sync_repl_expire_offset] > $before_expire_offset}
+
+        # The GET's reply must not have been parked for that DEL -- it
+        # should already be sitting on the wire, the opposite of what the
+        # other tests in this file prove for a genuinely held write using
+        # this same 100ms window.
+        if {![reply_arrived_within $rd 100]} {
+            $rd close
+            r debug aof-flush-force stall 0
+            r debug set-active-expire 1
+            fail "GET's reply was held pending the lazy-expire DEL's fsync"
+        }
+        assert_equal {} [$rd read]
+        assert_equal $before_hold [s sync_repl_hold_count]
+        $rd close
+
+        r debug aof-flush-force stall 0
+        r debug set-active-expire 1
+    }
+
+    test {bgalways: a read that lazily expires a hash field isn't held for that field's HDEL} {
+        # Same gap as the whole-key case above, but for HFE: propagateHashFieldDeletion()
+        # (t_hash.c) is a separate call site from deleteKeyAndPropagate() and needs its
+        # own lazy_expire tag on the op it queues, or a read that merely triggers a
+        # hash field's lazy expiry gets held for that field's implicit HDEL.
+        r debug set-active-expire 0
+        r set bgk_hfe_warm v
+        assert_equal [r waitaof 1 0 5000] {1 0}
+
+        r del bgk_lazy_expire_hash
+        r hset bgk_lazy_expire_hash f v
+        r hpexpire bgk_lazy_expire_hash 1 FIELDS 1 f
+        after 20
+
+        r debug aof-flush-force stall 1
+
+        set rd [redis_deferring_client]
+        set before_expired_subkeys [s expired_subkeys]
+        set before_hold [s sync_repl_hold_count]
+        $rd hget bgk_lazy_expire_hash f
+        wait_for_condition 100 20 {
+            [s expired_subkeys] > $before_expired_subkeys
+        } else {
+            $rd close
+            r debug aof-flush-force stall 0
+            r debug set-active-expire 1
+            fail "HGET did not lazily expire the field"
+        }
+
+        if {![reply_arrived_within $rd 100]} {
+            $rd close
+            r debug aof-flush-force stall 0
+            r debug set-active-expire 1
+            fail "HGET's reply was held pending the lazy-expired field's HDEL fsync"
+        }
+        assert_equal {} [$rd read]
+        assert_equal $before_hold [s sync_repl_hold_count]
+        $rd close
+
+        r debug aof-flush-force stall 0
+        r debug set-active-expire 1
+    }
 }

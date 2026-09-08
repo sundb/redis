@@ -2974,6 +2974,7 @@ void resetServerStats(void) {
     server.sync_repl_hold_depth_sum = 0;
     server.sync_repl_hold_latency_usec = 0;
     server.sync_repl_pending_disconnects = 0;
+    server.sync_repl_expire_offset = 0;
     for (j = 0; j < IO_THREADS_MAX_NUM; j++) {
         atomicSet(IOThreads[j].io_reads_processed, 0);
         atomicSet(IOThreads[j].io_writes_processed, 0);
@@ -3651,6 +3652,8 @@ int redisOpArrayAppend(redisOpArray *oa, int dbid, robj **argv, int argc, int ta
     op->argv = argv;
     op->argc = argc;
     op->target = target;
+    op->lazy_expire = 0; /* array slots are reused across execution units --
+                          * must reset explicitly or a stale flag leaks in */
     oa->numops++;
     oa->targets |= target;
     return oa->numops;
@@ -3997,7 +4000,15 @@ static void propagatePendingCommands(void) {
     for (j = 0; j < server.also_propagate.numops; j++) {
         rop = &server.also_propagate.ops[j];
         serverAssert(rop->target);
+        /* Measure this op's own contribution to master_repl_offset when it's
+         * a lazy-expire DEL, so the reply-holding gate can subtract it back
+         * out: an expired key is already logically gone, so a read that
+         * merely triggered its lazy deletion doesn't need to wait for this
+         * DEL's fsync/ack the way a real write would. */
+        long long offset_before = rop->lazy_expire ? server.master_repl_offset : 0;
         propagateNow(rop->dbid,rop->argv,rop->argc,rop->target);
+        if (rop->lazy_expire)
+            server.sync_repl_expire_offset += server.master_repl_offset - offset_before;
     }
 
     if (transaction_target) {
@@ -4638,8 +4649,11 @@ int processCommand(client *c) {
     /* Reply holding (appendfsync bgalways): snapshot master_repl_offset BEFORE
      * performEvictions (and any other pre-call() logic) so call() can detect
      * propagation that happened before its own scope started — e.g. eviction
-     * DELs triggered by this command. */
+     * DELs triggered by this command. Also snapshot sync_repl_expire_offset,
+     * so call() can subtract out any lazy-expire DELs the command triggers —
+     * those don't need to gate the reply the way a real write does. */
     c->sync_pre_command_repl_offset = server.master_repl_offset;
+    c->sync_pre_command_expire_offset = server.sync_repl_expire_offset;
 
     if (!scriptIsTimedout()) {
         /* Both EXEC and scripts call call() directly so there should be
@@ -7019,7 +7033,8 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "sync_repl_hold_count:%lld\r\n", server.sync_repl_hold_count,
             "sync_repl_hold_depth_sum:%lld\r\n", server.sync_repl_hold_depth_sum,
             "sync_repl_hold_latency_usec:%lld\r\n", server.sync_repl_hold_latency_usec,
-            "sync_repl_pending_disconnects:%lld\r\n", server.sync_repl_pending_disconnects));
+            "sync_repl_pending_disconnects:%lld\r\n", server.sync_repl_pending_disconnects,
+            "sync_repl_expire_offset:%lld\r\n", server.sync_repl_expire_offset));
         info = genRedisInfoStringACLStats(info);
         if (!server.cluster_enabled && server.cluster_compatibility_sample_ratio) {
             info = sdscatprintf(info, "cluster_incompatible_ops:%lld\r\n", server.stat_cluster_incompatible_ops);

@@ -228,6 +228,17 @@ differs from classic `always`, where data is on disk before it is ever observabl
   ahead of it — the same RESP ordering violation, just reached from a different call site (see
   `tests/integration/appendfsync-bgalways.tcl`'s "a command-validation error reply stays in order..."
   and "a MULTI-queued command's QUEUED reply stays in order..." cases).
+- **Eviction DELs gate the reply; lazy-expire DELs don't.** `processCommand()` snapshots
+  `master_repl_offset` before `performEvictions()`, so a read that triggers an eviction still gets its
+  reply held on the resulting DEL's offset — if the reply went out unheld and that DEL was then lost
+  to a crash, a promoted replica would resurrect the evicted key, contradicting the reply the client
+  already got. Lazy expiry is different: `deleteKeyAndPropagate()` (`db.c`) tags its `NOTIFY_EXPIRED`
+  op so `propagatePendingCommands()` can attribute its offset advance to
+  `server.sync_repl_expire_offset` instead of a real write; `syncReplFinishOrDeferChunk()` subtracts
+  that delta back out of the offset comparison. A read that merely triggered an expired key's deletion
+  therefore does *not* get held for it — the key is already logically gone, and a promoted replica's
+  own expiry logic would refuse to return it too, so there is no value a client could observe that a
+  failover could later contradict. Holding it anyway would just be needless latency on the read path.
 - **Not gated:** keyspace notifications, pub/sub messages, and client-side-caching invalidations are
   pushed outside the command reply path and are not held; under `bgalways` they may be emitted
   slightly before the corresponding write is durable.
@@ -252,6 +263,9 @@ differs from classic `always`, where data is on disk before it is ever observabl
 - `sync_repl_hold_latency_usec` — total time chunks spent parked (counter).
 - `sync_repl_pending_disconnects` — clients dropped while holding chunks, i.e. AOF error, demotion,
   `CONFIG SET appendonly no`, or `appendfsync` switched away from `bgalways` (counter).
+- `sync_repl_expire_offset` — `master_repl_offset` bytes attributable to lazy-expire DELs, subtracted
+  out of the chunking gate so a read that merely triggered an expired key's deletion isn't held for
+  it (counter).
 
 ## Testing
 `tests/integration/appendfsync-bgalways.tcl`, driven by two fault-injection hooks:
