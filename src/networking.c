@@ -2063,19 +2063,12 @@ void unlinkClient(client *c) {
  * This is called when the client has finished sending all pending replies,
  * or when the client is being freed.
  *
- * If 'force' is true, the client is removed unconditionally.
- * This should only be used when we are certain that the replies no longer
- * contain any referenced robj. */
+ * If 'force' is true, the client is removed unconditionally -- except while
+ * a reply-holding chunk is still parked on it, which can itself hold a live
+ * reference. This should only be used when we are certain that the replies
+ * no longer contain any referenced robj. */
 void tryUnlinkClientFromPendingRefReply(client *c, int force) {
     if (!clientIsInPendingRefReplyList(c)) return;
-    /* A parked appendfsync bgalways chunk (c->reply_hold_chunks) can still
-     * hold a BULK_STR_REF reference moved there verbatim by
-     * replyHoldFinish() -- freeClient() already frees those chunks
-     * (and releases their refs) before calling us with force=1, but
-     * writeToClient() calls us with force=1 too, as soon as c->reply/bufpos
-     * are drained, which can happen while a chunk from an earlier command is
-     * still parked. Bail out in that case: this isn't "certain that the
-     * replies no longer contain any referenced robj" yet. */
     if (c->reply_hold_chunks && listLength(c->reply_hold_chunks) > 0) return;
     if (force || !clientHasPendingReplies(c)) {
         listUnlinkNode(server.clients_with_pending_ref_reply, &c->pending_ref_reply_node);
