@@ -2970,11 +2970,6 @@ void resetServerStats(void) {
     server.stat_sync_full = 0;
     server.stat_sync_partial_ok = 0;
     server.stat_sync_partial_err = 0;
-    /* Reply-holding cumulative counters (appendfsync bgalways). These are
-     * statistics (rates and ratios are derived from them), so they belong here —
-     * cleared by CONFIG RESETSTAT — rather than in initServer. The live gauge
-     * (reply_hold_pending_commands) is NOT reset here: zeroing it while commands
-     * are in flight would drive it negative. */
     server.reply_hold_count = 0;
     server.reply_hold_depth_sum = 0;
     server.reply_hold_latency_usec = 0;
