@@ -5677,27 +5677,14 @@ void replyHoldFinishByOffset(client *c, long long pre_work_repl_offset, const re
     }
 }
 
-/* Reply holding (appendfsync bgalways): common tail end of a
- * replyHoldStart/...(work)/finish bracket around call(), once it is
- * known that any propagation the bracketed work triggered has already been
- * flushed into server.master_repl_offset (i.e. execution_nesting was back to
- * 0 at the relevant afterCommand() call). Defers to a later out-of-call()
- * callback if the client blocked again; otherwise delegates the chunk
- * decision to replyHoldFinishByOffset() using the offset captured at
- * processCommand entry. Shared by call() (top-level dispatch, where nesting
- * is 0 throughout so the flush already happened by the time this runs) and
- * unblockClientOnKey (blocked.c; a blocked command's reissue wraps call() in
- * its own enterExecutionUnit, so call() itself can't observe the flush —
- * blocked.c calls this only after its own afterCommand()). */
+/* Reply holding (appendfsync bgalways): finishes a call() reply-hold
+ * bracket. Only call once propagation has actually flushed (nesting back to
+ * 0) -- otherwise the offset check is meaningless. If the client blocked
+ * again, this is a no-op; whatever eventually replies must bracket it
+ * itself. */
 void replyHoldFinishOrDefer(client *c, const replyHoldCookie *sr) {
     if (c->flags & CLIENT_BLOCKED) {
-        /* The command blocked again, so its reply has not been produced yet —
-         * it will be generated later in the unblock completion callback,
-         * OUTSIDE call() (e.g. a blocking-async FLUSH replying from
-         * unblockClientForAsyncFlush). Chunking here would only park an empty
-         * placeholder, so defer to that callback, which brackets the reply
-         * itself. Clear the boundary node set at command entry, since no
-         * chunk is produced here to clear it. */
+        /* No chunk is produced here, so clear the boundary node ourselves. */
         c->reply_hold_boundary_node = NULL;
         return;
     }
