@@ -232,13 +232,23 @@ differs from classic `always`, where data is on disk before it is ever observabl
   `master_repl_offset` before `performEvictions()`, so a read that triggers an eviction still gets its
   reply held on the resulting DEL's offset — if the reply went out unheld and that DEL was then lost
   to a crash, a promoted replica would resurrect the evicted key, contradicting the reply the client
-  already got. Lazy expiry is different: `deleteKeyAndPropagate()` (`db.c`) tags its `NOTIFY_EXPIRED`
-  op so `propagatePendingCommands()` can attribute its offset advance to
-  `server.sync_repl_expire_offset` instead of a real write; `syncReplFinishOrDeferChunk()` subtracts
-  that delta back out of the offset comparison. A read that merely triggered an expired key's deletion
-  therefore does *not* get held for it — the key is already logically gone, and a promoted replica's
-  own expiry logic would refuse to return it too, so there is no value a client could observe that a
-  failover could later contradict. Holding it anyway would just be needless latency on the read path.
+  already got. Lazy expiry is different: `deleteKeyAndPropagate()` (`db.c`, whole-key expiry) and
+  `propagateHashFieldDeletion()` (`t_hash.c`, HFE field expiry) each tag their queued op so
+  `propagatePendingCommands()` can attribute its offset advance to `server.sync_repl_expire_offset`
+  instead of a real write; `syncReplFinishOrDeferChunk()` subtracts that delta back out of the offset
+  comparison. A read that merely triggered an expired key's (or field's) deletion therefore does *not*
+  get held for it — the key/field is already logically gone, and a promoted replica's own expiry logic
+  would refuse to return it too, so there is no value a client could observe that a failover could
+  later contradict. Holding it anyway would just be needless latency on the read path. These are two
+  independent tagging call sites, not one shared helper — extending this exclusion to a future
+  expiry-like deletion mechanism means tagging its own propagation call site too.
+  - **MULTI/EXEC wrapper credit.** `propagatePendingCommands()` wraps a flush in `MULTI`/`EXEC`
+    whenever it has more than one queued op (e.g. two different keys each lazily expiring inside one
+    transaction, or even a single `MGET` touching two of them) — and that wrapper's own bytes need
+    crediting too, or they alone register as "real" advance and hold the reply regardless of the
+    per-DEL subtraction. Credited only when *every* op in the flush is a lazy-expire DEL; a real write
+    mixed in leaves the wrapper uncredited, which is fine since the reply is already going to be held
+    for that write.
 - **Not gated:** keyspace notifications, pub/sub messages, and client-side-caching invalidations are
   pushed outside the command reply path and are not held; under `bgalways` they may be emitted
   slightly before the corresponding write is durable.

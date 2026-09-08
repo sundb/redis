@@ -1442,4 +1442,62 @@ start_server [list tags {"aof bgalways modules external:skip"} overrides [list a
         r debug aof-flush-force stall 0
         r debug set-active-expire 1
     }
+
+    test {bgalways: a MULTI/EXEC with only lazy-expiring reads isn't held for their DELs} {
+        # propagatePendingCommands() wraps a flush in MULTI/EXEC whenever it has
+        # more than one queued op (server.also_propagate.numops > 1) -- which
+        # happens here, since two different keys each lazily expire inside this
+        # one EXEC, queuing two DELs. That MULTI/EXEC wrapper's own bytes must
+        # also be credited to sync_repl_expire_offset when every op it wraps is
+        # itself a lazy-expire DEL, or those wrapper bytes alone would register
+        # as "real" advance and hold EXEC's reply regardless of the per-DEL
+        # subtraction.
+        r debug set-active-expire 0
+        r set bgk_multi_expire_warm v
+        assert_equal [r waitaof 1 0 5000] {1 0}
+
+        r set bgk_lazy_expire_m1 v
+        r set bgk_lazy_expire_m2 v
+        r pexpire bgk_lazy_expire_m1 1
+        r pexpire bgk_lazy_expire_m2 1
+        after 20
+
+        r debug aof-flush-force stall 1
+
+        set rd [redis_deferring_client]
+        set before_expired_keys [s expired_keys]
+        set before_hold [s sync_repl_hold_count]
+        $rd multi
+        $rd get bgk_lazy_expire_m1
+        $rd get bgk_lazy_expire_m2
+        $rd exec
+        wait_for_condition 100 20 {
+            [s expired_keys] >= $before_expired_keys + 2
+        } else {
+            $rd close
+            r debug aof-flush-force stall 0
+            r debug set-active-expire 1
+            fail "EXEC did not lazily expire both keys"
+        }
+
+        # MULTI/EXEC's own +OK/+QUEUED/+QUEUED replies never propagate anything
+        # themselves, so they arrive right away regardless of this fix; it's
+        # EXEC's own reply -- gated on whether the *transaction* propagated a
+        # real write -- that this test is actually about.
+        assert_equal {OK} [$rd read]
+        assert_equal {QUEUED} [$rd read]
+        assert_equal {QUEUED} [$rd read]
+        if {![reply_arrived_within $rd 100]} {
+            $rd close
+            r debug aof-flush-force stall 0
+            r debug set-active-expire 1
+            fail "EXEC's reply was held pending the two lazy-expire DELs' fsync"
+        }
+        assert_equal {{} {}} [$rd read]
+        assert_equal $before_hold [s sync_repl_hold_count]
+        $rd close
+
+        r debug aof-flush-force stall 0
+        r debug set-active-expire 1
+    }
 }

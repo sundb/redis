@@ -3991,10 +3991,29 @@ static void propagatePendingCommands(void) {
         transaction_target = PROPAGATE_NONE;
     }
 
+    /* Reply holding (appendfsync bgalways): if every op in this flush is a
+     * lazy-expire DEL (e.g. two expired keys read inside one MULTI/EXEC, or
+     * even a single MGET touching two of them), the MULTI/EXEC wrapper below
+     * exists purely because those DELs happened to bunch up -- its bytes are
+     * attributable to expiry too, same as the DELs themselves. Otherwise
+     * (any real write mixed in) leave the wrapper as real advance: the reply
+     * is already going to be held for that write regardless. */
+    int all_lazy_expire = 1;
+    for (j = 0; j < server.also_propagate.numops; j++) {
+        if (!server.also_propagate.ops[j].lazy_expire) {
+            all_lazy_expire = 0;
+            break;
+        }
+    }
+
+    long long wrapper_offset_before;
     if (transaction_target) {
         /* We use dbid=-1 to indicate we do not want to replicate SELECT.
          * It'll be inserted together with the next command (inside the MULTI) */
+        wrapper_offset_before = server.master_repl_offset;
         propagateNow(-1,&shared.multi,1,transaction_target);
+        if (all_lazy_expire)
+            server.sync_repl_expire_offset += server.master_repl_offset - wrapper_offset_before;
     }
 
     for (j = 0; j < server.also_propagate.numops; j++) {
@@ -4013,7 +4032,10 @@ static void propagatePendingCommands(void) {
 
     if (transaction_target) {
         /* We use dbid=-1 to indicate we do not want to replicate select */
+        wrapper_offset_before = server.master_repl_offset;
         propagateNow(-1,&shared.exec,1,transaction_target);
+        if (all_lazy_expire)
+            server.sync_repl_expire_offset += server.master_repl_offset - wrapper_offset_before;
     }
 
     redisOpArrayFree(&server.also_propagate);
