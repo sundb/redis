@@ -284,7 +284,7 @@ void installClientWriteHandler(client *c) {
      * to fsync before the write handler can flush it, bgalways parks the reply
      * outside c->reply (sync_pending_replies) until fsynced_reploff covers its
      * woff, so a not-yet-durable reply can never reach the socket regardless of
-     * read/write interleaving. See docs/appendfsync-bgalways.md. */
+     * read/write interleaving. */
     if (server.aof_state == AOF_ON &&
         server.aof_fsync == AOF_FSYNC_ALWAYS)
     {
@@ -5440,7 +5440,7 @@ size_t getNormalClientPendingReplyBytes(client *c) {
  * the offset that command wrote. Instead of blocking the client, the bytes the
  * command already produced are moved out of c->buf / c->reply into a chunk
  * parked on c->sync_pending_replies, and spliced back once the durable offset
- * passes the chunk's woff. See docs/appendfsync-bgalways.md.
+ * passes the chunk's woff.
  *
  * The chunk owns moved listNodes from c->reply (zero-copy preserved for
  * BULK_STR_REF refs) plus optionally one freshly-allocated block holding

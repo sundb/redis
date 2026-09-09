@@ -2077,9 +2077,8 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
         /* If we have blocked [WAIT]AOF clients or clients holding parked reply
          * chunks (appendfsync bgalways), and fsynced_reploff changed, we want to
          * try to wake them up ASAP. */
-        if ((listLength(server.clients_waiting_acks) ||
-             listLength(server.sync_clients_with_pending))
-                && prev_fsynced_reploff != server.fsynced_reploff)
+        if ((listLength(server.clients_waiting_acks) || listLength(server.sync_clients_with_pending)) &&
+            prev_fsynced_reploff != server.fsynced_reploff)
             dont_sleep = 1;
     }
 

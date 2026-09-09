@@ -667,8 +667,7 @@ typedef enum {
 #define AOF_FSYNC_ALWAYS 1
 #define AOF_FSYNC_EVERYSEC 2
 #define AOF_FSYNC_BGALWAYS 3 /* Like ALWAYS, but fsync runs in the bio thread and
-                              * client replies are held until durable (see
-                              * docs/appendfsync-bgalways.md). */
+                              * client replies are held until durable. */
 
 /* Replication diskless load defines */
 #define REPL_DISKLESS_LOAD_DISABLED 0
@@ -1182,8 +1181,7 @@ typedef struct clientReplyBlock {
 /* A reply chunk parked until the data the command wrote is durable.
  * The chunk owns a list of clientReplyBlock* with the same node format as
  * c->reply; moving nodes between c->reply and chunk->reply_list preserves
- * BULK_STR_REF zero-copy refs (no deep copy). Used by appendfsync bgalways —
- * see docs/appendfsync-bgalways.md. */
+ * BULK_STR_REF zero-copy refs (no deep copy). Used by appendfsync bgalways. */
 typedef struct syncReplyChunk {
     long long woff;            /* min offset that must be fsynced before drain */
     ustime_t  enqueue_us;      /* timestamp at enqueue, for hold-latency metric */
