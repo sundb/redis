@@ -5476,8 +5476,7 @@ static int clientSyncRepActive(client *c) {
     if (c->conn == NULL) return 0;
     if (c->flags & (CLIENT_SLAVE | CLIENT_MASTER)) return 0;
     if (syncReplWaitLocalAof()) return 1;
-    if (c->sync_pending_replies &&
-        listLength(c->sync_pending_replies) > 0) return 1;
+    if (c->sync_pending_replies && listLength(c->sync_pending_replies) > 0) return 1;
     return 0;
 }
 

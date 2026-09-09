@@ -3874,12 +3874,22 @@ void alsoPropagate(int dbid, robj **argv, int argc, int target) {
  * command currently running. To be used only for implicit changes the server
  * decided to make by itself (expired or evicted keys, slots trimmed after a
  * migration): those must always reach the AOF and the replicas, no matter what
- * the command that happened to trigger them asked for. */
-void alsoPropagateForced(int dbid, robj **argv, int argc, int target) {
+ * the command that happened to trigger them asked for.
+ *
+ * lazy_expire should be set only when the propagated op is itself a lazy
+ * expiration (see the 'lazy_expire' field of redisOp): this lets
+ * propagatePendingCommands() credit its offset advance to
+ * server.sync_repl_expire_offset instead of treating it as a real write.
+ * numops may not have grown at all if propagation is disabled/unreachable
+ * (see alsoPropagate()'s shouldPropagate() check), so check before tagging. */
+void alsoPropagateForced(int dbid, robj **argv, int argc, int target, int lazy_expire) {
     int prev_targets = server.allowed_propagate_targets;
+    int prev_numops = server.also_propagate.numops;
     server.allowed_propagate_targets = PROPAGATE_AOF|PROPAGATE_REPL;
     alsoPropagate(dbid,argv,argc,target);
     server.allowed_propagate_targets = prev_targets;
+    if (lazy_expire && server.also_propagate.numops == prev_numops + 1)
+        server.also_propagate.ops[prev_numops].lazy_expire = 1;
 }
 
 /* It is possible to call the function forceCommandPropagation() inside a

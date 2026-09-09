@@ -2880,15 +2880,7 @@ static void deleteKeyAndPropagate(redisDb *db, robj *keyobj, int notify_type, lo
 
     notifyKeyspaceEvent(notify_type, notify_name,keyobj, db->id);
     keyModified(NULL, db, keyobj, NULL, 1);
-    /* Reply holding (appendfsync bgalways): tag this op, if queued, as a
-     * lazy-expire DEL so propagatePendingCommands() can attribute its offset
-     * advance to server.sync_repl_expire_offset instead of a real write --
-     * numops may not have grown at all if propagation is disabled/unreachable
-     * (see alsoPropagate()'s shouldPropagate() check), so check before tagging. */
-    int prev_numops = server.also_propagate.numops;
-    propagateDeletion(db, keyobj, lazy_flag);
-    if (notify_type == NOTIFY_EXPIRED && server.also_propagate.numops == prev_numops + 1)
-        server.also_propagate.ops[prev_numops].lazy_expire = 1;
+    propagateDeletion(db, keyobj, lazy_flag, notify_type == NOTIFY_EXPIRED);
 
     if (notify_type == NOTIFY_EXPIRED)
         server.stat_expiredkeys++;
@@ -2928,7 +2920,7 @@ void deleteEvictedKeyAndPropagate(redisDb *db, robj *keyobj, long long *key_mem_
  *    postExecutionUnitOperations, preferably just after a
  *    single deletion batch, so that DEL/UNLINK will NOT be wrapped
  *    in MULTI/EXEC */
-void propagateDeletion(redisDb *db, robj *key, int lazy) {
+void propagateDeletion(redisDb *db, robj *key, int lazy, int lazy_expire) {
     robj *argv[2];
 
     argv[0] = lazy ? shared.unlink : shared.del;
@@ -2938,7 +2930,7 @@ void propagateDeletion(redisDb *db, robj *key, int lazy) {
 
     /* If the master decided to delete a key we must propagate it to replicas no matter what.
      * Even if module executed a command without asking for propagation. */
-    alsoPropagateForced(db->id,argv,2,PROPAGATE_AOF|PROPAGATE_REPL);
+    alsoPropagateForced(db->id,argv,2,PROPAGATE_AOF|PROPAGATE_REPL,lazy_expire);
 
     decrRefCount(argv[0]);
     decrRefCount(argv[1]);
