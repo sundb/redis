@@ -1321,11 +1321,25 @@ void unblockClientForAsyncFlush(uint64_t client_id, struct slotRangeArray *slots
     /* Don't update blocked_us since command was processed in bg by lazy_free thread */
     updateStatsOnUnblock(c, 0 /*blocked_us*/, elapsedUs(c->bstate.lazyfreeStartTime), 0);
 
+    /* Reply holding (appendfsync bgalways): a default (SYNC) FLUSH ran as a
+     * blocking-async flush, so its "+OK" is produced here, in the BIO
+     * completion callback, outside the call() cycle where chunking normally
+     * happens. The flush already advanced master_repl_offset during the
+     * original call() (captured in c->woff), so bracket the reply with
+     * syncReplBeginCommand/syncReplFinishCommand to gate it on that woff
+     * instead of leaking straight to the socket -- otherwise the client gets
+     * +OK for a FLUSH not yet in the AOF, and a crash would resurrect the
+     * "flushed" keyspace. Non-blocking flushes (e.g. FLUSH ASYNC) reply
+     * inside call() and are already gated there. */
+    syncReplCookie sync_rep = syncReplBeginCommand(c);
+
     /* Only SFLUSH command pass user data pointer. */
     if (slots)
         replySlotsFlush(c, slots);
     else
         addReply(c, shared.ok);
+
+    syncReplFinishCommand(c, c->woff, &sync_rep);
 
     /* mark client as unblocked */
     unblockClient(c, 1);
@@ -2866,7 +2880,7 @@ static void deleteKeyAndPropagate(redisDb *db, robj *keyobj, int notify_type, lo
 
     notifyKeyspaceEvent(notify_type, notify_name,keyobj, db->id);
     keyModified(NULL, db, keyobj, NULL, 1);
-    propagateDeletion(db, keyobj, lazy_flag);
+    propagateDeletion(db, keyobj, lazy_flag, notify_type == NOTIFY_EXPIRED);
 
     if (notify_type == NOTIFY_EXPIRED)
         server.stat_expiredkeys++;
@@ -2906,7 +2920,7 @@ void deleteEvictedKeyAndPropagate(redisDb *db, robj *keyobj, long long *key_mem_
  *    postExecutionUnitOperations, preferably just after a
  *    single deletion batch, so that DEL/UNLINK will NOT be wrapped
  *    in MULTI/EXEC */
-void propagateDeletion(redisDb *db, robj *key, int lazy) {
+void propagateDeletion(redisDb *db, robj *key, int lazy, int lazy_expire) {
     robj *argv[2];
 
     argv[0] = lazy ? shared.unlink : shared.del;
@@ -2916,7 +2930,7 @@ void propagateDeletion(redisDb *db, robj *key, int lazy) {
 
     /* If the master decided to delete a key we must propagate it to replicas no matter what.
      * Even if module executed a command without asking for propagation. */
-    alsoPropagateForced(db->id,argv,2,PROPAGATE_AOF|PROPAGATE_REPL);
+    alsoPropagateForced(db->id,argv,2,PROPAGATE_AOF|PROPAGATE_REPL,lazy_expire);
 
     decrRefCount(argv[0]);
     decrRefCount(argv[1]);

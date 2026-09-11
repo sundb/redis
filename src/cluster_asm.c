@@ -3037,7 +3037,7 @@ static void propagateTrimSlots(slotRangeArray *slots) {
 
     enterExecutionUnit(1, 0);
 
-    alsoPropagateForced(-1, argv, argc, PROPAGATE_AOF | PROPAGATE_REPL);
+    alsoPropagateForced(-1, argv, argc, PROPAGATE_AOF | PROPAGATE_REPL, 0);
 
     exitExecutionUnit();
     postExecutionUnitOperations();

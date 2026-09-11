@@ -1234,6 +1234,69 @@ void aof_background_fsync(int fd) {
     bioCreateFsyncJob(fd, server.master_repl_offset, 1);
 }
 
+/* Monotonically advance server.fsynced_reploff_pending to `offset` (never
+ * backwards) using an atomic compare-exchange max. Used by the bio fsync worker
+ * and by the BGALWAYS forced (synchronous) fsync path, so that an in-flight bio
+ * job completing after a synchronous fsync cannot regress the durable offset.
+ * Initialization/reset of fsynced_reploff_pending (e.g. the -1 pin in
+ * startAppendOnly) deliberately keeps using a plain atomicSet. */
+void aofAdvanceFsyncedReploff(long long offset) {
+    long long cur;
+    atomicGet(server.fsynced_reploff_pending, cur);
+    while (offset > cur) {
+        if (atomicCompareExchange(long long, server.fsynced_reploff_pending, cur, offset))
+            break;
+        /* CAS failed: `cur` was reloaded with the current value, retry. */
+    }
+}
+
+/* Copy the bio-advanced pending fsync offset (fsynced_reploff_pending) into
+ * server.fsynced_reploff. No-op during the initial AOF rewrite (fsynced_reploff
+ * pinned at -1) or when AOF is off. Returns the previous fsynced_reploff so
+ * callers can detect a change. Shared by beforeSleep and the bio-completion
+ * wakeup callback (aofBioFsyncNotify) so both apply the offset identically. */
+long long aofRefreshFsyncedReploff(void) {
+    long long prev = server.fsynced_reploff;
+    if (server.aof_state == AOF_ON && server.fsynced_reploff != -1) {
+        long long pending;
+        atomicGet(server.fsynced_reploff_pending, pending);
+        server.fsynced_reploff = pending;
+    }
+
+    /* Self-heal a BGALWAYS forced-fsync failure (see flushAppendOnlyFile())
+     * once the durable offset has actually caught up past the point that
+     * failed: writeCommandsDeniedByDiskError() would otherwise deny writes
+     * forever, since aof_last_write_status is only ever cleared by a
+     * successful write() of leftover aof_buf bytes, and this failure mode
+     * leaves aof_buf empty -- the retry-on-next-write path this field
+     * normally relies on never gets anything to retry. The periodic
+     * run_with_period(1000) retry in serverCron() (gated on
+     * aof_last_write_status == C_ERR) keeps firing background fsyncs in the
+     * meantime; once one actually succeeds, fsynced_reploff advances past
+     * the failure point and this clears the flag. */
+    if (server.aof_last_write_status == C_ERR &&
+        server.aof_force_fsync_fail_offset != -1 &&
+        server.fsynced_reploff != -1 &&
+        server.fsynced_reploff >= server.aof_force_fsync_fail_offset)
+    {
+        serverLog(LL_NOTICE, "AOF forced-fsync error looks solved, Redis can write again.");
+        server.aof_last_write_status = C_OK;
+        server.aof_force_fsync_fail_offset = -1;
+    }
+
+    return prev;
+}
+
+/* Bio-completion callback (runs on the main thread via the bio job_comp_pipe)
+ * after a BGALWAYS background fsync. Refresh fsynced_reploff and release held
+ * clients immediately, instead of waiting for the next beforeSleep/cron tick. */
+static void aofBioFsyncNotify(uint64_t arg, void *ptr) {
+    UNUSED(arg);
+    UNUSED(ptr);
+    aofRefreshFsyncedReploff();
+    processClientsWaitingReplicas();
+}
+
 /* Close the fd on the basis of aof_background_fsync. */
 void aof_background_fsync_and_close(int fd) {
     bioCreateCloseAofJob(fd, server.master_repl_offset, 1);
@@ -1274,6 +1337,15 @@ void stopAppendOnly(void) {
     server.aof_rewrite_scheduled = 0;
     server.aof_last_incr_size = 0;
     server.aof_last_incr_fsync_offset = 0;
+
+    /* Reply holding (appendfsync bgalways): pinning fsynced_reploff to -1
+     * below would make the next drainSyncPendingReplies() release every parked
+     * chunk unconditionally, sending an OK for a write that was never
+     * actually confirmed durable (the flush/fsync above is best-effort and
+     * can fail). Disconnect those clients instead of lying to them with a
+     * false ack. */
+    disconnectAllSyncRepPendingClients("AOF disabled");
+
     server.fsynced_reploff = -1;
     atomicSet(server.fsynced_reploff_pending, 0);
     killAppendOnlyChild();
@@ -1324,6 +1396,7 @@ int startAppendOnly(void) {
     if (server.aof_last_write_status == C_ERR) {
         serverLog(LL_WARNING,"AOF reopen, just ignore the last error.");
         server.aof_last_write_status = C_OK;
+        server.aof_force_fsync_fail_offset = -1;
     }
     return C_OK;
 }
@@ -1377,6 +1450,67 @@ ssize_t aofWrite(int fd, const char *buf, size_t len) {
     return totwritten;
 }
 
+/* Mark a BGALWAYS forced (synchronous) fsync failure. Unlike a write()
+ * failure, this leaves no buffered bytes for the normal retry-on-next-write
+ * recovery path, so remember the affected replication offset until a later
+ * fsync proves that durability has caught up. */
+void aofMarkForceFsyncFailure(int errno_val) {
+    server.aof_last_write_status = C_ERR;
+    server.aof_last_write_errno = errno_val;
+    if (server.aof_force_fsync_fail_offset == -1)
+        server.aof_force_fsync_fail_offset = server.master_repl_offset;
+}
+
+/* Test-only fault injection for flushAppendOnlyFile(), gating on the DEBUG
+ * AOF-FLUSH-FORCE-* flags below. Returns 1 if a fault was injected -- the
+ * caller must bail out immediately without touching the AOF -- or 0 to
+ * proceed with the real flush. */
+static int aofFlushFaultInjection(int force) {
+    /* Simulate a main-thread AOF write/fsync failure (e.g. ENOSPC). We set
+     * the error status and bail before writing/fsyncing, so fsynced_reploff
+     * stalls and any held bgalways clients stay held — the production
+     * soft-fail scenario. Clearing the flag lets the next flush write the
+     * buffered data and recover to C_OK. */
+    if (server.aof_flush_force_error) {
+        if (server.aof_last_write_status == C_OK)
+            serverLog(LL_WARNING,"Simulating an AOF write error (debug aof-flush-force error).");
+        server.aof_last_write_status = C_ERR;
+        server.aof_last_write_errno = ENOSPC;
+        /* This simulates a real write() failure, the same distinct failure
+         * mode as the production write()-failure branch below -- clear any
+         * stale offset left over from an unrelated, already-superseded
+         * BGALWAYS forced-fsync-only failure, for the same reason that
+         * branch does. */
+        server.aof_force_fsync_fail_offset = -1;
+        return 1;
+    }
+
+    /* Simulate the BGALWAYS forced (synchronous) fsync path failing while
+     * the write() itself still succeeds (see DEBUG AOF-FLUSH-FORCE FSYNC-
+     * ERROR). Intercepted here, ahead of aof_flush_force_stall and the
+     * empty-buffer/gap-detection logic below, so a caller of a forced flush
+     * (shutdown / stopAppendOnly / rewrite-done) hits this deterministically
+     * -- including while aof_flush_force_stall is also set to hold a
+     * write's bytes unflushed, which tests use to set up a genuine
+     * outstanding gap before forcing this failure. */
+    if (force && server.aof_fsync == AOF_FSYNC_BGALWAYS &&
+        server.aof_flush_force_fsync_error)
+    {
+        serverLog(LL_WARNING, "Can't persist AOF for fsync error when the "
+            "AOF fsync policy is 'bgalways': Simulated (debug aof-flush-force fsync-error).");
+        aofMarkForceFsyncFailure(EIO);
+        return 1;
+    }
+
+    /* Stall the durable offset (skip write+fsync) without flagging an
+     * error, so a bgalways client's reply stays held while new writes are
+     * still accepted — used to set up the held-then-error scenario above. */
+    if (server.aof_flush_force_stall)
+        return 1;
+
+    return 0;
+}
+
 /* Write the append only file buffer on disk.
  *
  * Since we are required to write the AOF before replying to the client,
@@ -1400,6 +1534,9 @@ void flushAppendOnlyFile(int force) {
     ssize_t nwritten;
     int sync_in_progress = 0;
     mstime_t latency;
+
+    /* Test-only: DEBUG AOF-FLUSH-FORCE-* fault injection. */
+    if (aofFlushFaultInjection(force)) return;
 
     if (sdslen(server.aof_buf) == 0) {
         if (server.aof_last_incr_fsync_offset == server.aof_last_incr_size) {
@@ -1428,14 +1565,17 @@ void flushAppendOnlyFile(int force) {
              * aof_fsync is changed from everysec to always. */
             if (server.aof_fsync == AOF_FSYNC_ALWAYS)
                 goto try_fsync;
+
+            if (server.aof_fsync == AOF_FSYNC_BGALWAYS)
+                goto try_fsync;
         }
         return;
     }
 
-    if (server.aof_fsync == AOF_FSYNC_EVERYSEC)
+    if (server.aof_fsync == AOF_FSYNC_EVERYSEC || server.aof_fsync == AOF_FSYNC_BGALWAYS)
         sync_in_progress = aofFsyncInProgress();
 
-    if (server.aof_fsync == AOF_FSYNC_EVERYSEC && !force) {
+    if ((server.aof_fsync == AOF_FSYNC_EVERYSEC || server.aof_fsync == AOF_FSYNC_BGALWAYS) && !force) {
         /* With this append fsync policy we do background fsyncing.
          * If the fsync is still in progress we can try to delay
          * the write for a couple of seconds. */
@@ -1542,6 +1682,16 @@ void flushAppendOnlyFile(int force) {
              * condition is not cleared. */
             server.aof_last_write_status = C_ERR;
 
+            /* This is a distinct failure from a BGALWAYS forced-fsync-only
+             * failure (see below): a stale aof_force_fsync_fail_offset left
+             * over from an earlier, already-superseded forced-fsync failure
+             * must not let aofRefreshFsyncedReploff()'s self-heal declare
+             * *this* write failure resolved just because fsynced_reploff
+             * happens to catch up past that old offset -- this failure's own
+             * bytes are stuck unwritten in aof_buf and need a real write()
+             * retry, not an offset comparison, to clear. */
+            server.aof_force_fsync_fail_offset = -1;
+
             /* Trim the sds buffer if there was a partial write, and there
              * was no way to undo it with ftruncate(2). */
             if (nwritten > 0) {
@@ -1558,6 +1708,7 @@ void flushAppendOnlyFile(int force) {
             serverLog(LL_NOTICE,
                 "AOF write error looks solved, Redis can write again.");
             server.aof_last_write_status = C_OK;
+            server.aof_force_fsync_fail_offset = -1;
         }
     }
     server.aof_current_size += nwritten;
@@ -1575,7 +1726,8 @@ void flushAppendOnlyFile(int force) {
 try_fsync:
     /* Don't fsync if no-appendfsync-on-rewrite is set to yes and there are
      * children doing I/O in the background. */
-    if (server.aof_no_fsync_on_rewrite && hasActiveChildProcess())
+    if (server.aof_no_fsync_on_rewrite && hasActiveChildProcess() &&
+        server.aof_fsync != AOF_FSYNC_BGALWAYS)
         return;
 
     /* Perform the fsync if needed. */
@@ -1596,6 +1748,41 @@ try_fsync:
         server.aof_last_incr_fsync_offset = server.aof_last_incr_size;
         server.aof_last_fsync = server.mstime;
         atomicSet(server.fsynced_reploff_pending, server.master_repl_offset);
+    } else if (server.aof_fsync == AOF_FSYNC_BGALWAYS) {
+        if (force) {
+            /* Forced durability (shutdown / stopAppendOnly / rewrite-done): drain
+             * any in-flight bio fsync first so it can't regress the durable offset,
+             * then fsync synchronously. Soft-fail (no exit) so the everysec-style
+             * disk-error path can surface -MISCONF. */
+            bioDrainWorker(BIO_AOF_FSYNC);
+            if (redis_fsync(server.aof_fd) == -1) {
+                serverLog(LL_WARNING, "Can't persist AOF for fsync error when the "
+                    "AOF fsync policy is 'bgalways': %s.", strerror(errno));
+                aofMarkForceFsyncFailure(errno);
+            } else {
+                server.aof_last_incr_fsync_offset = server.aof_last_incr_size;
+                server.aof_last_fsync = server.mstime;
+                aofAdvanceFsyncedReploff(server.master_repl_offset);
+                if (server.aof_last_write_status == C_ERR) {
+                    serverLog(LL_NOTICE, "AOF write error looks solved, Redis can write again.");
+                    server.aof_last_write_status = C_OK;
+                }
+                server.aof_force_fsync_fail_offset = -1;
+            }
+        } else if (!aofFsyncInProgress() &&
+                   server.aof_last_incr_fsync_offset != server.aof_last_incr_size)
+        {
+            /* Fire a background fsync after every flush (no 1s interval). The bio
+             * worker advances fsynced_reploff_pending; replies are gated on it. */
+            aof_background_fsync(server.aof_fd);
+            server.aof_last_incr_fsync_offset = server.aof_last_incr_size;
+            server.aof_last_fsync = server.mstime;
+            /* Wake the event loop when the fsync completes so held clients release
+             * promptly even with no other traffic (FIFO: this comp-rq runs after
+             * the fsync job on the same worker). Skip if nobody is waiting. */
+            if (listLength(server.sync_clients_with_pending) > 0)
+                bioCreateCompRq(BIO_WORKER_AOF_FSYNC, aofBioFsyncNotify, 0, NULL);
+        }
     } else if (server.aof_fsync == AOF_FSYNC_EVERYSEC &&
                server.mstime - server.aof_last_fsync >= 1000) {
         if (!sync_in_progress) {
@@ -3231,7 +3418,12 @@ int rewriteAppendOnlyFileBackground(void) {
         /* Set the initial repl_offset, which will be applied to fsynced_reploff
          * when AOFRW finishes (after possibly being updated by a bio thread) */
         atomicSet(server.fsynced_reploff_pending, server.master_repl_offset);
-        server.fsynced_reploff = 0;
+
+        /* Use -1 here, not 0: under appendfsync bgalways, syncReplWaitLocalAof()
+         * only gates replies while fsynced_reploff != -1, so this suppresses
+         * holding for the whole rewrite instead of stalling every reply behind
+         * a 0 that won't advance until AOFRW finishes. */
+        server.fsynced_reploff = -1;
     }
 
     server.stat_aof_rewrites++;

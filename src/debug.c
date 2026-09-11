@@ -422,6 +422,16 @@ void debugCommand(client *c) {
         const char *help[] = {
 "AOF-FLUSH-SLEEP <microsec>",
 "    Server will sleep before flushing the AOF, this is used for testing.",
+"AOF-FLUSH-FORCE <ERROR|STALL|FSYNC-ERROR> <0|1>",
+"    ERROR: force the AOF flush to fail (set the AOF write error status).",
+"    STALL: skip the AOF flush so the durable offset stalls (no error).",
+"    FSYNC-ERROR: force the BGALWAYS forced (synchronous) fsync path to fail",
+"    while the write() itself still succeeds. Used for testing.",
+"AOF-FSYNC-FAIL <SIMULATE|OFFSET>",
+"    SIMULATE: directly simulate a BGALWAYS forced-fsync-only failure",
+"    without an actual forced flush call.",
+"    OFFSET: return the current server.aof_force_fsync_fail_offset value.",
+"    Used for testing.",
 "ASSERT",
 "    Crash by assertion failed.",
 "CHANGE-REPL-ID",
@@ -985,6 +995,28 @@ NULL
     {
         server.aof_flush_sleep = atoi(c->argv[2]->ptr);
         addReply(c,shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr,"aof-flush-force") && c->argc == 4) {
+        if (!strcasecmp(c->argv[2]->ptr,"error")) {
+            server.aof_flush_force_error = atoi(c->argv[3]->ptr);
+        } else if (!strcasecmp(c->argv[2]->ptr,"stall")) {
+            server.aof_flush_force_stall = atoi(c->argv[3]->ptr);
+        } else if (!strcasecmp(c->argv[2]->ptr,"fsync-error")) {
+            server.aof_flush_force_fsync_error = atoi(c->argv[3]->ptr);
+        } else {
+            addReplySubcommandSyntaxError(c);
+            return;
+        }
+        addReply(c,shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr,"aof-fsync-fail") && c->argc >= 3) {
+        if (!strcasecmp(c->argv[2]->ptr,"simulate") && c->argc == 3) {
+            /* Test-only: directly simulate a BGALWAYS forced-fsync-only failure. */
+            aofMarkForceFsyncFailure(EIO);
+            addReply(c,shared.ok);
+        } else if (!strcasecmp(c->argv[2]->ptr,"offset") && c->argc == 3) {
+            addReplyLongLong(c, server.aof_force_fsync_fail_offset);
+        } else {
+            addReplySubcommandSyntaxError(c);
+        }
     } else if (!strcasecmp(c->argv[1]->ptr,"replicate") && c->argc >= 3) {
         replicationFeedSlaves(server.slaves, -1,
                 c->argv + 2, c->argc - 2);

@@ -6244,8 +6244,11 @@ static void propagateHashFieldDeletion(redisDb *db, sds key, char *field, size_t
 
     enterExecutionUnit(1, 0);
     /* Field expiration is decided by the server, so it must be propagated even
-     * if the command that triggered it asked not to propagate. */
-    alsoPropagateForced(db->id,argv, 3, PROPAGATE_AOF|PROPAGATE_REPL);
+     * if the command that triggered it asked not to propagate. Every call here
+     * is expiry-driven (see the comment above this function), so tag it as a
+     * lazy expire too -- otherwise a read that merely triggered a hash field's
+     * lazy expiry would get its reply held for this HDEL's sake. */
+    alsoPropagateForced(db->id,argv, 3, PROPAGATE_AOF|PROPAGATE_REPL, 1);
     exitExecutionUnit();
 
     /* Propagate the HDEL command */

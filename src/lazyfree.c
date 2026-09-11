@@ -210,6 +210,37 @@ void freeObjAsync(robj *key, robj *obj, int dbid) {
     }
 }
 
+/* Duplicate BULK_STR_REF references in an encoded reply buffer. */
+static void protectBufReferences(char *buf, size_t len) {
+    char *ptr = buf;
+    while (ptr < buf + len) {
+        payloadHeader *header = (payloadHeader *)ptr;
+        ptr += sizeof(payloadHeader);
+        if (header->payload_type == BULK_STR_REF) {
+            bulkStrRef *str_ref = (bulkStrRef *)ptr;
+            if (str_ref->obj != NULL) {
+                robj *new_obj = dupStringObject(str_ref->obj);
+                decrRefCount(str_ref->obj);
+                str_ref->obj = new_obj;
+            }
+        }
+        ptr += header->payload_len;
+    }
+}
+
+/* Duplicate references found in a clientReplyBlock list. */
+static void protectReplyBlockList(list *reply_list) {
+    if (!reply_list || !listLength(reply_list)) return;
+    listIter li;
+    listNode *ln;
+    listRewind(reply_list, &li);
+    while ((ln = listNext(&li))) {
+        clientReplyBlock *block = listNodeValue(ln);
+        if (block && block->buf_encoded)
+            protectBufReferences(block->buf, block->used);
+    }
+}
+
 /* Duplicate client reply objects that reference database objects to avoid race
  * conditions with bio threads during async flushdb.
  *
@@ -236,50 +267,29 @@ static void protectClientReplyObjects(void) {
         client *c = listNodeValue(ln);
 
         /* Process c->buf if it's encoded */
-        if (c->buf_encoded && c->bufpos > 0) {
-            char *ptr = c->buf;
-            while (ptr < c->buf + c->bufpos) {
-                payloadHeader *header = (payloadHeader *)ptr;
-                ptr += sizeof(payloadHeader);
-
-                if (header->payload_type == BULK_STR_REF) {
-                    bulkStrRef *str_ref = (bulkStrRef *)ptr;
-                    if (str_ref->obj != NULL) {
-                        /* Duplicate the string object */
-                        robj *new_obj = dupStringObject(str_ref->obj);
-                        decrRefCount(str_ref->obj);
-                        str_ref->obj = new_obj;
-                    }
-                }
-                ptr += header->payload_len;
-            }
-        }
+        if (c->buf_encoded && c->bufpos > 0)
+            protectBufReferences(c->buf, c->bufpos);
 
         /* Process reply list */
-        if (c->reply && listLength(c->reply)) {
-            listIter reply_li;
-            listNode *reply_ln;
-            listRewind(c->reply, &reply_li);
-            while ((reply_ln = listNext(&reply_li))) {
-                clientReplyBlock *block = listNodeValue(reply_ln);
-                if (block && block->buf_encoded) {
-                    char *ptr = block->buf;
-                    while (ptr < block->buf + block->used) {
-                        payloadHeader *header = (payloadHeader *)ptr;
-                        ptr += sizeof(payloadHeader);
+        protectReplyBlockList(c->reply);
 
-                        if (header->payload_type == BULK_STR_REF) {
-                            bulkStrRef *str_ref = (bulkStrRef *)ptr;
-                            if (str_ref->obj != NULL) {
-                                /* Duplicate the string object */
-                                robj *new_obj = dupStringObject(str_ref->obj);
-                                decrRefCount(str_ref->obj);
-                                str_ref->obj = new_obj;
-                            }
-                        }
-                        ptr += header->payload_len;
-                    }
-                }
+        /* Process parked reply chunks (appendfsync bgalways): a chunk's
+         * reply_list can hold the same BULK_STR_REF zero-copy references as
+         * c->reply -- syncReplFinishCommand() moves/splices nodes into it
+         * verbatim, never deep-copying -- so a reference sitting in an
+         * already-parked chunk needs the same protection before this async
+         * flush frees the object it points to. Without this, the bio thread
+         * freeing the object here races with the eventual, unrelated
+         * decrRefCount() when the chunk is later drained and sent
+         * (releaseBufReferences()), which is exactly the non-atomic
+         * refcount race this function exists to prevent. */
+        if (c->sync_pending_replies) {
+            listIter chunk_li;
+            listNode *chunk_ln;
+            listRewind(c->sync_pending_replies, &chunk_li);
+            while ((chunk_ln = listNext(&chunk_li))) {
+                syncReplyChunk *chunk = listNodeValue(chunk_ln);
+                protectReplyBlockList(chunk->reply_list);
             }
         }
 

@@ -8639,6 +8639,18 @@ int checkModuleAuthentication(client *c, robj *username, robj *password, robj **
     return AUTH_ERR;
 }
 
+/* Run a blocked-client callback outside call() while preserving bgalways
+ * reply holding. moduleFreeContext() must precede the offset comparison since
+ * it flushes propagation queued by the callback when execution nesting ends. */
+static int moduleCallBlockedCallbackWithSyncRepBracket(client *c, RedisModuleCtx *ctx, RedisModuleCmdFunc callback) {
+    long long pre_repl_offset = server.master_repl_offset;
+    syncReplCookie sync_rep = syncReplBeginCommand(c);
+    int ret = callback(ctx, (void **)c->argv, c->argc);
+    moduleFreeContext(ctx);
+    syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
+    return ret;
+}
+
 /* This function is called from module.c in order to check if a module
  * blocked for BLOCKED_MODULE and subtype 'on keys' (bc->blocked_on_keys true)
  * can really be unblocked, since the module was able to serve the client.
@@ -8661,9 +8673,10 @@ int moduleTryServeClientBlockedOnKey(client *c, robj *key) {
     ctx.blocked_privdata = bc->privdata;
     ctx.client = bc->client;
     ctx.blocked_client = bc;
-    if (bc->reply_callback(&ctx,(void**)c->argv,c->argc) == REDISMODULE_OK)
+
+    if (moduleCallBlockedCallbackWithSyncRepBracket(c, &ctx, bc->reply_callback) == REDISMODULE_OK)
         served = 1;
-    moduleFreeContext(&ctx);
+
     return served;
 }
 
@@ -8955,9 +8968,9 @@ void moduleHandleBlockedClients(void) {
             ctx.blocked_client = bc;
             monotime replyTimer;
             elapsedStart(&replyTimer);
-            bc->reply_callback(&ctx,(void**)c->argv,c->argc);
+
+            moduleCallBlockedCallbackWithSyncRepBracket(c, &ctx, bc->reply_callback);
             reply_us = elapsedUs(replyTimer);
-            moduleFreeContext(&ctx);
         }
         if (c && bc->blocked_on_keys_explicit_unblock) {
             serverAssert(bc->blocked_on_keys);
@@ -8976,7 +8989,32 @@ void moduleHandleBlockedClients(void) {
          * replies to send to the client in a thread safe context.
          * We need to glue such replies to the client output buffer and
          * free the temporary client we just used for the replies. */
-        if (c) AddReplyFromClient(c, bc->reply_client);
+        if (c) {
+            /* Reply holding (appendfsync bgalways): bytes in bc->reply_client
+             * come from RM_ReplyWith*() calls through a thread-safe context,
+             * typically a background thread that already ran RM_Call()
+             * before RM_UnblockClient(). Unlike bc->reply_callback above,
+             * there's no callback boundary here for a "before" offset
+             * snapshot, and the module API doesn't tell us whether this
+             * blocked client propagated anything -- so, matching the "assume
+             * it did" call a few lines below (c->woff = server.master_repl_offset),
+             * gate this splice on the current offset too.
+             *
+             * Only bracket when reply_client actually accumulated something:
+             * a keys-blocked client already replied via reply_callback above
+             * (bracketed there), leaving reply_client empty here, so
+             * unconditional bracketing would park a superfluous empty chunk
+             * on every module unblock. */
+            int reply_client_has_data = bc->reply_client->bufpos > 0 || listLength(bc->reply_client->reply) > 0;
+            syncReplCookie sync_rep = {0, 0, NULL};
+            if (reply_client_has_data)
+                sync_rep = syncReplBeginCommand(c);
+
+            AddReplyFromClient(c, bc->reply_client);
+
+            c->woff = server.master_repl_offset;
+            syncReplFinishCommand(c, c->woff, &sync_rep);
+        }
         moduleReleaseTempClient(bc->reply_client);
         moduleReleaseTempClient(bc->thread_safe_ctx_client);
 
@@ -9060,10 +9098,10 @@ void moduleBlockedClientTimedOut(client *c) {
     if (bc->timeout_callback) {
         /* In theory, the user should always pass the timeout handler as an
          * argument, but better to be safe than sorry. */
-        bc->timeout_callback(&ctx,(void**)c->argv,c->argc);
+        moduleCallBlockedCallbackWithSyncRepBracket(c, &ctx, bc->timeout_callback);
+    } else {
+        moduleFreeContext(&ctx);
     }
-
-    moduleFreeContext(&ctx);
 
     updateStatsOnUnblock(c, bc->background_duration, 0, server.stat_total_error_replies != prev_error_replies);
 
