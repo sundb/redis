@@ -1,12 +1,21 @@
 # Compiler settings
 CC = cc
 
+CLANG := $(findstring clang,$(shell $(CC) --version 2>/dev/null | head -1))
+
 ifdef SANITIZER
 ifeq ($(SANITIZER),address)
 	SAN=-fsanitize=address
 else
 ifeq ($(SANITIZER),undefined)
 	SAN=-fsanitize=undefined
+	# The Redis module API calls every RedisModule_* symbol through a
+	# type-erased (void*-cast) function pointer, which is ABI-safe but trips
+	# clang UBSan's -fsanitize=function check. Disable that sub-check (the
+	# option/check is clang-only; gcc has no `function` sanitizer for C).
+	ifeq ($(CLANG),clang)
+		SAN+=-fno-sanitize=function
+	endif
 else
 ifeq ($(SANITIZER),thread)
 	SAN=-fsanitize=thread
