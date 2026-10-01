@@ -561,6 +561,61 @@ bench: $(REDIS_BENCHMARK_NAME)
 gcov:
 	$(MAKE) REDIS_CFLAGS="-fprofile-arcs -ftest-coverage -fprofile-update=atomic -DCOVERAGE_TEST" REDIS_LDFLAGS="-fprofile-arcs -ftest-coverage"
 
+# Profile-guided optimization (PGO). Profiles live in PGO_DIR, which is not
+# touched by 'make clean' / 'make distclean' (use 'make pgo-clean').
+#   make pgo       - instrumented build, run training workload, rebuild with profile
+#   make pgo-gen   - only the instrumented build
+#   make pgo-use   - only the final build using an existing profile
+# Use -fprofile-update=atomic because IO threads can update counters concurrently.
+PGO_DIR?=$(CURDIR)/pgo-data
+ifeq (clang,$(CLANG))
+PGO_GEN_FLAGS=-fprofile-instr-generate=$(PGO_DIR)/redis-%p.profraw
+PGO_USE_FLAGS=-fprofile-instr-use=$(PGO_DIR)/redis.profdata -Wno-profile-instr-unprofiled -Wno-profile-instr-missing
+PGO_LDGEN_FLAGS=-fprofile-instr-generate
+PGO_LDUSE_FLAGS=
+PGO_MERGE=llvm-profdata merge -output=$(PGO_DIR)/redis.profdata $(PGO_DIR)/*.profraw
+else
+PGO_GEN_FLAGS=-fprofile-generate=$(PGO_DIR) -fprofile-update=atomic
+PGO_USE_FLAGS=-fprofile-use=$(PGO_DIR) -fprofile-correction -Wno-missing-profile -Wno-coverage-mismatch
+PGO_LDGEN_FLAGS=-fprofile-generate=$(PGO_DIR)
+PGO_LDUSE_FLAGS=-fprofile-use=$(PGO_DIR)
+PGO_MERGE=true
+endif
+
+pgo-gen:
+	rm -rf $(PGO_DIR)
+	mkdir -p $(PGO_DIR)
+	$(MAKE) REDIS_CFLAGS="$(PGO_GEN_FLAGS)" REDIS_LDFLAGS="$(PGO_LDGEN_FLAGS)"
+
+pgo-train:
+	PGO_DIR="$(PGO_DIR)" LLVM_PROFILE_FILE="$(PGO_DIR)/redis-%p.profraw" ../utils/pgo-train.sh .
+	$(PGO_MERGE)
+
+pgo-use:
+	@test -n "$$(ls -A $(PGO_DIR) 2>/dev/null)" || { echo "No profile data in $(PGO_DIR), run 'make pgo' first"; exit 1; }
+	$(MAKE) REDIS_CFLAGS="$(PGO_USE_FLAGS)" REDIS_LDFLAGS="$(PGO_LDUSE_FLAGS)"
+
+pgo:
+	$(MAKE) pgo-gen
+	$(MAKE) pgo-train
+	$(MAKE) pgo-use
+
+pgo-clean:
+	rm -rf $(PGO_DIR)
+
+.PHONY: pgo pgo-gen pgo-train pgo-use pgo-clean
+
+# Post-link layout optimization with LLVM BOLT (Linux only, needs llvm-bolt,
+# perf2bolt and perf). Run on top of a normal (ideally 'make pgo') build:
+#   make bolt
+# The binary is relinked with --emit-relocs, profiled with the same training
+# workload and rewritten in place (the original is kept as redis-server.pre-bolt).
+bolt:
+	$(MAKE) REDIS_LDFLAGS="-Wl,--emit-relocs $(PGO_LDUSE_FLAGS)" REDIS_CFLAGS="$(if $(wildcard $(PGO_DIR)/*),$(PGO_USE_FLAGS))"
+	../utils/bolt-optimize.sh $(REDIS_SERVER_NAME)
+
+.PHONY: bolt
+
 noopt:
 	$(MAKE) OPTIMIZATION="-O0"
 

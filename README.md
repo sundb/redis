@@ -404,6 +404,25 @@ Redis supports compression of replication stream via zstd as of 8.10. To build w
 make BUILD_COMPRESSION=yes
 ```
 
+#### Profile-guided optimization (PGO) and BOLT
+
+For a faster binary at the cost of a longer build, Redis can be built with profile-guided optimization:
+
+```sh
+make pgo
+```
+
+This builds an instrumented `redis-server`, runs a training workload against it (`utils/pgo-train.sh`, based on `redis-benchmark`), and rebuilds using the collected profile. It works with GCC and Clang (Clang needs `llvm-profdata` in `PATH`). Profiles are kept in `src/pgo-data` (override with `PGO_DIR=`); remove them with `make pgo-clean`. The individual steps are also available as `make pgo-gen`, `make pgo-train` and `make pgo-use`.
+
+On Linux, code layout can be optimized further with [LLVM BOLT](https://github.com/llvm/llvm-project/tree/main/bolt) (requires `llvm-bolt`, `perf2bolt` and `perf`):
+
+```sh
+make pgo
+make bolt
+```
+
+`make bolt` relinks with `--emit-relocs`, profiles the training workload with `perf`, and rewrites `src/redis-server` in place (the original is saved as `src/redis-server.pre-bolt`). Like other build options, these settings are cached until `make distclean`.
+
 ### Fixing build problems with dependencies or cached build options
 
 Redis has some dependencies which are included in the `deps` directory. `make` does not automatically rebuild dependencies even if something in the source code of dependencies changes.
