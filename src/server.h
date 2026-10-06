@@ -95,6 +95,23 @@ struct RedisModuleKeyOptCtx {
 #include "crc64.h"
 #include "keymeta.h"
 
+/* Attributes and metadata for a new key. */
+typedef struct kvSpec {
+    uint8_t no_evict;
+    /*** keymeta: ***/
+    uint16_t numMeta;
+    uint16_t metabits;
+    /* Metadata is stored from the end backward, lowest class ID last. */
+    uint64_t meta[KEY_META_ID_MAX];
+} kvSpec;
+
+static inline void kvSpecInit(kvSpec *spec) {
+    /* meta[] is unused until metadata entries are added. */
+    spec->no_evict = 0;
+    spec->metabits = 0;
+    spec->numMeta = 0;
+}
+
 struct hdr_histogram;
 
 /* helpers */
@@ -759,6 +776,9 @@ typedef enum {
 #define PROPAGATE_NONE 0
 #define PROPAGATE_AOF 1
 #define PROPAGATE_REPL 2
+/* Also-propagate ops without a measured duration. Resolved to leftover
+ * enclosing call() time before propagateNow(). Must not reach feedAppendOnlyFile. */
+#define PROP_DURATION_UNKNOWN -1
 
 /* Actions pause types */
 #define PAUSE_ACTION_CLIENT_WRITE     (1<<0)
@@ -1230,6 +1250,7 @@ typedef struct replBufBlock {
 typedef struct redisDb {
     kvstore *keys;              /* The keyspace for this DB. As metadata, holds keysizes histogram */
     kvstore *expires;           /* Timeout of keys with a timeout set */
+    kvstore *blessed_keys;      /* Blessed key name (sds) -> bless level (slot-partitioned, per-DB, like expires). */
     estore *subexpires;         /* Timeout of sub-keys with a timeout set. (Currently only used for hashes) */
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP)*/
     dict *blocking_keys_unblock_on_nokey;   /* Keys with clients waiting for
@@ -1312,8 +1333,8 @@ typedef struct multiState {
 typedef struct blockingState {
     /* Generic fields. */
     blocking_type btype;                  /* Type of blocking op if CLIENT_BLOCKED. */
-    mstime_t timeout;           /* Blocking operation timeout. If UNIX current time
-                                 * is > timeout then the operation timed out. */
+    uint64_t timeout;           /* Monotonic deadline in milliseconds, or 0 for no timeout.
+                                 * The operation times out when monotonic time > timeout. */
     int unblock_on_nokey;       /* Whether to unblock the client when at least one of the keys
                                    is deleted or does not exist anymore */
     /* BLOCKED_LIST, BLOCKED_ZSET and BLOCKED_STREAM or any other Keys related blocking */
@@ -1847,12 +1868,13 @@ extern clientBufferLimitsConfig clientBufferLimitsDefaults[CLIENT_TYPE_OBUF_COUN
 typedef struct redisOp {
     robj **argv;
     int argc, dbid, target;
+    long long duration;
 } redisOp;
 
 /* Defines an array of Redis operations. There is an API to add to this
  * structure in an easy way.
  *
- * int redisOpArrayAppend(redisOpArray *oa, int dbid, robj **argv, int argc, int target);
+ * int redisOpArrayAppend(redisOpArray *oa, int dbid, robj **argv, int argc, int target, long long duration);
  * void redisOpArrayFree(redisOpArray *oa);
  */
 typedef struct redisOpArray {
@@ -1904,6 +1926,7 @@ struct redisMemOverhead {
         size_t dbid;
         size_t overhead_ht_main;
         size_t overhead_ht_expires;
+        size_t overhead_ht_blessed;
     } *db;
 };
 
@@ -2356,6 +2379,7 @@ struct redisServer {
     int rdb_save_incremental_fsync;   /* fsync incrementally while rdb saving? */
     int aof_last_write_status;      /* C_OK or C_ERR */
     int aof_last_write_errno;       /* Valid if aof write/fsync status is ERR */
+    long long aof_cmd_duration;     /* Best-effort AOF replay time estimate (usec) */
     int aof_load_truncated;         /* Don't stop on unexpected AOF EOF. */
     off_t aof_load_corrupt_tail_max_size; /* The max size of broken AOF tail than can be ignored. */
     int aof_use_rdb_preamble;       /* Specify base AOF to use RDB encoding on AOF rewrites. */
@@ -2631,6 +2655,9 @@ struct redisServer {
     unsigned int watching_clients; /* # of clients are watching keys */
     /* Cluster */
     int cluster_enabled;      /* Is cluster enabled? */
+    int cluster_bus_port_protected_mode; /* Refuse to run a cluster node whose bus
+                                            port is unauthenticated. See
+                                            cluster-bus-port-protected-mode. */
     int cluster_port;         /* Set the cluster port for a node. */
     mstime_t cluster_node_timeout; /* Cluster node timeout. */
     mstime_t cluster_ping_interval;    /* A debug configuration for setting how often cluster nodes send ping messages. */
@@ -3652,7 +3679,7 @@ int bg_unlink(const char *filename);
 
 /* AOF persistence */
 void flushAppendOnlyFile(int force);
-void feedAppendOnlyFile(int dictid, robj **argv, int argc);
+void feedAppendOnlyFile(int dictid, robj **argv, int argc, long long duration);
 void aofRemoveTempFile(pid_t childpid);
 int rewriteAppendOnlyFileBackground(void);
 int loadPreLoadAOFFile(char *file);
@@ -3868,12 +3895,15 @@ int commandCheckArity(struct redisCommand *cmd, int argc, sds *err);
 void startCommandExecution(void);
 int incrCommandStatsOnError(struct redisCommand *cmd, int flags);
 void call(client *c, int flags);
+
+void alsoPropagateEx(int dbid, robj **argv, int argc, int target, long long duration);
 void alsoPropagate(int dbid, robj **argv, int argc, int target);
 void alsoPropagateForced(int dbid, robj **argv, int argc, int target);
 int getPropagateTargetsForCall(client *c, int flags);
 int shouldPropagate(int target);
 void postExecutionUnitOperations(void);
-int redisOpArrayAppend(redisOpArray *oa, int dbid, robj **argv, int argc, int target);
+void postExecutionUnitOperationsEx(long duration);
+int redisOpArrayAppend(redisOpArray *oa, int dbid, robj **argv, int argc, int target, long long duration);
 void redisOpArrayFree(redisOpArray *oa);
 void forceCommandPropagation(client *c, int flags);
 void preventCommandPropagation(client *c);
@@ -4323,10 +4353,19 @@ kvobj *kvobjCommandLookupOrReply(client *c, robj *key, robj *reply);
 static inline kvobj *dictGetKV(const dictEntry *de) {return (kvobj *) dictGetKey(de);}
 kvobj *dbAdd(redisDb *db, robj *key, robj **valref);
 kvobj *dbAddByLink(redisDb *db, robj *key, robj **valref, dictEntryLink *link);
-kvobj *dbAddInternal(redisDb *db, robj *key, robj **valref, dictEntryLink *link, const KeyMetaSpec *m);
-kvobj *dbAddRDBLoad(redisDb *db, sds key, robj **valref, const KeyMetaSpec *keyMetaSpec);
+kvobj *dbAddInternal(redisDb *db, robj *key, robj **valref, dictEntryLink *link, const kvSpec *spec);
+kvobj *dbAddRDBLoad(redisDb *db, sds key, robj **valref, const kvSpec *spec);
 void dbReplaceValue(redisDb *db, robj *key, kvobj **ioKeyVal, int updateKeySizes);
 void dbReplaceValueWithLink(redisDb *db, robj *key, robj **val, dictEntryLink link);
+
+/* BLESS - per-key protection from eviction. */
+void blessSetNoEvict(redisDb *db, kvobj *kv, int enabled);
+int blessRewrite(rio *r, robj *key, kvobj *kv);
+kvstore *blessedKvstoreCreate(int slot_count_bits, int flags);
+int blessIsNoEvict(kvobj *kv);
+unsigned long long blessedKeysCount(void);
+size_t blessedIndexMemUsage(redisDb *db);
+void blessedIndexReconcileMoved(redisDb *db, kvstore *moved);
 
 #define SETKEY_KEEPTTL 1
 #define SETKEY_NO_SIGNAL 2
@@ -4371,7 +4410,8 @@ void emptyDbAsync(redisDb *db);
 void streamMoveIdmpKeys(dict *src, dict *dst, struct slotRangeArray *slots);
 typedef void (*lazyfreeKvsCallback)(kvstore *kvs, void *userdata);
 void emptyDbDataAsync(kvstore *keys, kvstore *expires, ebuckets hexpires,
-                      dict *stream_idmp_keys, lazyfreeKvsCallback callback, void *userdata);
+                      dict *stream_idmp_keys, kvstore *blessed,
+                      lazyfreeKvsCallback callback, void *userdata);
 size_t lazyfreeGetPendingObjectsCount(void);
 size_t lazyfreeGetFreedObjectsCount(void);
 void lazyfreeResetStats(void);
@@ -4474,16 +4514,17 @@ void queueClientForReprocessing(client *c);
 int blockedClientMayTimeout(client *c);
 void replyToBlockedClientTimedOut(client *c);
 int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int unit);
+int getMonotonicTimeoutFromObjectOrReply(client *c, robj *object, uint64_t *timeout, int unit);
 void disconnectAllBlockedClients(void);
 void handleClientsBlockedOnKeys(void);
 void signalKeyAsReady(redisDb *db, robj *key, int type);
 void signalKeyAsReadyNonEmptyList(redisDb *db, robj *key);
-void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeout, int unblock_on_nokey);
+void blockForKeys(client *c, int btype, robj **keys, int numkeys, uint64_t timeout, int unblock_on_nokey);
 void blockClientShutdown(client *c);
 void blockPostponeClient(client *c);
 void blockPostponeClientWithType(client *c, int btype);
-void blockForReplication(client *c, mstime_t timeout, long long offset, long numreplicas);
-void blockForAofFsync(client *c, mstime_t timeout, long long offset, int numlocal, long numreplicas);
+void blockForReplication(client *c, uint64_t timeout, long long offset, long numreplicas);
+void blockForAofFsync(client *c, uint64_t timeout, long long offset, int numlocal, long numreplicas);
 void signalDeletedKeyAsReady(redisDb *db, robj *key, int type);
 void updateStatsOnUnblock(client *c, long blocked_us, long reply_us, int had_errors);
 void scanDatabaseForDeletedKeys(redisDb *emptied, redisDb *replaced_with, struct slotRangeArray *slots);
@@ -4574,6 +4615,7 @@ void delCommand(client *c);
 void delexCommand(client *c);
 void unlinkCommand(client *c);
 void existsCommand(client *c);
+void blessCommand(client *c);
 void setbitCommand(client *c);
 void getbitCommand(client *c);
 void bitfieldCommand(client *c);
