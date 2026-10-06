@@ -2772,6 +2772,22 @@ void readSyncBulkPayload(connection *conn) {
      * from the master */
     enableMasterClientDecompressionIfNeeded(server.master);
 
+    /* The dataset has been replaced by the new master's. Any dirty-key/-DB
+     * tracking retained across a prior demotion referenced uncommitted writes
+     * in the OLD primary's offset space; they are now reconciled (present in
+     * the new dataset => committed, or absent => rolled back). Drop the stale
+     * tracking, and disconnect any client still holding a read whose captured
+     * reply reflects a pre-sync value — it reconnects and re-reads against the
+     * reconciled keyspace. The guard keeps this a no-op for an ordinary full
+     * sync with no unreconciled dirty state. */
+    if (syncReplDirtyStateExists()) {
+        disconnectAllSyncRepPendingClients("full resync from new master reconciled the keyspace");
+        syncReplDirtyKeysFlush();
+        syncReplDirtyDbsFlush();
+    }
+
+    server.sync_repl_dirty_from_demotion = 0;
+
     if (server.supervised_mode == SUPERVISED_SYSTEMD) {
         redisCommunicateSystemd("STATUS=MASTER <-> REPLICA sync: Finished with success. Ready to accept connections in read-write mode.\n");
     }
@@ -3100,6 +3116,24 @@ int slaveTryPartialResynchronization(connection *conn, int read_reply) {
         /* Setup the replication to continue. */
         sdsfree(reply);
         replicationResurrectCachedMaster(conn);
+
+        /* A partial resync continues a single replid lineage from our offset,
+         * so the new master has confirmed it holds the same history up to (and
+         * past) every dirty woff we carried across a prior demotion — those
+         * uncommitted writes are now committed. Serve the reads we were holding
+         * against them (their captured values are valid) and drop the stale
+         * tracking. A full resync takes the disconnect path in
+         * replicaFullSyncDone instead, since it may roll the values back. */
+        if (server.sync_repl_dirty_from_demotion) {
+            server.sync_repl_dirty_from_demotion = 0;
+            /* A normal reconnect does not satisfy local fsync. Even after
+             * reconciling a demotion, retain any local durability dependency. */
+            if (!syncReplBlockReadsLocalActive()) {
+                releaseSyncPendingReadsHeldByDemotion();
+                syncReplDirtyKeysFlush();
+                syncReplDirtyDbsFlush();
+            }
+        }
 
         /* If this instance was restarted and we read the metadata to
          * PSYNC from the persistence file, our replication backlog could
@@ -3620,6 +3654,8 @@ int cancelReplicationHandshake(int reconnect) {
 /* Set replication to the specified master address and port. */
 void replicationSetMaster(char *ip, int port) {
     int was_master = server.masterhost == NULL;
+    if (was_master && syncReplDirtyStateExists())
+        server.sync_repl_dirty_from_demotion = 1;
 
     sdsfree(server.masterhost);
     server.masterhost = NULL;
@@ -3627,6 +3663,15 @@ void replicationSetMaster(char *ip, int port) {
         freeClient(server.master);
     }
     disconnectAllBlockedClients(); /* Clients blocked in master, now slave. */
+    disconnectAllSyncRepPendingClients("instance demoted to replica, master_repl_offset will not advance");
+    /* Deliberately do NOT flush dirty-key/-DB tracking here. The entries mark
+     * writes this node accepted as a primary but never committed (no replica
+     * acked them before the demotion); their values are destined to be rolled
+     * back by the failover, so reads of them must stay gated even as a replica.
+     * clientSyncRepActive / drainSyncPendingReplies / syncReplDirtyKeyAcked keep such
+     * a read-dirty chunk held while sync_repl_dirty_from_demotion is set, without
+     * comparing stale woffs against this replica's local durability frontier.
+     * Resynchronization reconciles the data before lifting that hold. */
 
     /* Setting masterhost only after the call to freeClient since it calls
      * replicationHandleMasterDisconnection which can trigger a re-connect
@@ -3685,6 +3730,13 @@ void replicationUnsetMaster(void) {
     sdsfree(server.masterhost);
     server.masterhost = NULL;
     if (server.master) freeClient(server.master);
+    /* Drop dirty-key tracking accumulated as a replica (local-AOF block-reads):
+     * as a primary the replicas dimension may now apply, and an entry tagged
+     * under replica semantics could otherwise never clear if this node has no
+     * acking replicas yet. New writes re-populate it with primary semantics. */
+    syncReplDirtyKeysFlush();
+    syncReplDirtyDbsFlush();
+    server.sync_repl_dirty_from_demotion = 0;
     replicationDiscardCachedMaster();
     cancelReplicationHandshake(0);
     /* When a slave is turned into a master, the current replication ID
@@ -4976,8 +5028,370 @@ void unblockClientWaitingReplicas(client *c) {
     updateStatsOnUnblock(c, 0, 0, 0);
 }
 
+/* ---- Sync-replication dirty-key tracking (read-blocking) ---------------
+ *
+ * Per-key dirty tracking backing the optional sync-replication read-blocking
+ * gate (sync-replication-block-reads): a read of a key whose latest write has
+ * not yet been acked is deferred until it is (see syncReplDirtyKeysMaxWoff and
+ * its networking.c/db.c callers). Two data structures, owned by the server
+ * struct but only ever touched through the functions below:
+ *
+ *   server.sync_repl_dirty_keys    — dict mapping (dbid, sds key) -> long long woff
+ *                   (highest pending write-offset that touched this key).
+ *                   Keys are owned by the dict (keyDup copies them in;
+ *                   keyDestructor frees on remove/release).  Values are
+ *                   embedded signed integers (dictSetUnsignedIntegerVal /
+ *                   dictGetUnsignedIntegerVal), so no valDestructor is needed.
+ *
+ *   server.sync_repl_dirty_keys_by_woff — list of dirtyOrderedNode* in woff-ascending
+ *                   append order. Each node holds the DB ID, its own sds copy
+ *                   of the key (for the dict lookup during cleanup), and the woff at
+ *                   the time of the upsert.  The list free-method frees each
+ *                   node's sds and the node struct itself.
+ *
+ * Both are NULL until the first syncReplDirtyKeysUpsert call.  All
+ * read/count/cleanup functions handle the NULL/empty case by returning 0 or
+ * doing nothing.
+ *
+ * Each buffered key owns its SDS and captures the modified DB ID at record
+ * time: the outermost client can select another DB before the buffer drains. */
+
+typedef struct {
+    int dbid;
+    sds key;
+} dirtyKey;
+
+typedef struct {
+    long long woff;
+    dirtyKey key;     /* Owns a copy of the dict key for cleanup lookup. */
+} dirtyOrderedNode;
+
+static uint64_t dirtyKeyHash(const void *ptr) {
+    const dirtyKey *key = ptr;
+    return dictSdsHash(key->key) ^ dictGenHashFunction(&key->dbid, sizeof(key->dbid));
+}
+
+static void *dirtyKeyDup(dict *d, const void *ptr) {
+    UNUSED(d);
+    const dirtyKey *key = ptr;
+    dirtyKey *copy = zmalloc(sizeof(*copy));
+    copy->dbid = key->dbid;
+    copy->key = sdsdup(key->key);
+    return copy;
+}
+
+static int dirtyKeyCompare(dictCmpCache *cache, const void *a, const void *b) {
+    const dirtyKey *ka = a, *kb = b;
+    return ka->dbid == kb->dbid && dictSdsKeyCompare(cache, ka->key, kb->key);
+}
+
+static void dirtyKeyFree(void *ptr) {
+    dirtyKey *key = ptr;
+    sdsfree(key->key);
+    zfree(key);
+}
+
+static void dirtyKeyDestructor(dict *d, void *ptr) {
+    UNUSED(d);
+    dirtyKeyFree(ptr);
+}
+
+/* The dict owns each (dbid, key) pair; offsets are embedded integers. */
+static dictType dirtyKeysDictType = {
+    dirtyKeyHash,
+    dirtyKeyDup,
+    NULL,
+    dirtyKeyCompare,
+    dirtyKeyDestructor,
+    NULL,
+    NULL
+};
+
+/* Free a dirtyOrderedNode and its sds key. Used as the list free-method. */
+static void dirtyOrderedNodeFree(void *ptr) {
+    dirtyOrderedNode *n = ptr;
+    sdsfree(n->key.key);
+    zfree(n);
+}
+
+/* Lazily initialise server.sync_repl_dirty_keys and server.sync_repl_dirty_keys_by_woff on
+ * first use. */
+static void syncReplDirtyKeysLazyInit(void) {
+    if (server.sync_repl_dirty_keys == NULL) {
+        server.sync_repl_dirty_keys = dictCreate(&dirtyKeysDictType);
+    }
+    if (server.sync_repl_dirty_keys_by_woff == NULL) {
+        server.sync_repl_dirty_keys_by_woff = listCreate();
+        listSetFreeMethod(server.sync_repl_dirty_keys_by_woff, dirtyOrderedNodeFree);
+    }
+}
+
+/* Upsert (dbid, key) -> max(existing, woff) in server.sync_repl_dirty_keys, and, only
+ * when that actually advances the stored value, append a (woff, dbid, sdsdup(key))
+ * node to server.sync_repl_dirty_keys_by_woff. */
+void syncReplDirtyKeysUpsert(int dbid, sds key, long long woff) {
+    dirtyKey lookup = {.dbid = dbid, .key = key};
+    dictEntry *existing = NULL;
+    dictEntry *de;
+    int advanced;
+
+    syncReplDirtyKeysLazyInit();
+
+    de = dictAddRaw(server.sync_repl_dirty_keys, &lookup, &existing);
+    if (de != NULL) {
+        /* New entry: de is the freshly added entry. */
+        dictSetUnsignedIntegerVal(de, woff);
+        advanced = 1;
+    } else {
+        /* Key already present: existing points to the current entry.
+         * Update to max(existing_woff, woff). */
+        long long cur = dictGetUnsignedIntegerVal(existing);
+        advanced = woff > cur;
+        if (advanced) {
+            dictSetUnsignedIntegerVal(existing, woff);
+        }
+    }
+
+    /* Only append a cleanup-index node when the dict value actually
+     * advanced. A repeat upsert at the same or lower woff — e.g. a script
+     * writing the same key many times, all drained together at one final
+     * offset — is already covered by the node appended when the dict was
+     * last bumped to its current value; appending another would just be a
+     * redundant copy of the (possibly large) key that syncReplDirtyKeysCleanupWhile
+     * would later have to walk and discard as stale, one at a time on the
+     * main thread, for no benefit. */
+    if (!advanced) return;
+
+    dirtyOrderedNode *node = zmalloc(sizeof(dirtyOrderedNode));
+    node->woff = woff;
+    node->key.dbid = dbid;
+    node->key.key = sdsdup(key);
+    listAddNodeTail(server.sync_repl_dirty_keys_by_woff, node);
+}
+
+/* Record a key on the specified client's lazily-created buffer.
+ * Does NOT touch server.sync_repl_dirty_keys.
+ *
+ * The buffer is a set, so recording a key already in it costs nothing: only an
+ * actual insert runs dirtyKeyDup, so a command (or script, or EXEC) writing the
+ * same key N times holds one copy of it, not N. The key destructor reclaims the
+ * copies if the buffer is discarded without being drained. */
+void syncReplDirtyKeyRecord(client *c, int dbid, robj *key) {
+    if (!c) return;
+
+    if (c->sync_repl_dirty_keys == NULL)
+        c->sync_repl_dirty_keys = dictCreate(&dirtyKeysDictType);
+
+    dirtyKey lookup = {.dbid = dbid, .key = key->ptr};
+    dictAddRaw(c->sync_repl_dirty_keys, &lookup, NULL);
+    c->sync_repl_dirty_keys_recorded++;
+}
+
+/* Number of keys recorded on this client by the execution unit in progress
+ * (writes, lazy expiry, eviction). Callers snapshot this around a nested call()
+ * to detect dependencies recorded while the command ran: their woff is only
+ * assigned when the outermost execution unit drains the buffer.
+ *
+ * This counts record calls, not buffered keys: the buffer dedupes, so a read
+ * that lazily expires a key an earlier write already buffered would leave its
+ * size unchanged and the caller would miss the dependency. */
+unsigned long syncReplDirtyKeysRecordCount(client *c) {
+    return c->sync_repl_dirty_keys_recorded;
+}
+
+/* Drain c->sync_repl_dirty_keys into server.sync_repl_dirty_keys with the given woff,
+ * then empty it, freeing each recorded (dbid, key) via the dict key destructor.
+ * The dict itself is kept for reuse by the next execution unit. */
+void syncReplDirtyKeysDrain(client *c, long long woff) {
+    dict *keys = c->sync_repl_dirty_keys;
+
+    /* Reset the record counter even when empty: a caller's snapshot is only
+     * ever compared within one execution unit. */
+    c->sync_repl_dirty_keys_recorded = 0;
+    if (!keys || dictSize(keys) == 0) return;
+
+    dictIterator *di = dictGetIterator(keys);
+    dictEntry *de;
+
+    while ((de = dictNext(di)) != NULL) {
+        dirtyKey *key = dictGetKey(de);
+        syncReplDirtyKeysUpsert(key->dbid, key->key, woff);
+    }
+    dictReleaseIterator(di);
+    dictEmpty(keys, NULL);
+}
+
+/* Finish this client's command-level dirty buffers after the outermost execution
+ * unit has propagated. If tracking is still enabled, drain them using the final
+ * offset. Otherwise discard them: a nested command may have disabled tracking
+ * after an earlier command in the same execution unit populated the buffers.
+ * In either case no command-level state may survive the execution unit. This
+ * must precede dirty-read detection and run even when the command's reply is not
+ * held. */
+void syncReplDirtyDrainClient(client *c, long long woff) {
+    if (server.execution_nesting != 0) return;
+
+    if (!syncReplShouldTrackDirty()) {
+        c->sync_repl_dirty_keys_recorded = 0;
+        if (c->sync_repl_dirty_keys) dictEmpty(c->sync_repl_dirty_keys, NULL);
+        if (c->sync_repl_dirty_dbs) listEmpty(c->sync_repl_dirty_dbs);
+        return;
+    }
+
+    syncReplDirtyKeysDrain(c, woff);
+    syncReplDirtyDbsDrain(c, woff);
+}
+
+/* Return the maximum woff among dirty keys in keys[] in the specified DB,
+ * or 0 if none dirty. Fast-path: returns 0 immediately when the dict is NULL or empty. */
+long long syncReplDirtyKeysMaxWoff(int dbid, robj **keys, int numkeys) {
+    long long max_woff = 0;
+    int i;
+
+    if (server.sync_repl_dirty_keys == NULL || dictSize(server.sync_repl_dirty_keys) == 0)
+        return 0;
+
+    for (i = 0; i < numkeys; i++) {
+        dirtyKey lookup = {.dbid = dbid, .key = keys[i]->ptr};
+        dictEntry *de = dictFind(server.sync_repl_dirty_keys, &lookup);
+        if (de != NULL) {
+            long long w = dictGetUnsignedIntegerVal(de);
+            if (w > max_woff) max_woff = w;
+        }
+    }
+    return max_woff;
+}
+
+/* Walk server.sync_repl_dirty_keys_by_woff from the head.  While the head node's woff
+ * satisfies acked(woff, ud) != 0, pop it and conditionally remove the dict
+ * entry.  The dict entry is removed only when its *current* stored woff also
+ * satisfies acked — meaning no newer write has bumped it past the acked
+ * point.  Stale ordered-list nodes (whose dict entry was bumped to a
+ * higher woff) are simply discarded; the newer node appears later in the
+ * list.  Stops at the first node where acked(node->woff, ud) == 0 (the
+ * predicate is monotonic). No-op when server.sync_repl_dirty_keys_by_woff is NULL or
+ * empty. */
+void syncReplDirtyKeysCleanupWhile(int (*acked)(long long woff, void *ud), void *ud) {
+    if (server.sync_repl_dirty_keys_by_woff == NULL) return;
+
+    while (listLength(server.sync_repl_dirty_keys_by_woff) > 0) {
+        listNode *head = listFirst(server.sync_repl_dirty_keys_by_woff);
+        dirtyOrderedNode *node = (dirtyOrderedNode *)listNodeValue(head);
+
+        if (!acked(node->woff, ud))
+            break;
+
+        /* Pop the node from the list before potentially freeing the sds
+         * inside it — use listDelNoFree so the free-method is not called
+         * here; we manage node lifetime ourselves. */
+        listUnlinkNode(server.sync_repl_dirty_keys_by_woff, head);
+        /* head is now unlinked but not freed; node is still valid. */
+
+        /* Only remove the dict entry if its stored woff is still acked.
+         * If it was bumped by a newer write we leave the entry — the newer
+         * ordered-list node will handle it later. */
+        dictEntry *de = dictFind(server.sync_repl_dirty_keys, &node->key);
+        if (de != NULL) {
+            long long stored = dictGetUnsignedIntegerVal(de);
+            if (acked(stored, ud)) {
+                dictDelete(server.sync_repl_dirty_keys, &node->key);
+            }
+        }
+
+        dirtyOrderedNodeFree(node);
+        /* Free the listNode shell (listUnlinkNode only unlinks, does not free). */
+        zfree(head);
+    }
+}
+
+/* Drop all tracked state. Empties the woff-ordered list (its free-method
+ * frees each node + its sds) and the dict (keyDestructor frees each key).
+ * Both objects stay allocated and reusable; the next upsert refills them. */
+void syncReplDirtyKeysFlush(void) {
+    if (server.sync_repl_dirty_keys_by_woff) listEmpty(server.sync_repl_dirty_keys_by_woff);
+    if (server.sync_repl_dirty_keys) dictEmpty(server.sync_repl_dirty_keys, NULL);
+}
+
+/* Current number of distinct dirty (dbid, key) pairs (dict size).  Returns 0 when
+ * uninitialised or empty. */
+unsigned long syncReplDirtyKeysCount(void) {
+    return server.sync_repl_dirty_keys ? dictSize(server.sync_repl_dirty_keys) : 0;
+}
+
+/* True when either per-key or whole-DB dirty tracking still contains an
+ * unacknowledged dependency. Keep global dirty-state gates on this helper so
+ * neither tracking dimension is accidentally omitted. */
+int syncReplDirtyStateExists(void) {
+    return syncReplDirtyKeysCount() > 0 || server.sync_repl_dirty_dbs_count > 0;
+}
+
+/* Comparison function for qsort: sort by ascending woff, ties broken by
+ * lexicographic key order. */
+typedef struct {
+    sds key;
+    long long woff;
+} dirtyDebugEntry;
+
+static int dirtyDebugEntryCmp(const void *a, const void *b) {
+    const dirtyDebugEntry *ea = (const dirtyDebugEntry *)a;
+    const dirtyDebugEntry *eb = (const dirtyDebugEntry *)b;
+    if (ea->woff < eb->woff) return -1;
+    if (ea->woff > eb->woff) return  1;
+    return sdscmp(ea->key, eb->key);
+}
+
+/* Reply with a flat RESP array [key1, woff1, key2, woff2, ...] sorted by
+ * ascending woff, ties broken by key, for the client's selected DB.
+ * Empty array when this DB has no dirty keys. */
+void syncReplDirtyKeysDebugReply(client *c) {
+    if (server.sync_repl_dirty_keys == NULL || dictSize(server.sync_repl_dirty_keys) == 0) {
+        addReplyArrayLen(c, 0);
+        return;
+    }
+
+    unsigned long count = dictSize(server.sync_repl_dirty_keys);
+    dirtyDebugEntry *entries = zmalloc(sizeof(dirtyDebugEntry) * count);
+    unsigned long idx = 0;
+
+    dictIterator *di = dictGetIterator(server.sync_repl_dirty_keys);
+    dictEntry *de;
+    while ((de = dictNext(di)) != NULL) {
+        dirtyKey *key = dictGetKey(de);
+        if (key->dbid != c->db->id) continue;
+        entries[idx].key = key->key;
+        entries[idx].woff = dictGetUnsignedIntegerVal(de);
+        idx++;
+    }
+    dictReleaseIterator(di);
+
+    count = idx;
+    qsort(entries, count, sizeof(dirtyDebugEntry), dirtyDebugEntryCmp);
+
+    addReplyArrayLen(c, (long)count * 2);
+    for (unsigned long i = 0; i < count; i++) {
+        addReplyBulkCBuffer(c, entries[i].key, sdslen(entries[i].key));
+        addReplyLongLong(c, entries[i].woff);
+    }
+
+    zfree(entries);
+}
+
 /* Check if there are clients blocked in WAIT or WAITAOF that can be unblocked
  * since we received enough ACKs from slaves. */
+/* Predicate for syncReplDirtyKeysCleanupWhile: is `woff` satisfied under the
+ * CURRENT sync-replication config? Mirrors the chunk-drain check in
+ * drainSyncPendingReplies so a dirty-key entry clears exactly when a chunk of
+ * the same woff would drain. Monotonic in woff. */
+static int syncReplDirtyKeyAcked(long long woff, void *ud) {
+    (void)ud;
+    int apply_local = syncReplBlockReadsLocalActive();
+    /* Keep genuine demotion state until resync, but let ordinary replica
+     * entries clear when the operator disables their durability dimension. */
+    if (server.masterhost != NULL && server.sync_repl_dirty_from_demotion) return 0;
+    if (apply_local && server.fsynced_reploff < woff) return 0;
+    return 1;
+}
+
 void processClientsWaitingReplicas(void) {
     long long last_offset = 0;
     long long last_aof_offset = 0;
@@ -5037,6 +5451,15 @@ void processClientsWaitingReplicas(void) {
             if (numlocal < c->bstate.numlocal) continue;
         }
 
+        /* Reply holding (appendfsync bgalways): this writes straight into c's
+         * reply buffer, entirely outside call(). WAIT/WAITAOF's own reply never
+         * propagates a write itself, so this only needs ordering (passthrough)
+         * protection against an earlier, still-parked reply on the same
+         * connection -- same reasoning as replyToBlockedClientTimedOut()'s
+         * BLOCKED_WAIT/BLOCKED_WAITAOF branches, this function's timeout twin. */
+        long long pre_repl_offset = server.master_repl_offset;
+        syncReplCookie sync_rep = syncReplBeginCommand(c);
+
         /* Reply before unblocking, because unblock client calls reqresAppendResponse */
         if (is_wait_aof) {
             /* WAITAOF has an array reply */
@@ -5047,7 +5470,62 @@ void processClientsWaitingReplicas(void) {
             addReplyLongLong(c, numreplicas);
         }
 
+        syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
+
         unblockClient(c, 1);
+    }
+
+    /* Sync-replication: drain any per-client pending chunks whose ack
+     * conditions are now satisfied. drainSyncPendingReplies() may unlink
+     * the client from server.sync_repl_pending_clients; listNext caches
+     * the next pointer before returning the current node so iteration is
+     * safe across that removal. */
+    monotime now = getMonotonicUs();
+    listRewind(server.sync_repl_pending_clients, &li);
+    while ((ln = listNext(&li))) {
+        client *c = ln->value;
+        drainSyncPendingReplies(c);
+
+        /* Hard-timeout disconnect: opt-in via sync_repl_timeout
+         * (0=infinite). If drain left chunks behind and the head chunk
+         * has been waiting longer than the configured timeout, free the
+         * client async. freeClient runs freeSyncPendingReplies which
+         * adjusts accounting and counts the wait time into the hold
+         * latency metric. */
+        if (server.sync_repl_timeout > 0 &&
+            c->sync_repl_pending_replies != NULL &&
+            listLength(c->sync_repl_pending_replies) > 0)
+        {
+            syncReplyChunk *head = listNodeValue(listFirst(c->sync_repl_pending_replies));
+            monotime elapsed = (now - head->enqueue_us) / 1000;
+            if (elapsed > (monotime)server.sync_repl_timeout) {
+                server.stat_sync_repl_timeout_disconnects++;
+                serverLog(LL_NOTICE,
+                    "Disconnecting client id=%llu: sync-replication-timeout "
+                    "exceeded (%lldms > %dms)", (unsigned long long)c->id,
+                    (long long)elapsed, server.sync_repl_timeout);
+                freeClientAsync(c);
+            }
+        }
+    }
+
+    /* Sync-replication read-blocking: clear dirty-key entries whose woff is
+     * now acked, using the same predicate that releases chunks above. Cheap
+     * no-op when the dict is empty (the common no-lag case). */
+    syncReplDirtyKeysCleanupWhile(syncReplDirtyKeyAcked, NULL);
+
+    /* Per-DB flush offsets (FLUSHDB/FLUSHALL/SWAPDB): clear any DB whose
+     * dirty_repl_offset is now acked, by the same predicate, so flushed-DB read
+     * gating releases in lockstep with per-key/chunk release. O(dbnum) only when
+     * some DB is dirty; the counter keeps the common case a single branch. */
+    if (server.sync_repl_dirty_dbs_count > 0) {
+        for (int j = 0; j < server.dbnum && server.sync_repl_dirty_dbs_count > 0; j++) {
+            long long off = server.db[j].dirty_repl_offset;
+            if (off != 0 && syncReplDirtyKeyAcked(off, NULL)) {
+                server.db[j].dirty_repl_offset = 0;
+                server.sync_repl_dirty_dbs_count--;
+            }
+        }
     }
 }
 

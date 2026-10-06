@@ -683,6 +683,8 @@ typedef enum {
 #define AOF_FSYNC_NO 0
 #define AOF_FSYNC_ALWAYS 1
 #define AOF_FSYNC_EVERYSEC 2
+#define AOF_FSYNC_BGALWAYS 3 /* Like ALWAYS, but fsync runs in the bio thread and
+                              * client replies are held until durable. */
 
 /* Replication diskless load defines */
 #define REPL_DISKLESS_LOAD_DISABLED 0
@@ -708,6 +710,14 @@ typedef enum {
 #define PROTECTED_ACTION_ALLOWED_NO 0
 #define PROTECTED_ACTION_ALLOWED_YES 1
 #define PROTECTED_ACTION_ALLOWED_LOCAL 2
+
+/* sync-replication-block-reads: which durability dimension gates a held read
+ * of a dirty key.
+ *   no    (0)     - reads are never held
+ *   local (LOCAL) - hold the read until the dirtying write is fsynced locally
+ *                   (requires appendfsync bgalways) */
+#define SYNC_REPL_AOF_NO 0
+#define SYNC_REPL_AOF_LOCAL (1<<0)
 
 /* Sets operations codes */
 #define SET_OP_UNION 0
@@ -1196,6 +1206,26 @@ typedef struct clientReplyBlock {
     char buf[];
 } clientReplyBlock;
 
+/* Synchronous-replication: a reply chunk parked until its woff is acked.
+ * The chunk owns a list of clientReplyBlock* with the same node format as
+ * c->reply; moving nodes between c->reply and chunk->reply_list preserves
+ * BULK_STR_REF zero-copy refs (no deep copy). */
+typedef struct syncReplyChunk {
+    long long woff;            /* min offset that must be acked before drain */
+    monotime  enqueue_us;      /* monotonic enqueue time, for the hold-latency metric and the hard timeout */
+    int       read_dirty;      /* 1 = pure read of a dirty key, gated by block-reads;
+                                * 0 = write chunk, gated by the write-side config */
+    list     *reply_list;      /* list of clientReplyBlock*, same format as c->reply */
+} syncReplyChunk;
+
+/* Cookie threaded from syncReplBeginCommand() to syncReplFinish*(): whether
+ * this call owns the client's outermost active bracket plus the c->buf side of
+ * its reply boundary. */
+typedef struct syncReplCookie {
+    int active;
+    size_t bufpos_start;    /* bytes past it are this command's */
+} syncReplCookie;
+
 /* Replication buffer blocks is the list of replBufBlock.
  *
  * +--------------+       +--------------+       +--------------+
@@ -1262,6 +1292,7 @@ typedef struct redisDb {
     dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
     int id;                     /* Database ID */
     long long avg_ttl;          /* Average TTL, just for stats */
+    long long dirty_repl_offset; /* block-reads: woff of this DB's last FLUSHDB/FLUSHALL/SWAPDB. */
     unsigned long expires_cursor; /* Cursor of the active expire cycle. */
 } redisDb;
 
@@ -1572,6 +1603,24 @@ typedef struct client {
     unsigned long long reply_bytes; /* Tot bytes of objects in reply list. */
     unsigned long long reply_bytes_shared; /* Bytes shared with keyspace objects in reply list. */
     unsigned long long reply_bytes_unshared; /* Cached subset of reply_bytes_shared solely owned by this client. */
+
+    /* Sync-replication: replies parked until acked. */
+    list *sync_repl_pending_replies;                   /* syncReplyChunk*, head drains first */
+    size_t sync_repl_pending_mem;                      /* Sum of every parked chunk's bytes + overhead */
+    listNode *sync_repl_pending_list_node;             /* Node in server.sync_repl_pending_clients, or NULL */
+    int sync_repl_bracket_active;                      /* Outermost Begin/Finish owns the reply boundary */
+    listNode *sync_repl_boundary_node;                 /* c->reply tail at command start, for a fresh node */
+    /* Baselines taken at processCommand entry, to isolate this command's own offset contribution. */
+    long long sync_repl_pre_command_offset;            /* Net of lazy expiry */
+    long long sync_repl_pre_command_evict_offset;      /* Eviction; only under block-reads */
+    /* block-reads: read dependencies from inner call()s (EXEC, scripts), folded into this command. */
+    long long sync_repl_read_woff;                     /* Highest unacked offset any of them read */
+    int sync_repl_read_dirty;                          /* One of them recorded dirty keys, offset known at c->woff */
+    /* block-reads: per-command dirty records, lazily created and drained at call() end. */
+    dict *sync_repl_dirty_keys;                        /* Drains into server.sync_repl_dirty_keys; owns each (dbid, key) */
+    unsigned long sync_repl_dirty_keys_recorded;       /* Record calls, repeats included; the dict dedupes */
+    list *sync_repl_dirty_dbs;                         /* Drains into redisDb.dirty_repl_offset; encoded ids. */
+
     list *deferred_reply_errors;    /* Used for module thread safe contexts. */
     size_t sentlen;         /* Amount of bytes already sent in the current
                                buffer or object being sent. */
@@ -1865,16 +1914,24 @@ extern clientBufferLimitsConfig clientBufferLimitsDefaults[CLIENT_TYPE_OBUF_COUN
  *
  * Currently only used to additionally propagate more commands to AOF/Replication
  * after the propagation of the executed command. */
+typedef enum redisOpReplOffsetType {
+    REDIS_OP_REPL_OFFSET_NONE = 0,
+    REDIS_OP_REPL_OFFSET_LAZY_EXPIRE,
+    REDIS_OP_REPL_OFFSET_EVICTION,
+} redisOpReplOffsetType;
+
 typedef struct redisOp {
     robj **argv;
     int argc, dbid, target;
     long long duration;
+    redisOpReplOffsetType repl_offset_type; /* Offset advance excluded from sync-replication waits. */
 } redisOp;
 
 /* Defines an array of Redis operations. There is an API to add to this
  * structure in an easy way.
  *
- * int redisOpArrayAppend(redisOpArray *oa, int dbid, robj **argv, int argc, int target, long long duration);
+ * int redisOpArrayAppend(redisOpArray *oa, int dbid, robj **argv, int argc, int target,
+ *                        long long duration, redisOpReplOffsetType repl_offset_type);
  * void redisOpArrayFree(redisOpArray *oa);
  */
 typedef struct redisOpArray {
@@ -2241,6 +2298,12 @@ struct redisServer {
     long long stat_sync_full;       /* Number of full resyncs with slaves. */
     long long stat_sync_partial_ok; /* Number of accepted PSYNC requests. */
     long long stat_sync_partial_err;/* Number of unaccepted PSYNC requests. */
+    /* Implicit sync-replication (reply deferral). */
+    long long stat_sync_repl_hold_depth_count;      /* Chunks enqueued, one per deferred command */
+    long long stat_sync_repl_hold_depth_sum;        /* Client's pending-chunk count sampled at each enqueue */
+    long long stat_sync_repl_hold_latency_usec;     /* Total chunk hold time, usec, summed as chunks leave */
+    long long stat_sync_repl_timeout_disconnects;   /* Clients freed for exceeding sync_repl_timeout */
+    long long stat_sync_repl_role_loss_disconnects; /* Clients freed when this node demoted to replica */
     list *slowlog;                  /* SLOWLOG list of commands */
     long long slowlog_entry_id;     /* SLOWLOG current entry ID */
     long long slowlog_log_slower_than; /* SLOWLOG time limit (to get logged) */
@@ -2337,6 +2400,11 @@ struct redisServer {
     int set_proc_title;             /* True if change proc title */
     char *proc_title_template;      /* Process title template format */
     clientBufferLimitsConfig client_obuf_limits[CLIENT_TYPE_OBUF_COUNT];
+    /* Implicit sync-replication (reply deferral); runtime state is in the
+     * "Synchronous replication" section below. See syncReplyChunk. */
+    int sync_repl_timeout;               /* Hard timeout ms, 0 = infinite */
+    int sync_repl_block_reads;           /* SYNC_REPL_AOF_* value; 0 = off */
+    int sync_repl_block_reads_on_expire; /* Also block reads on keys with a pending expire */
     int pause_cron;                 /* Don't run cron tasks (debug) */
     int dict_resizing;              /* Whether to allow main dict and expired dict to be resized (debug) */
     int latency_tracking_enabled;   /* 1 if extended latency tracking is enabled, 0 otherwise. */
@@ -2363,6 +2431,9 @@ struct redisServer {
     off_t aof_last_incr_fsync_offset; /* AOF offset which is already requested to be synced to disk.
                                        * Compare with the aof_last_incr_size. */
     int aof_flush_sleep;            /* Micros to sleep before flush. (used by tests) */
+    int aof_flush_force_stall;      /* Skip flush so the durable offset stalls. (used by tests) */
+    int aof_flush_force_error;      /* Force flushAppendOnlyFile to fail. (used by tests) */
+    int aof_flush_force_fsync_error; /* Fail the BGALWAYS forced fsync, not the write(). (used by tests) */
     int aof_rewrite_scheduled;      /* Rewrite once BGSAVE terminates. */
     sds aof_buf;      /* AOF buffer, written before entering the event loop */
     int aof_fd;       /* File descriptor of currently selected AOF file */
@@ -2379,6 +2450,8 @@ struct redisServer {
     int rdb_save_incremental_fsync;   /* fsync incrementally while rdb saving? */
     int aof_last_write_status;      /* C_OK or C_ERR */
     int aof_last_write_errno;       /* Valid if aof write/fsync status is ERR */
+    long long aof_force_fsync_fail_offset; /* master_repl_offset of a BGALWAYS forced-fsync failure whose
+                                            * write() succeeded; -1 if none pending self-heal. */
     long long aof_cmd_duration;     /* Best-effort AOF replay time estimate (usec) */
     int aof_load_truncated;         /* Don't stop on unexpected AOF EOF. */
     off_t aof_load_corrupt_tail_max_size; /* The max size of broken AOF tail than can be ignored. */
@@ -2547,6 +2620,19 @@ struct redisServer {
     /* Synchronous replication. */
     list *clients_waiting_acks;         /* Clients waiting in WAIT or WAITAOF. */
     int get_ack_from_slaves;            /* If true we send REPLCONF GETACK. */
+
+    /* Implicit sync-replication (reply deferral). See syncReplyChunk. */
+    list *sync_repl_pending_clients;        /* Clients with a non-empty sync_repl_pending_replies. */
+    long long sync_repl_pending_chunks;     /* Chunks currently parked across all pending clients. */
+    /* Offset advance the chunking gate subtracts: propagation a command didn't logically perform. */
+    long long sync_repl_expire_offset;      /* Lazy expiry; a promoted replica would drop the key too. */
+    long long sync_repl_evict_offset;       /* Eviction; only under block-reads, tracked per-key instead. */
+    /* Dirty (written but not yet acked) state, gating reads under block-reads. */
+    int sync_repl_dirty_from_demotion;      /* Not yet reconciled with the new master. */
+    int sync_repl_dirty_dbs_count;          /* DBs with a non-zero redisDb.dirty_repl_offset. */
+    dict *sync_repl_dirty_keys;             /* (dbid, key) -> highest pending woff touching it. */
+    list *sync_repl_dirty_keys_by_woff;     /* woff-ascending index over sync_repl_dirty_keys. */
+
     long long repl_current_sync_attempts;    /* Number of times in current configuration, the replica attempted to sync since the last success. */
     long long repl_total_sync_attempts;      /* Number of times in current configuration, the replica attempted to sync to a master  */
     time_t repl_disconnect_start_time;       /* Unix time that master disconnection start */
@@ -3483,6 +3569,23 @@ client *lookupClientByID(uint64_t id);
 int authRequired(client *c);
 void putClientInPendingWriteQueue(client *c);
 getKeysResult *getClientCachedKeyResult(pendingCommand *pcmd);
+
+/* Sync-replication reply chunking (see syncReplyChunk / syncReplCookie). */
+int syncReplWaitLocalAof(void);
+int syncReplBlockReadsLocalActive(void);
+int syncReplShouldTrackDirty(void);
+syncReplCookie syncReplBeginCommand(client *c);
+void syncReplFinishCommand(client *c, long long woff, int read_dirty, const syncReplCookie *sr);
+void syncReplFinishByOffset(client *c, long long pre_work_repl_offset, const syncReplCookie *sr);
+void syncReplFinishOrDeferChunk(client *c, const syncReplCookie *sr);
+long long syncReadMaxDirtyWoff(client *c, const pendingCommand *pcmd);
+long long syncReadDirtyDependency(client *c, const pendingCommand *pcmd);
+void drainSyncPendingReplies(client *c);
+void freeSyncPendingReplies(client *c);
+void disconnectAllSyncRepPendingClients(const char *reason);
+void disconnectSyncRepPendingClientsIfAofGateDisarmed(const char *reason);
+void releaseSyncPendingReadsHeldByDemotion(void);
+
 /* reply macros */
 #define ADD_REPLY_BULK_CBUFFER_STRING_CONSTANT(c, str) addReplyBulkCBuffer(c, str, strlen(str))
 
@@ -3652,7 +3755,22 @@ int replDataBufStreamToDb(replDataBuf *buf, replDataBufToDbCtx *ctx);
 int replicaFromIOThreadHasPendingRead(client *c);
 void putReplicasInPendingClientsToIOThreads(void);
 int replicationCronRunMasterClient(void);
-
+/* Sync-replication dirty tracking. */
+void syncReplDirtyKeysUpsert(int dbid, sds key, long long woff);
+void syncReplDirtyKeyRecord(client *c, int dbid, robj *key);
+void syncReplDirtyKeysDrain(client *c, long long woff);
+void syncReplDirtyDrainClient(client *c, long long woff);
+long long syncReplDirtyKeysMaxWoff(int dbid, robj **keys, int numkeys);
+void syncReplDirtyKeysCleanupWhile(int (*acked)(long long woff, void *ud), void *ud);
+void syncReplDirtyKeysFlush(void);
+unsigned long syncReplDirtyKeysCount(void);
+int syncReplDirtyStateExists(void);
+unsigned long syncReplDirtyKeysRecordCount(client *c);
+void syncReplDirtyKeysDebugReply(client *c);
+/* Per-DB dirty offset, for wholesale DB modifications (dbid == -1 means all DBs). */
+void syncReplDirtyDbsRecord(client *c, int dbid);
+void syncReplDirtyDbsDrain(client *c, long long woff);
+void syncReplDirtyDbsFlush(void);
 /* Generic persistence functions */
 void startLoadingFile(size_t size, char* filename, int rdbflags);
 void startLoading(size_t size, int rdbflags, int async);
@@ -3679,6 +3797,9 @@ int bg_unlink(const char *filename);
 
 /* AOF persistence */
 void flushAppendOnlyFile(int force);
+void aofMarkForceFsyncFailure(int errno_val);
+void aofAdvanceFsyncedReploff(long long offset);
+long long aofRefreshFsyncedReploff(void);
 void feedAppendOnlyFile(int dictid, robj **argv, int argc, long long duration);
 void aofRemoveTempFile(pid_t childpid);
 int rewriteAppendOnlyFileBackground(void);
@@ -3896,14 +4017,19 @@ void startCommandExecution(void);
 int incrCommandStatsOnError(struct redisCommand *cmd, int flags);
 void call(client *c, int flags);
 
+int isScriptCommand(struct redisCommand *cmd);
 void alsoPropagateEx(int dbid, robj **argv, int argc, int target, long long duration);
+void alsoPropagateWithReplOffsetType(int dbid, robj **argv, int argc, int target,
+                                     long long duration, redisOpReplOffsetType repl_offset_type);
 void alsoPropagate(int dbid, robj **argv, int argc, int target);
-void alsoPropagateForced(int dbid, robj **argv, int argc, int target);
+void alsoPropagateForced(int dbid, robj **argv, int argc, int target,
+                         redisOpReplOffsetType repl_offset_type);
 int getPropagateTargetsForCall(client *c, int flags);
 int shouldPropagate(int target);
 void postExecutionUnitOperations(void);
 void postExecutionUnitOperationsEx(long duration);
-int redisOpArrayAppend(redisOpArray *oa, int dbid, robj **argv, int argc, int target, long long duration);
+int redisOpArrayAppend(redisOpArray *oa, int dbid, robj **argv, int argc, int target,
+                       long long duration, redisOpReplOffsetType repl_offset_type);
 void redisOpArrayFree(redisOpArray *oa);
 void forceCommandPropagation(client *c, int flags);
 void preventCommandPropagation(client *c);
@@ -4322,7 +4448,7 @@ void dbgRunAssertions(redisDb *db);
 int removeExpire(redisDb *db, robj *key);
 void deleteExpiredKeyAndPropagate(redisDb *db, robj *keyobj);
 void deleteEvictedKeyAndPropagate(redisDb *db, robj *keyobj, long long *key_mem_freed);
-void propagateDeletion(redisDb *db, robj *key, int lazy);
+void propagateDeletion(redisDb *db, robj *key, int lazy, redisOpReplOffsetType repl_offset_type);
 int keyIsExpired(redisDb *db, sds key, kvobj *kv);
 int confAllowsExpireDel(void);
 long long getExpire(redisDb *db, sds key, kvobj *kv);

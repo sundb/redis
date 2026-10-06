@@ -83,6 +83,7 @@ configEnum supervised_mode_enum[] = {
 configEnum aof_fsync_enum[] = {
     {"everysec", AOF_FSYNC_EVERYSEC},
     {"always", AOF_FSYNC_ALWAYS},
+    {"bgalways", AOF_FSYNC_BGALWAYS},
     {"no", AOF_FSYNC_NO},
     {NULL, 0}
 };
@@ -165,6 +166,16 @@ configEnum propagation_error_behavior_enum[] = {
     {"ignore", PROPAGATION_ERR_BEHAVIOR_IGNORE},
     {"panic", PROPAGATION_ERR_BEHAVIOR_PANIC},
     {"panic-on-replicas", PROPAGATION_ERR_BEHAVIOR_PANIC_ON_REPLICAS},
+    {NULL, 0}
+};
+
+/* sync-replication-block-reads: which durability dimension gates a held read
+ * of a dirty key.
+ *   local - hold the read until the dirtying write is locally fsynced
+ *           (engaged by appendfsync bgalways) */
+configEnum sync_replication_block_reads_enum[] = {
+    {"no", SYNC_REPL_AOF_NO},
+    {"local", SYNC_REPL_AOF_LOCAL},
     {NULL, 0}
 };
 
@@ -497,6 +508,8 @@ static void clusterBusWarnIfUnprotected(void) {
         "is reachable by trusted hosts only.");
 }
 
+int validateSyncReplConfig(const char **err);
+
 void loadServerConfigFromString(char *config) {
     deprecatedConfig deprecated_configs[] = {
         {"list-max-ziplist-entries", 2, 2},
@@ -686,6 +699,8 @@ void loadServerConfigFromString(char *config) {
      * been parsed. */
     config_load_depth--;
     if (config_load_depth == 0) {
+        if (!validateSyncReplConfig(&err)) goto loaderr;
+
         /* Refuse a cluster node whose bus port would be left unauthenticated,
          * unless the operator waived protection. Checked before anything else in
          * this block so that a fatal error is not preceded by unrelated warnings.
@@ -2443,6 +2458,31 @@ static void numericConfigRewrite(standardConfig *config, const char *name, struc
     embedConfigInterface(NULL, setfn, getfn, rewritefn, applyfn) \
 }
 
+int validateSyncReplConfig(const char **err) {
+    /* Defers a read until the write it depends on is durable in this node's own
+     * AOF. Mirrors syncReplWaitLocalAof() (networking.c), minus its
+     * fsynced_reploff check: that is transient runtime state -- pinned at -1
+     * during the initial AOF rewrite -- which a config decision must not depend
+     * on. Keep the two in step. */
+    if (server.sync_repl_block_reads == SYNC_REPL_AOF_LOCAL) {
+        if (!(server.aof_enabled && server.aof_fsync == AOF_FSYNC_BGALWAYS)) {
+            *err = "sync-replication-block-reads local defers a read until the "
+                   "local AOF fsync, so it requires appendfsync bgalways "
+                   "(with appendonly yes)";
+            return 0;
+        }
+    }
+
+    /* Only refines which writes block-reads tracks, so it does nothing at all
+     * while the master switch is off. */
+    if (server.sync_repl_block_reads_on_expire && !server.sync_repl_block_reads) {
+        *err = "sync-replication-block-reads-on-expire refines "
+               "sync-replication-block-reads, so it requires it to be enabled";
+        return 0;
+    }
+    return 1;
+}
+
 static int isValidActiveDefrag(int val, const char **err) {
 #ifndef HAVE_DEFRAG
     if (val) {
@@ -2753,6 +2793,10 @@ static int updateWatchdogPeriod(const char **err) {
 }
 
 static int updateAppendonly(const char **err) {
+    /* Refuse before touching the AOF machinery: turning appendonly off may
+     * remove the AOF that sync-replication-block-reads local depends on. */
+    if (!validateSyncReplConfig(err)) return 0;
+
     /* If loading flag is set, AOF might have been stopped temporarily, and it
      * will be restarted depending on server.aof_enabled flag after loading is
      * completed. So, we just need to update 'server.aof_enabled' which has been
@@ -2830,12 +2874,17 @@ int updateRequirePass(const char **err) {
 }
 
 int updateAppendFsync(const char **err) {
-    UNUSED(err);
-    if (server.aof_fsync == AOF_FSYNC_ALWAYS) {
+    if (!validateSyncReplConfig(err)) return 0;
+
+    if (server.aof_fsync == AOF_FSYNC_ALWAYS || server.aof_fsync == AOF_FSYNC_BGALWAYS) {
         /* Wait for all bio jobs related to AOF to drain before proceeding. This prevents a race
          * between updates to `fsynced_reploff_pending` done in the main thread and those done on the
-         * worker thread. */
+         * worker thread. The main thread updates it in the synchronous ALWAYS path and in the
+         * BGALWAYS forced-fsync path. */
         bioDrainWorker(BIO_AOF_FSYNC);
+    }
+    if (server.aof_fsync != AOF_FSYNC_BGALWAYS) {
+        disconnectSyncRepPendingClientsIfAofGateDisarmed("appendfsync changed away from bgalways");
     }
     return 1;
 }
@@ -3480,6 +3529,8 @@ standardConfig static_configs[] = {
     createBoolConfig("cluster-enabled", NULL, IMMUTABLE_CONFIG, server.cluster_enabled, 0, NULL, NULL),
     createBoolConfig("cluster-bus-port-protected-mode", NULL, MODIFIABLE_CONFIG, server.cluster_bus_port_protected_mode, 1, NULL, applyClusterBusPortProtectedMode),
     createBoolConfig("appendonly", NULL, MODIFIABLE_CONFIG, server.aof_enabled, 0, NULL, updateAppendonly),
+    createEnumConfig("sync-replication-block-reads", NULL, MODIFIABLE_CONFIG, sync_replication_block_reads_enum, server.sync_repl_block_reads, SYNC_REPL_AOF_NO, NULL, validateSyncReplConfig),
+    createBoolConfig("sync-replication-block-reads-on-expire", NULL, MODIFIABLE_CONFIG, server.sync_repl_block_reads_on_expire, 0, NULL, validateSyncReplConfig),
     createBoolConfig("cluster-allow-reads-when-down", NULL, MODIFIABLE_CONFIG, server.cluster_allow_reads_when_down, 0, NULL, NULL),
     createBoolConfig("cluster-allow-pubsubshard-when-down", NULL, MODIFIABLE_CONFIG, server.cluster_allow_pubsubshard_when_down, 1, NULL, NULL),
     createBoolConfig("crash-log-enabled", NULL, MODIFIABLE_CONFIG, server.crashlog_enabled, 1, NULL, updateSighandlerEnabled),
@@ -3584,6 +3635,7 @@ standardConfig static_configs[] = {
     createIntConfig("hz", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.config_hz, CONFIG_DEFAULT_HZ, INTEGER_CONFIG, NULL, updateHZ),
     createIntConfig("min-replicas-to-write", "min-slaves-to-write", MODIFIABLE_CONFIG, 0, INT_MAX, server.repl_min_slaves_to_write, 0, INTEGER_CONFIG, NULL, updateGoodSlaves),
     createIntConfig("min-replicas-max-lag", "min-slaves-max-lag", MODIFIABLE_CONFIG, 0, INT_MAX, server.repl_min_slaves_max_lag, 10, INTEGER_CONFIG, NULL, updateGoodSlaves),
+    createIntConfig("sync-replication-timeout", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.sync_repl_timeout, 0, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("watchdog-period", NULL, MODIFIABLE_CONFIG | HIDDEN_CONFIG, 0, INT_MAX, server.watchdog_period, 0, INTEGER_CONFIG, NULL, updateWatchdogPeriod),
     createIntConfig("shutdown-timeout", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.shutdown_timeout, 10, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("repl-diskless-sync-max-replicas", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.repl_diskless_sync_max_replicas, 0, INTEGER_CONFIG, NULL, NULL),

@@ -707,6 +707,9 @@ void moduleReleaseTempClient(client *c) {
     c->reply_bytes = c->reply_bytes_shared = c->reply_bytes_unshared = 0;
     c->duration = 0;
     resetClient(c, -1);
+    /* A temp client must never carry recorded dirty keys/DBs back to the pool. */
+    serverAssert(c->sync_repl_dirty_keys == NULL || dictSize(c->sync_repl_dirty_keys) == 0);
+    serverAssert(c->sync_repl_dirty_dbs == NULL || listLength(c->sync_repl_dirty_dbs) == 0);
     serverAssert(c->all_argv_len_sum == 0);
     c->bufpos = 0;
     c->flags = CLIENT_MODULE;
@@ -8666,6 +8669,37 @@ int checkModuleAuthentication(client *c, robj *username, robj *password, robj **
     return AUTH_ERR;
 }
 
+/* Run a blocked client's module callback with the sync-replication brackets
+ * call() would normally provide. The unblock path never goes through call(), so
+ * a callback that propagates a write (RM_Call or RM_Replicate*) gets neither
+ * reply holding nor dirty-key tracking on its own. Shared by
+ * moduleTryServeClientBlockedOnKey, moduleHandleBlockedClients and
+ * moduleBlockedClientTimedOut so the ordering below is only gotten right once. */
+static int moduleCallBlockedCallbackWithSyncRepBracket(client *c, RedisModuleCtx *ctx, RedisModuleCmdFunc callback) {
+    long long pre_repl_offset = server.master_repl_offset;
+    syncReplCookie sync_rep = syncReplBeginCommand(c);
+
+    /* keyModified() buffers onto server.current_client, but we run from
+     * beforeSleep or a ready-key/timeout event, where it is NULL or left over
+     * from unrelated activity. Point it at the blocked client, the same way
+     * blocked.c's unblockClientOnKey does for a reissued command. */
+    client *old_current_client = server.current_client;
+    server.current_client = c;
+    int ret = callback(ctx, (void **)c->argv, c->argc);
+    moduleFreeContext(ctx);
+    server.current_client = old_current_client;
+
+    /* Nothing else drains the buffer without call(). Skipping this would hold
+     * THIS reply correctly but leave the write invisible to sync_repl_dirty_keys, so
+     * another client's read of that key would not wait for the same ack. */
+    syncReplDirtyDrainClient(c, server.master_repl_offset);
+
+    /* Hold the reply until whatever the callback propagated is durable. */
+    syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
+
+    return ret;
+}
+
 /* This function is called from module.c in order to check if a module
  * blocked for BLOCKED_MODULE and subtype 'on keys' (bc->blocked_on_keys true)
  * can really be unblocked, since the module was able to serve the client.
@@ -8688,9 +8722,8 @@ int moduleTryServeClientBlockedOnKey(client *c, robj *key) {
     ctx.blocked_privdata = bc->privdata;
     ctx.client = bc->client;
     ctx.blocked_client = bc;
-    if (bc->reply_callback(&ctx,(void**)c->argv,c->argc) == REDISMODULE_OK)
+    if (moduleCallBlockedCallbackWithSyncRepBracket(c, &ctx, bc->reply_callback) == REDISMODULE_OK)
         served = 1;
-    moduleFreeContext(&ctx);
     return served;
 }
 
@@ -8982,9 +9015,8 @@ void moduleHandleBlockedClients(void) {
             ctx.blocked_client = bc;
             monotime replyTimer;
             elapsedStart(&replyTimer);
-            bc->reply_callback(&ctx,(void**)c->argv,c->argc);
+            moduleCallBlockedCallbackWithSyncRepBracket(c, &ctx, bc->reply_callback);
             reply_us = elapsedUs(replyTimer);
-            moduleFreeContext(&ctx);
         }
         if (c && bc->blocked_on_keys_explicit_unblock) {
             serverAssert(bc->blocked_on_keys);
@@ -9003,7 +9035,26 @@ void moduleHandleBlockedClients(void) {
          * replies to send to the client in a thread safe context.
          * We need to glue such replies to the client output buffer and
          * free the temporary client we just used for the replies. */
-        if (c) AddReplyFromClient(c, bc->reply_client);
+        if (c) {
+            /* Reply holding (appendfsync bgalways): bc->reply_client's bytes came
+             * from a thread-safe context that may have run RM_Call() before
+             * RM_UnblockClient(), with no callback boundary to snapshot a
+             * "before" offset. So, like the c->woff assumption below, assume
+             * it propagated and bracket on the current offset -- but only
+             * when there's actually data, else every unblock pays for an
+             * empty chunk. */
+            int reply_client_has_data = bc->reply_client->bufpos > 0 || listLength(bc->reply_client->reply) > 0;
+            syncReplCookie sync_rep = {0, 0};
+            if (reply_client_has_data)
+                sync_rep = syncReplBeginCommand(c);
+
+            AddReplyFromClient(c, bc->reply_client);
+
+            if (reply_client_has_data) {
+                c->woff = server.master_repl_offset;
+            }
+            syncReplFinishCommand(c, c->woff, 0, &sync_rep);
+        }
         moduleReleaseTempClient(bc->reply_client);
         moduleReleaseTempClient(bc->thread_safe_ctx_client);
 
@@ -9087,10 +9138,10 @@ void moduleBlockedClientTimedOut(client *c) {
     if (bc->timeout_callback) {
         /* In theory, the user should always pass the timeout handler as an
          * argument, but better to be safe than sorry. */
-        bc->timeout_callback(&ctx,(void**)c->argv,c->argc);
+        moduleCallBlockedCallbackWithSyncRepBracket(c, &ctx, bc->timeout_callback);
+    } else {
+        moduleFreeContext(&ctx);
     }
-
-    moduleFreeContext(&ctx);
 
     updateStatsOnUnblock(c, bc->background_duration, 0, server.stat_total_error_replies != prev_error_replies);
 
@@ -9215,22 +9266,27 @@ void RM_FreeThreadSafeContext(RedisModuleCtx *ctx) {
     zfree(ctx);
 }
 
-void moduleGILAfterLock(void) {
+/* Protected by the GIL. The thread's context client owns dirty records until
+ * unlock propagates the whole execution unit, including nested RM_Call jobs. */
+static client *moduleGILPreviousClient;
+
+void moduleGILAfterLock(RedisModuleCtx *ctx) {
     /* We should never get here if we already inside a module
      * code block which already opened a context. */
     serverAssert(server.execution_nesting == 0);
     /* Bump up the nesting level to prevent immediate propagation
      * of possible RM_Call from th thread */
     enterExecutionUnit(1, 0);
+    moduleGILPreviousClient = server.current_client;
+    server.current_client = ctx->client;
 }
 
 /* Acquire the server lock before executing a thread safe API call.
  * This is not needed for `RedisModule_Reply*` calls when there is
  * a blocked client connected to the thread safe context. */
 void RM_ThreadSafeContextLock(RedisModuleCtx *ctx) {
-    UNUSED(ctx);
     moduleAcquireGIL();
-    moduleGILAfterLock();
+    moduleGILAfterLock(ctx);
 }
 
 /* Similar to RM_ThreadSafeContextLock but this function
@@ -9240,14 +9296,12 @@ void RM_ThreadSafeContextLock(RedisModuleCtx *ctx) {
  * otherwise REDISMODULE_ERR is returned and errno is set
  * accordingly. */
 int RM_ThreadSafeContextTryLock(RedisModuleCtx *ctx) {
-    UNUSED(ctx);
-
     int res = moduleTryAcquireGIL();
     if(res != 0) {
         errno = res;
         return REDISMODULE_ERR;
     }
-    moduleGILAfterLock();
+    moduleGILAfterLock(ctx);
     return REDISMODULE_OK;
 }
 
@@ -9261,6 +9315,8 @@ void moduleGILBeforeUnlock(RedisModuleCtx *ctx) {
      * released we have to propagate here). */
     exitExecutionUnit();
     postExecutionUnitOperationsEx(moduleTakeUnaccountedBackgroundDuration(ctx));
+    syncReplDirtyDrainClient(server.current_client, server.master_repl_offset);
+    server.current_client = moduleGILPreviousClient;
 }
 
 /* Release the server lock after a thread safe API call was executed. */

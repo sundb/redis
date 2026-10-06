@@ -1517,6 +1517,15 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
  * node we want to mention in the redirection. Moreover hashslot should
  * be set to the hash slot that caused the redirection. */
 void clusterRedirectClient(client *c, clusterNode *n, int hashslot, int error_code) {
+    /* Cluster redirections are produced outside call(), both while rejecting a
+     * top-level command and while unblocking a client whose slot moved. If an
+     * earlier reply on this connection is parked for sync-replication
+     * durability, bracket the error so it becomes a passthrough chunk behind
+     * that reply instead of reaching the socket first. Redirections never
+     * propagate, so the offset comparison below only preserves reply order. */
+    long long pre_repl_offset = server.master_repl_offset;
+    syncReplCookie sync_rep = syncReplBeginCommand(c);
+
     if (error_code == CLUSTER_REDIR_CROSS_SLOT) {
         addReplyError(c,"-CROSSSLOT Keys in request don't hash to the same slot");
     } else if (error_code == CLUSTER_REDIR_UNSTABLE) {
@@ -1544,6 +1553,8 @@ void clusterRedirectClient(client *c, clusterNode *n, int hashslot, int error_co
     } else {
         serverPanic("getNodeByQuery() unknown error.");
     }
+
+    syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
 }
 
 /* This function is called by the function processing clients incrementally
@@ -1802,7 +1813,7 @@ unsigned int clusterDelKeysInSlot(unsigned int hashslot, int by_command) {
             notifyKeyspaceEvent(NOTIFY_GENERIC, "del", key, server.db[0].id);
         } else {
             /* Propagate the DEL command */
-            propagateDeletion(&server.db[0], key, server.lazyfree_lazy_server_del);
+            propagateDeletion(&server.db[0], key, server.lazyfree_lazy_server_del, REDIS_OP_REPL_OFFSET_NONE);
             /* The keys are not actually logically deleted from the database,
              * just moved to another node. The modules needs to know that these
              * keys are no longer available locally, so just send the keyspace

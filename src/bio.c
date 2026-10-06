@@ -330,7 +330,7 @@ void *bioProcessBackgroundJobs(void *arg) {
                 }
             } else {
                 atomicSet(server.aof_bio_fsync_status,C_OK);
-                atomicSet(server.fsynced_reploff_pending, job->fd_args.offset);
+                aofAdvanceFsyncedReploff(job->fd_args.offset);
             }
 
             if (job->fd_args.need_reclaim_cache) {
