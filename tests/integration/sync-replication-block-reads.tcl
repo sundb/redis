@@ -1072,7 +1072,7 @@ start_server [list tags {"aof bgalways external:skip"} overrides [list appendonl
         $master config set sync-replication-block-reads local
         # Canonical RESP2 tracking pattern: invalidations are delivered as
         # pub/sub messages on a connection subscribed to __redis__:invalidate,
-        # and the tracking client REDIRECTs to it.
+        # and the tracking client redirects to it.
         set rd_redir [redis_deferring_client]
         $rd_redir client id
         set redir_id [$rd_redir read]
