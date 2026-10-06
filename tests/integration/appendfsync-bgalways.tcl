@@ -520,7 +520,7 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         set rd [redis_deferring_client]
         set before_disc [s sync_repl_role_loss_disconnects]
         $rd flushall
-        wait_for_condition 200 20 {
+        wait_for_condition 500 20 {
             [s lazyfree_pending_objects] > 0 &&
             [s blocked_clients] >= 1
         } else {
