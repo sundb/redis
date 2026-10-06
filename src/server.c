@@ -1974,6 +1974,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
         processed += clientCompressionProcessPendingData(server.el);
         if (server.aof_state == AOF_ON || server.aof_state == AOF_WAIT_REWRITE)
             flushAppendOnlyFile(0);
+        aofArmBgFsyncNotify();
         processed += handleClientsWithPendingWrites();
         processed += freeClientsInAsyncFreeQueue();
 
@@ -2069,6 +2070,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * sendPendingClientsToIOThreads, in case of appendfsync=always. */
     if (server.aof_state == AOF_ON || server.aof_state == AOF_WAIT_REWRITE)
         flushAppendOnlyFile(0);
+    aofArmBgFsyncNotify();
 
     /* Record time consumption of AOF writing. */
     durationAddSample(EL_DURATION_TYPE_AOF, getMonotonicUs() - aof_start_time);

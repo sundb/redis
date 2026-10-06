@@ -1300,6 +1300,29 @@ static void aofBioFsyncNotify(uint64_t arg, void *ptr) {
     processClientsWaitingReplicas();
 }
 
+/* Whether anything is waiting for a BGALWAYS background fsync to complete:
+ * held reply-holding clients and blocked WAIT/WAITAOF clients (released on
+ * fsynced_reploff). */
+static int aofBgFsyncHasWaiters(void) {
+    return listLength(server.sync_repl_pending_clients) ||
+           listLength(server.clients_waiting_acks);
+}
+
+/* Queue a completion wakeup behind the in-flight BGALWAYS background fsync, so
+ * the event loop wakes as soon as it completes instead of on the next timer
+ * event (i.e. up to 1000/hz ms later) when there is no other traffic. FIFO: the
+ * comp-rq runs after the fsync job on the same worker. At most one is queued at
+ * a time, and none when nobody is waiting. Called from beforeSleep (both the
+ * regular and the processEventsWhileBlocked() path) right after
+ * flushAppendOnlyFile(), so it also covers an fsync that was already in flight
+ * when the first waiter appeared (the flush is postponed or skipped then). */
+void aofArmBgFsyncNotify(void) {
+    if (server.aof_fsync != AOF_FSYNC_BGALWAYS) return;
+    if (!aofFsyncInProgress() || bioPendingJobsOfType(BIO_COMP_RQ_AOF_FSYNC)) return;
+    if (!aofBgFsyncHasWaiters()) return;
+    bioCreateCompRq(BIO_WORKER_AOF_FSYNC, aofBioFsyncNotify, 0, NULL);
+}
+
 /* Close the fd on the basis of aof_background_fsync. */
 void aof_background_fsync_and_close(int fd) {
     bioCreateCloseAofJob(fd, server.master_repl_offset, 1);
@@ -1792,11 +1815,8 @@ try_fsync:
             aof_background_fsync(server.aof_fd);
             server.aof_last_incr_fsync_offset = server.aof_last_incr_size;
             server.aof_last_fsync = server.mstime;
-            /* Wake the event loop when the fsync completes so held clients release
-             * promptly even with no other traffic (FIFO: this comp-rq runs after
-             * the fsync job on the same worker). Skip if nobody is waiting. */
-            if (listLength(server.sync_repl_pending_clients) > 0)
-                bioCreateCompRq(BIO_WORKER_AOF_FSYNC, aofBioFsyncNotify, 0, NULL);
+            /* The completion wakeup is armed by aofArmBgFsyncNotify() from
+             * beforeSleep, which also covers an fsync already in flight here. */
         }
     } else if (server.aof_fsync == AOF_FSYNC_EVERYSEC &&
                server.mstime - server.aof_last_fsync >= 1000) {

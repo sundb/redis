@@ -3797,6 +3797,7 @@ int bg_unlink(const char *filename);
 
 /* AOF persistence */
 void flushAppendOnlyFile(int force);
+void aofArmBgFsyncNotify(void);
 void aofMarkForceFsyncFailure(int errno_val);
 void aofAdvanceFsyncedReploff(long long offset);
 long long aofRefreshFsyncedReploff(void);
