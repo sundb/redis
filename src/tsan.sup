@@ -19,3 +19,11 @@ race:malloc_mutex_trylock_final
 #   execution which would incur too big of a cost.
 # - the race happens rarely
 race:connSocketAddr
+
+# getClientsSharedMemoryUsage() (INFO memory / MEMORY STATS) reads
+# c->reply_bytes_shared of clients whose zero-copy replies are being sent by an
+# IO thread, which decrements it in processSentDataInEncodedBuffer(). It is only
+# a memory statistic, so, like last_errno above, it isn't worth synchronizing
+# (or pausing the IO threads for): the read is a word-sized value that is
+# either the old or the new one.
+race:getClientsSharedMemoryUsage
