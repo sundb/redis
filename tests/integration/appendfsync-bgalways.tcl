@@ -742,7 +742,9 @@ start_server {tags {"aof bgalways external:skip"} overrides {appendonly yes appe
         # sole owner of the value without ever counting it as unshared,
         # which throws off maxmemory-clients eviction accounting.
 
-        set val_size 20000
+        # Must exceed COPY_AVOID_MIN_STRING_SIZE_THREADED (65536), otherwise
+        # the reply is copied instead of zero-copied when io-threads are on.
+        set val_size 70000
         r set bgk_mem_big [string repeat v $val_size]
 
         r debug aof-flush-force stall 1
