@@ -285,6 +285,14 @@ void fetchClientFromIOThread(client *c) {
  * - Pubsub, monitor, blocked, tracking clients, main thread may
  *   directly write them a reply when conditions are met.
  * - Script command with debug may operate connection directly.
+ * - A client with a sync-replication reply chunk parked on it (appendfsync
+ *   bgalways / sync-replication-block-reads): drainSyncPendingReplies()/
+ *   releaseSyncPendingReadsHeldByDemotion() release it from the main thread's
+ *   beforeSleep on a replica ACK or an AOF fsync progressing, not on any
+ *   read event on this connection, and may install its write handler
+ *   directly -- which touches conn->el, owned by whichever thread the
+ *   connection currently belongs to. Must stay pinned to the main thread
+ *   for as long as server.sync_repl_pending_clients holds it.
  * - Master/Replica are only handled by IO thread when RDB replication is
  *   completed. Note we need to check them after checking for other flags
  *   that may overlap with CLIENT_MASTER/SLAVE - CLOSE_ASAP, MONITOR,
@@ -298,6 +306,8 @@ int isClientMustHandledByMainThread(client *c) {
     {
         return 1;
     }
+
+    if (c->sync_repl_pending_list_node) return 1;
 
     /* If RDB replication is done it's safe to move the master client to an IO thread.
      * Note that we keep the master client in main thread during failover so as

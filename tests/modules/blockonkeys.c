@@ -254,6 +254,44 @@ int fsl_bpop(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     return REDISMODULE_OK;
 }
 
+/* Timeout callback that propagates a write before replying -- used to test
+ * that appendfsync bgalways brackets moduleBlockedClientTimedOut() the same
+ * way it brackets the normal-completion reply_callback path. */
+int fsl_bpop_to_propagate_timeout_callback(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+    RedisModuleCallReply *reply = RedisModule_Call(ctx, "incr", "c!", "bgk_module_timeout_marker");
+    if (reply) RedisModule_FreeCallReply(reply);
+    return RedisModule_ReplyWithSimpleString(ctx, "Request timedout");
+}
+
+/* FSL.BPOP_TO_PROPAGATE <key> <timeout> - Same as FSL.BPOP, but on timeout
+ * propagates a write (INCR bgk_module_timeout_marker) before replying. */
+int fsl_bpop_to_propagate(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    if (argc != 3)
+        return RedisModule_WrongArity(ctx);
+
+    long long timeout;
+    if (RedisModule_StringToLongLong(argv[2],&timeout) != REDISMODULE_OK || timeout < 0)
+        return RedisModule_ReplyWithError(ctx,"ERR invalid timeout");
+
+    fsl_t *fsl;
+    if (!get_fsl(ctx, argv[1], REDISMODULE_WRITE, 0, &fsl, 1))
+        return REDISMODULE_OK;
+
+    if (!fsl) {
+        RedisModule_BlockClientOnKeys(ctx, bpop_reply_callback, fsl_bpop_to_propagate_timeout_callback,
+                                      NULL, timeout, &argv[1], 1, NULL);
+    } else {
+        RedisModule_Assert(fsl->length);
+        RedisModule_ReplyWithLongLong(ctx, fsl->list[--fsl->length]);
+        /* I'm lazy so i'll replicate a potentially blocking command, it shouldn't block in this flow. */
+        RedisModule_ReplicateVerbatim(ctx);
+    }
+
+    return REDISMODULE_OK;
+}
+
 int bpopgt_reply_callback(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     REDISMODULE_NOT_USED(argv);
     REDISMODULE_NOT_USED(argc);
@@ -611,6 +649,9 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
         return REDISMODULE_ERR;
 
     if (RedisModule_CreateCommand(ctx,"fsl.bpop",fsl_bpop,"write",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx,"fsl.bpop_to_propagate",fsl_bpop_to_propagate,"write",1,1,1) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
 
     if (RedisModule_CreateCommand(ctx,"fsl.bpopgt",fsl_bpopgt,"write",1,1,1) == REDISMODULE_ERR)

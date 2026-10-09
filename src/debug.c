@@ -422,6 +422,16 @@ void debugCommand(client *c) {
         const char *help[] = {
 "AOF-FLUSH-SLEEP <microsec>",
 "    Server will sleep before flushing the AOF, this is used for testing.",
+"AOF-FLUSH-FORCE <ERROR|STALL|FSYNC-ERROR> <0|1>",
+"    ERROR: force the AOF flush to fail (set the AOF write error status).",
+"    STALL: skip the AOF flush so the durable offset stalls (no error).",
+"    FSYNC-ERROR: force the BGALWAYS forced (synchronous) fsync path to fail",
+"    while the write() itself still succeeds. Used for testing.",
+"AOF-FSYNC-FAIL <SIMULATE|OFFSET>",
+"    SIMULATE: directly simulate a BGALWAYS forced-fsync-only failure",
+"    without an actual forced flush call.",
+"    OFFSET: return the current server.aof_force_fsync_fail_offset value.",
+"    Used for testing.",
 "ASSERT",
 "    Crash by assertion failed.",
 "CHANGE-REPL-ID",
@@ -955,6 +965,49 @@ NULL
     {
         server.active_expire_enabled = atoi(c->argv[2]->ptr);
         addReply(c,shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr,"syncrep") && c->argc >= 3) {
+        /* DEBUG SYNCREP DIRTY-KEYS — dump the sync-replication-block-reads
+         * dirty keys in the selected DB as [key1 woff1 key2 woff2 ...], sorted
+         * by ascending woff. Introspection for tests. */
+        if (!strcasecmp(c->argv[2]->ptr,"dirty-keys") && c->argc == 3) {
+            syncReplDirtyKeysDebugReply(c);
+        } else if (!strcasecmp(c->argv[2]->ptr,"dirty-ordered-len") && c->argc == 3) {
+            /* DEBUG SYNCREP DIRTY-ORDERED-LEN — length of the woff-ordered
+             * cleanup list backing the dirty-keys dict. Distinct from the
+             * global dict's size: repeated writes to the same key
+             * before it is acked must not each append a node. Introspection
+             * for tests. */
+            addReplyLongLong(c, server.sync_repl_dirty_keys_by_woff ? listLength(server.sync_repl_dirty_keys_by_woff) : 0);
+        } else if (!strcasecmp(c->argv[2]->ptr,"buffered-keys") && c->argc == 3) {
+            /* DEBUG SYNCREP BUFFERED-KEYS — [distinct, records] for the
+             * per-command dirty-key records, read off server.current_client
+             * (the outermost client, the one keyModified buffers onto). Only
+             * meaningful from inside an execution unit that is still running —
+             * a MULTI/EXEC subcommand — since the buffer drains at its end.
+             * The buffer is a set, so N writes to one key must report [1, N].
+             * Introspection for tests. */
+            client *outer = server.current_client ? server.current_client : c;
+            addReplyArrayLen(c, 2);
+            addReplyLongLong(c, outer->sync_repl_dirty_keys ?
+                                (long long)dictSize(outer->sync_repl_dirty_keys) : 0);
+            addReplyLongLong(c, (long long)syncReplDirtyKeysRecordCount(outer));
+        } else if (!strcasecmp(c->argv[2]->ptr,"dirty-dbs") && c->argc == 3) {
+            /* DEBUG SYNCREP DIRTY-DBS — dump per-DB flush offsets as a flat
+             * array [dbid1 off1 dbid2 off2 ...] for DBs with a non-zero
+             * dirty_repl_offset (FLUSHDB/FLUSHALL/SWAPDB). Introspection for tests. */
+            void *replylen = addReplyDeferredLen(c);
+            int n = 0;
+            for (int j = 0; j < server.dbnum; j++) {
+                if (server.db[j].dirty_repl_offset != 0) {
+                    addReplyLongLong(c, j);
+                    addReplyLongLong(c, server.db[j].dirty_repl_offset);
+                    n += 2;
+                }
+            }
+            setDeferredArrayLen(c, replylen, n);
+        } else {
+            addReplySubcommandSyntaxError(c);
+        }
     } else if (!strcasecmp(c->argv[1]->ptr,"set-allow-access-expired") &&
                c->argc == 3)
     {
@@ -985,6 +1038,38 @@ NULL
     {
         server.aof_flush_sleep = atoi(c->argv[2]->ptr);
         addReply(c,shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr,"aof-flush-force") && c->argc == 4) {
+        if (!strcasecmp(c->argv[2]->ptr,"error")) {
+            server.aof_flush_force_error = atoi(c->argv[3]->ptr);
+        } else if (!strcasecmp(c->argv[2]->ptr,"stall")) {
+            server.aof_flush_force_stall = atoi(c->argv[3]->ptr);
+        } else if (!strcasecmp(c->argv[2]->ptr,"fsync-error")) {
+            server.aof_flush_force_fsync_error = atoi(c->argv[3]->ptr);
+        } else {
+            addReplySubcommandSyntaxError(c);
+            return;
+        }
+        addReply(c,shared.ok);
+    } else if (!strcasecmp(c->argv[1]->ptr,"aof-fsync-fail") && c->argc >= 3) {
+        if (!strcasecmp(c->argv[2]->ptr,"simulate") && c->argc == 3) {
+            /* Test-only: directly simulate a BGALWAYS forced-fsync-only failure
+             * (see flushAppendOnlyFile()'s AOF_FSYNC_BGALWAYS force branch)
+             * without an actual forced flush call, so tests can set up this
+             * exact state deterministically -- e.g. to test its interaction
+             * with a later, unrelated aof_last_write_status failure without
+             * racing the real forced-fsync callers' own side effects (like
+             * BGREWRITEAOF's file-close fsync). */
+            aofMarkForceFsyncFailure(EIO);
+            addReply(c,shared.ok);
+        } else if (!strcasecmp(c->argv[2]->ptr,"offset") && c->argc == 3) {
+            /* Test-only introspection: read server.aof_force_fsync_fail_offset
+             * directly, so tests can assert it was reset by an unrelated later
+             * write failure without depending on real fsync/bio timing to
+             * observe the effect indirectly through aof_last_write_status. */
+            addReplyLongLong(c, server.aof_force_fsync_fail_offset);
+        } else {
+            addReplySubcommandSyntaxError(c);
+        }
     } else if (!strcasecmp(c->argv[1]->ptr,"replicate") && c->argc >= 3) {
         replicationFeedSlaves(server.slaves, -1,
                 c->argv + 2, c->argc - 2);

@@ -6247,7 +6247,10 @@ static void propagateHashFieldDeletion(redisDb *db, sds key, char *field, size_t
     enterExecutionUnit(1, 0);
     /* Field expiration is decided by the server, so it must be propagated even
      * if the command that triggered it asked not to propagate. */
-    alsoPropagateForced(db->id,argv, 3, PROPAGATE_AOF|PROPAGATE_REPL);
+    /* Tag as lazy expire (like deleteKeyAndPropagate() in db.c), since this is
+     * always expiry-driven, so unrelated reply holding isn't blocked on it. */
+    alsoPropagateForced(db->id,argv, 3, PROPAGATE_AOF|PROPAGATE_REPL,
+                        REDIS_OP_REPL_OFFSET_LAZY_EXPIRE);
     exitExecutionUnit();
 
     /* Propagate the HDEL command */

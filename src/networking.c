@@ -218,6 +218,18 @@ client *createClient(connection *conn) {
     c->obuf_soft_limit_reached_time = 0;
     listSetFreeMethod(c->reply,freeClientReplyValue);
     listSetDupMethod(c->reply,dupClientReplyValue);
+    c->sync_repl_pending_replies = NULL;
+    c->sync_repl_pending_mem = 0;
+    c->sync_repl_bracket_active = 0;
+    c->sync_repl_boundary_node = NULL;
+    c->sync_repl_pending_list_node = NULL;
+    c->sync_repl_pre_command_offset = 0;
+    c->sync_repl_pre_command_evict_offset = 0;
+    c->sync_repl_read_woff = 0;
+    c->sync_repl_read_dirty = 0;
+    c->sync_repl_dirty_keys = NULL;
+    c->sync_repl_dirty_keys_recorded = 0;
+    c->sync_repl_dirty_dbs = NULL;
     initClientBlockingState(c);
     c->woff = 0;
     c->watched_keys = listCreate();
@@ -271,7 +283,14 @@ void installClientWriteHandler(client *c) {
      * served for reading and writing in the same event loop iteration,
      * so that in the middle of receiving the query, and serving it
      * to the client, we'll call beforeSleep() that will do the
-     * actual fsync of AOF to disk. the write barrier ensures that. */
+     * actual fsync of AOF to disk. the write barrier ensures that.
+     *
+     * bgalways deliberately does NOT set the barrier: unlike `always`, which
+     * keeps the not-yet-fsynced reply in c->reply and relies on this ordering
+     * to fsync before the write handler can flush it, bgalways parks the reply
+     * outside c->reply (sync_repl_pending_replies) until fsynced_reploff covers its
+     * woff, so a not-yet-durable reply can never reach the socket regardless of
+     * read/write interleaving. */
     if (server.aof_state == AOF_ON &&
         server.aof_fsync == AOF_FSYNC_ALWAYS)
     {
@@ -403,6 +422,19 @@ static void _addReplyPayloadToList(client *c, list *reply_list, const char *payl
     /* Note that 'tail' may be NULL even if we have a tail node, because when
      * addReplyDeferredLen() is used, it sets a dummy node to NULL just
      * to fill it later, when the size of the bulk length is set. */
+
+    /* Sync-rep: if this command hasn't appended anything of its own yet and a
+     * previous command left nodes in c->reply, we must NOT in-place-extend
+     * that prior tail block — that would leak this command's bytes into the
+     * prior reply and bypass chunking. Force a fresh node allocation by
+     * clearing 'tail'. c->sync_repl_boundary_node is the c->reply tail as it
+     * was at this command's start (NULL if c->reply was empty then); once
+     * this command appends its own fresh node, 'ln' (the current tail) stops
+     * matching it, so later appends within the same command naturally fall
+     * through to in-place-extending that new node — no separate one-shot
+     * flag needed to get that "only the first append" behavior. */
+    if (unlikely(reply_list == c->reply && ln == c->sync_repl_boundary_node))
+        tail = NULL;
 
     /* Append to tail node when possible. */
     if (tail) {
@@ -1003,8 +1035,14 @@ void setDeferredReply(client *c, void *node, const char *s, size_t length) {
      * - The prev node is non-NULL and has space in it or
      * - The next node is non-NULL,
      * - It has enough room already allocated
-     * - And not too large (avoid large memmove) */
-    if (ln->prev != NULL && (prev = listNodeValue(ln->prev)) &&
+     * - And not too large (avoid large memmove)
+     *
+     * One more, for reply holding: the prev node isn't the boundary captured
+     * at this command's start, i.e. a prior command's reply that may already
+     * be unheld/in flight — merging into it would send our bytes out ahead
+     * of the fsync gating this command's own reply. */
+    if (ln->prev != c->sync_repl_boundary_node &&
+        ln->prev != NULL && (prev = listNodeValue(ln->prev)) &&
         prev->used < prev->size && !prev->buf_encoded)
     {
         size_t len_to_copy = prev->size - prev->used;
@@ -2039,11 +2077,14 @@ void unlinkClient(client *c) {
  * This is called when the client has finished sending all pending replies,
  * or when the client is being freed.
  *
- * If 'force' is true, the client is removed unconditionally.
- * This should only be used when we are certain that the replies no longer
- * contain any referenced robj. */
+ * If 'force' is true, the client is removed unconditionally -- except while
+ * a reply-holding chunk is still parked on it, which can itself hold a live
+ * reference. This should only be used when we are certain that the replies
+ * no longer contain any referenced robj. */
 void tryUnlinkClientFromPendingRefReply(client *c, int force) {
-    if (clientIsInPendingRefReplyList(c) && (force || !clientHasPendingReplies(c))) {
+    if (!clientIsInPendingRefReplyList(c)) return;
+    if (c->sync_repl_pending_replies && listLength(c->sync_repl_pending_replies) > 0) return;
+    if (force || !clientHasPendingReplies(c)) {
         listUnlinkNode(server.clients_with_pending_ref_reply, &c->pending_ref_reply_node);
     }
 }
@@ -2073,6 +2114,22 @@ static size_t computeUnsharedReplyBytes(char *buf, size_t bufpos) {
     return total;
 }
 
+/* Sum computeUnsharedReplyBytes() over every encoded block of a reply list.
+ * Shared by c->reply and the reply lists parked in sync_repl_pending_replies. */
+static size_t computeUnsharedReplyListBytes(list *reply_list) {
+    size_t total = 0;
+    listIter li;
+    listNode *ln;
+    listRewind(reply_list, &li);
+    while ((ln = listNext(&li))) {
+        clientReplyBlock *block = listNodeValue(ln);
+        if (block == NULL) continue; /* deferred-length placeholder */
+        if (block->buf_encoded)
+            total += computeUnsharedReplyBytes(block->buf, block->used);
+    }
+    return total;
+}
+
 /* Update the client's unshared reply memory (solely owned). */
 void updateClientUnsharedReplyBytes(client *c) {
     c->reply_bytes_unshared = 0;
@@ -2085,14 +2142,19 @@ void updateClientUnsharedReplyBytes(client *c) {
         c->reply_bytes_unshared += computeUnsharedReplyBytes(c->buf, c->bufpos);
 
     /* Scan each block in the reply list. */
-    listIter reply_li;
-    listNode *reply_ln;
-    listRewind(c->reply, &reply_li);
-    while ((reply_ln = listNext(&reply_li))) {
-        clientReplyBlock *block = listNodeValue(reply_ln);
-        if (block == NULL) continue; /* deferred-length placeholder */
-        if (block->buf_encoded)
-            c->reply_bytes_unshared += computeUnsharedReplyBytes(block->buf, block->used);
+    c->reply_bytes_unshared += computeUnsharedReplyListBytes(c->reply);
+
+    /* Scan blocks parked in sync_repl_pending_replies chunks (appendfsync bgalways):
+     * a chunk's reply_list can hold the same BULK_STR_REF zero-copy references
+     * as c->reply until it is drained, so it needs the same accounting. */
+    if (c->sync_repl_pending_replies) {
+        listIter li;
+        listNode *ln;
+        listRewind(c->sync_repl_pending_replies, &li);
+        while ((ln = listNext(&li))) {
+            syncReplyChunk *chunk = listNodeValue(ln);
+            c->reply_bytes_unshared += computeUnsharedReplyListBytes(chunk->reply_list);
+        }
     }
 }
 
@@ -2369,8 +2431,11 @@ void freeClient(client *c) {
     dictRelease(c->pubsubshard_channels);
 
     /* Free data structures. */
+    freeSyncPendingReplies(c);
     releaseAllBufReferences(c); /* Release all references to string objects in encoded buffers before freeing */
     listRelease(c->reply);
+    if (c->sync_repl_dirty_keys) dictRelease(c->sync_repl_dirty_keys);
+    listRelease(c->sync_repl_dirty_dbs);
     zfree(c->buf);
     freeReplicaReferencedReplBuffer(c);
     freeClientOriginalArgv(c);
@@ -3007,8 +3072,17 @@ int writeToClient(client *c, int handler_installed) {
             connSetWriteHandler(c->conn, NULL);
         }
 
-        /* Close connection after entire reply has been sent. */
-        if (c->flags & CLIENT_CLOSE_AFTER_REPLY) {
+        /* Close connection after entire reply has been sent -- but not while
+         * appendfsync bgalways still has a chunk parked on this client
+         * (c->reply/bufpos being empty only means those specific bytes were
+         * moved out to a chunk by syncReplFinishCommand(), not that nothing
+         * remains to send). freeClientAsync() -> freeClient() would tear the
+         * chunk down via freeSyncPendingReplies() without ever sending it.
+         * drainSyncPendingReplies() re-arms the write handler once the chunk
+         * actually drains, so this check will run again then. */
+        if ((c->flags & CLIENT_CLOSE_AFTER_REPLY) &&
+            !(c->sync_repl_pending_replies && listLength(c->sync_repl_pending_replies) > 0))
+        {
             freeClientAsync(c);
             return C_ERR;
         }
@@ -3702,49 +3776,57 @@ int processPendingCommandAndInputBuffer(client *c) {
     return C_OK;
 }
 
+/* Add a protocol-error reply and arrange for the connection to close after it.
+ * Protocol errors are produced outside call(), so bracket the reply here: if an
+ * earlier reply is parked waiting for sync-replication durability, this becomes
+ * a passthrough chunk behind it. Once both chunks drain, writeToClient() sends
+ * them in order and honors CLIENT_CLOSE_AFTER_REPLY. */
+static void replyProtocolError(client *c, const char *errstr, const char *fmt, ...) {
+    long long pre_repl_offset = server.master_repl_offset;
+    syncReplCookie sync_rep = syncReplBeginCommand(c);
+
+    va_list ap;
+    va_start(ap, fmt);
+    addReplyErrorFormatInternal(c, 0, fmt, ap);
+    va_end(ap);
+
+    setProtocolError(errstr, c);
+    syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
+}
+
 void handleClientReadError(client *c) {
     switch (c->read_error) {
         case CLIENT_READ_TOO_BIG_INLINE_REQUEST:
-            addReplyError(c,"Protocol error: too big inline request");
-            setProtocolError("too big inline request",c);
+            replyProtocolError(c, "too big inline request", "Protocol error: too big inline request");
             break;
         case CLIENT_READ_UNBALANCED_QUOTES:
-            addReplyError(c,"Protocol error: unbalanced quotes in request");
-            setProtocolError("unbalanced quotes in request",c);
+            replyProtocolError(c, "unbalanced quotes in request", "Protocol error: unbalanced quotes in request");
             break;
         case CLIENT_READ_MASTER_USING_INLINE_PROTOCOL:
             serverLog(LL_WARNING,"WARNING: Receiving inline protocol from master, master stream corruption? Closing the master connection and discarding the cached master.");
             setProtocolError("Master using the inline protocol. Desync?",c);
             break;
         case CLIENT_READ_TOO_BIG_MBULK_COUNT_STRING:
-            addReplyError(c,"Protocol error: too big mbulk count string");
-            setProtocolError("too big mbulk count string",c);
+            replyProtocolError(c, "too big mbulk count string", "Protocol error: too big mbulk count string");
             break;
         case CLIENT_READ_TOO_BIG_BUCK_COUNT_STRING:
-            addReplyError(c, "Protocol error: too big bulk count string");
-            setProtocolError("too big bulk count string",c);
+            replyProtocolError(c, "too big bulk count string", "Protocol error: too big bulk count string");
             break;
         case CLIENT_READ_EXPECTED_DOLLAR:
-            addReplyErrorFormat(c,
-                "Protocol error: expected '$', got '%c'",
-                c->querybuf[c->qb_pos]);
-            setProtocolError("expected $ but got something else",c);
+            replyProtocolError(c, "expected $ but got something else",
+                               "Protocol error: expected '$', got '%c'", c->querybuf[c->qb_pos]);
             break;
         case CLIENT_READ_INVALID_BUCK_LENGTH:
-            addReplyError(c,"Protocol error: invalid bulk length");
-            setProtocolError("invalid bulk length",c);
+            replyProtocolError(c, "invalid bulk length", "Protocol error: invalid bulk length");
             break;
         case CLIENT_READ_UNAUTH_BUCK_LENGTH:
-            addReplyError(c, "Protocol error: unauthenticated bulk length");
-            setProtocolError("unauth bulk length", c);
+            replyProtocolError(c, "unauth bulk length", "Protocol error: unauthenticated bulk length");
             break;
         case CLIENT_READ_INVALID_MULTIBUCK_LENGTH:
-            addReplyError(c,"Protocol error: invalid multibulk length");
-            setProtocolError("invalid mbulk count",c);
+            replyProtocolError(c, "invalid mbulk count", "Protocol error: invalid multibulk length");
             break;
         case CLIENT_READ_UNAUTH_MBUCK_COUNT:
-            addReplyError(c, "Protocol error: unauthenticated multibulk length");
-            setProtocolError("unauth mbulk count", c);
+            replyProtocolError(c, "unauth mbulk count", "Protocol error: unauthenticated multibulk length");
             break;
         case CLIENT_READ_CONN_DISCONNECTED:
             serverLog(LL_VERBOSE, "Reading from client: %s",connGetLastError(c->conn));
@@ -5355,7 +5437,7 @@ static size_t getClientOutputBufferAllocSize(client *c) {
         return repl_buf_size + (repl_node_size*repl_node_num);
     } else { 
         size_t list_item_size = sizeof(listNode) + sizeof(clientReplyBlock);
-        return c->reply_bytes + (list_item_size*listLength(c->reply));
+        return c->reply_bytes + (list_item_size*listLength(c->reply)) + c->sync_repl_pending_mem;
     }
 }
 
@@ -5385,6 +5467,618 @@ size_t getNormalClientPendingReplyBytes(client *c) {
 
     clientReplyBlock *block = listNodeValue(listLast(c->reply));
     return (c->reply_bytes + c->reply_bytes_shared - block->size + block->used) + c->bufpos;
+}
+
+/* ----------------------------------------------------------------------------
+ * Sync-replication: per-command reply chunking.
+ *
+ * The chunk owns moved listNodes from c->reply (zero-copy preserved for
+ * BULK_STR_REF refs) plus optionally one freshly-allocated block holding
+ * the inline-buf delta this command produced. When a chunk is enqueued,
+ * those bytes are moved OUT of c->reply_bytes into c->sync_repl_pending_mem;
+ * on drain they move back into c->reply_bytes. c->sync_repl_pending_mem also
+ * covers the per-chunk and per-listNode overhead (see
+ * syncReplyChunkOverhead). Together with c->reply_bytes,
+ * c->sync_repl_pending_mem covers all unsent bytes, and
+ * getClientOutputBufferMemoryUsage sums both, so OBL limit checks remain
+ * correct regardless of which field currently holds a given byte. Per-chunk
+ * bytes and overhead are derived from reply_list when a chunk is released.
+ * -------------------------------------------------------------------------- */
+
+/* True iff this client's replies should be chunked-and-held.
+ * - Excludes fake clients (no conn), replicas, masters.
+ * - Engages if EITHER sync-rep is currently enabled by config, OR the
+ *   client still has pending chunks from earlier commands. The second
+ *   condition preserves RESP reply ordering: once a chunk is parked, any
+ *   subsequent reply on the same client must queue behind it, even a
+ *   non-propagating one (a pure read, CLIENT REPLY SKIP, etc.), or the
+ *   client would observe replies out of command order. */
+/* True when held replies must wait for the LOCAL AOF to fsync the write's woff.
+ * Engaged by appendfsync bgalways. Guarded
+ * by aof_enabled (no AOF => nothing to wait for, so we never hang) and by
+ * fsynced_reploff != -1 (do not engage during the initial AOF rewrite, where the
+ * offset is pinned at -1 and every client would otherwise be held until the
+ * rewrite completes). Shared by clientSyncRepActive, drainSyncPendingReplies, and
+ * syncReplDirtyKeyAcked so the three stay in lockstep. */
+int syncReplWaitLocalAof(void) {
+    return server.aof_fsync == AOF_FSYNC_BGALWAYS &&
+           server.aof_enabled && server.fsynced_reploff != -1;
+}
+
+/* True when sync-replication-block-reads local is engageable: the feature is
+ * set to `local` and appendfsync bgalways is actually engaged.
+ * syncReplWaitLocalAof also verifies that AOF is live and the durable offset is
+ * established (not pinned at -1 mid initial-rewrite). A replica can satisfy this
+ * on its own (its inbound stream is fsynced to its own AOF, advancing
+ * fsynced_reploff). */
+int syncReplBlockReadsLocalActive(void) {
+    return (server.sync_repl_block_reads & SYNC_REPL_AOF_LOCAL) && syncReplWaitLocalAof();
+}
+
+/* True when this node should record dirty keys for block-reads. Loading is
+ * excluded because AOF replay invokes command procs directly on a fake client,
+ * outside call(), so its per-command buffers cannot be drained and the replayed
+ * data is already durable state rather than a new pending write. On a primary
+ * (masterhost == NULL) this is otherwise just the feature switch. On a replica
+ * we track only when the LOCAL dimension is engageable, so a read can wait for
+ * the replica's own AOF fsync of the master-applied write; without it there is
+ * nothing to wait for and tracking would only grow the dict unboundedly. */
+int syncReplShouldTrackDirty(void) {
+    if (server.loading || !server.sync_repl_block_reads) return 0;
+    if (server.masterhost == NULL) return 1;
+    return syncReplBlockReadsLocalActive();
+}
+
+static int clientSyncRepActive(client *c) {
+    if (c->conn == NULL) return 0;
+    if (c->flags & (CLIENT_SLAVE | CLIENT_MASTER)) return 0;
+    /* On a replica clients can't write here (no write-side deferral), so we
+     * engage solely to hold a read of a key whose master-applied write is
+     * not yet durable in this replica's AOF. The pending-replies clause keeps
+     * RESP ordering for replies queued behind an already-held read (and drains
+     * leftovers if the feature is turned off while reads are held). */
+    if (server.masterhost != NULL) {
+        if (syncReplBlockReadsLocalActive()) return 1;
+        /* Dirty state carried across a demotion: block-reads is on and
+         * we still hold dirty keys/DBs whose writes were accepted while we were
+         * a primary but never committed (no replica acked before the role
+         * change). Their values are destined to be rolled back by the failover,
+         * so keep gating reads against them even as a replica. The dict is
+         * flushed (and these held reads dropped) only once a full resync from
+         * the new master reconciles the data — replicaFullSyncDone(). */
+        if (server.sync_repl_block_reads && syncReplDirtyStateExists()) return 1;
+        if (c->sync_repl_pending_replies &&
+            listLength(c->sync_repl_pending_replies) > 0) return 1;
+        return 0;
+    }
+    if (syncReplWaitLocalAof()) return 1;
+    if (c->sync_repl_pending_replies &&
+        listLength(c->sync_repl_pending_replies) > 0) return 1;
+    return 0;
+}
+
+static inline size_t syncReplyChunkOverhead(syncReplyChunk *chunk) {
+    return sizeof(listNode) + sizeof(syncReplyChunk) +
+           listLength(chunk->reply_list) *
+               (sizeof(listNode) + sizeof(clientReplyBlock));
+}
+
+/* Sum block->size across all blocks held by a chunk. */
+static size_t syncReplyChunkBytes(syncReplyChunk *chunk) {
+    size_t total = 0;
+    listIter li;
+    listNode *ln;
+    listRewind(chunk->reply_list, &li);
+    while ((ln = listNext(&li))) {
+        clientReplyBlock *o = listNodeValue(ln);
+        if (o) total += o->size;
+    }
+    return total;
+}
+
+static void linkClientToSyncPending(client *c) {
+    if (c->sync_repl_pending_list_node) return;
+    listAddNodeTail(server.sync_repl_pending_clients, c);
+    c->sync_repl_pending_list_node = listLast(server.sync_repl_pending_clients);
+}
+
+static void unlinkClientFromSyncPending(client *c) {
+    if (!c->sync_repl_pending_list_node) return;
+    listDelNode(server.sync_repl_pending_clients, c->sync_repl_pending_list_node);
+    c->sync_repl_pending_list_node = NULL;
+}
+
+/* Free a chunk's contents: releases BULK_STR_REF refcounts and decrements
+ * the chunk-side accounting. Bytes here never went through c->reply, so we
+ * touch c->sync_repl_pending_mem directly (not c->reply_bytes). The existing walk
+ * also sums the block sizes, while the overhead is derived before releasing
+ * the list. Does NOT touch the chunk struct itself; the caller handles that. */
+static void freeSyncReplyChunkContents(client *c, syncReplyChunk *chunk) {
+    listIter li;
+    listNode *ln;
+    size_t bytes = 0;
+    size_t overhead = syncReplyChunkOverhead(chunk);
+    listRewind(chunk->reply_list, &li);
+    while ((ln = listNext(&li))) {
+        clientReplyBlock *o = listNodeValue(ln);
+        if (o) {
+            bytes += o->size;
+            if (o->buf_encoded) releaseBufReferences(c, o->buf, o->used);
+        }
+    }
+    c->sync_repl_pending_mem -= bytes + overhead;
+    /* listRelease will zfree blocks via the listFree callback set on creation. */
+    listRelease(chunk->reply_list);
+}
+
+/* Called at the start of call(). Captures where this command's reply will
+ * begin in c->buf and c->reply, and sets the force-new-block flag if needed
+ * (see below) to prevent in-place tail-extension from leaking this command's
+ * bytes into a prior command's reply block. */
+static void syncReplStartCommand(client *c, size_t *bufpos_start) {
+    *bufpos_start = c->bufpos;
+    /* c->reply's tail at command start (NULL if empty). This command's bytes must
+     * not merge into it: syncReplFinishCommand() moves only the nodes *after* this
+     * boundary, so anything glued onto the prior node is left behind and splits the
+     * RESP stream. setDeferredReply() skips its backward merge here, and
+     * _addReplyPayloadToList() forces a fresh node until this command has one.
+     * Set whenever c->reply is non-empty -- chunking is only decided during call(),
+     * and a fresh node is always safe. */
+    c->sync_repl_boundary_node = listLast(c->reply);
+}
+
+/* Convenience wrapper combining the clientSyncRepActive() check with
+ * syncReplStartCommand(): every call site needs both together, so this
+ * bundles them into one call and one cookie instead of separate active-flag
+ * and snapshot locals.
+ *
+ * Brackets are deliberately not reentrant: nested paths (e.g. a blocked
+ * command reissue calling processCommand(), which brackets its rejection and
+ * redirection replies) would overwrite the outer boundary and split an
+ * already-partially-written RESP frame. The outermost bracket owns the whole
+ * operation and its final offset, so nested begins return inactive and touch
+ * neither the boundary nor the dirty-read accumulators. */
+syncReplCookie syncReplBeginCommand(client *c) {
+    syncReplCookie sr = {0, 0};
+    if (c->sync_repl_bracket_active) return sr;
+
+    c->sync_repl_read_woff = 0;
+    c->sync_repl_read_dirty = 0;
+    sr.active = clientSyncRepActive(c);
+    if (sr.active) {
+        c->sync_repl_bracket_active = 1;
+        syncReplStartCommand(c, &sr.bufpos_start);
+    }
+    return sr;
+}
+
+/* Release ownership of the client reply boundary without creating a chunk.
+ * syncReplFinishCommand() performs the same ownership release while slicing
+ * the reply. Nested cookies are inactive and therefore never release the
+ * outer bracket. */
+static void syncReplEndCommand(client *c, const syncReplCookie *sr) {
+    if (!sr->active) return;
+    serverAssert(c->sync_repl_bracket_active);
+    c->sync_repl_bracket_active = 0;
+    c->sync_repl_boundary_node = NULL;
+}
+
+/* Called at the end of call() once c->woff has been set. Slices everything
+ * appended between (bufpos_start, c->bufpos) and after c->sync_repl_boundary_node
+ * in c->reply into a new chunk tagged with woff.
+ *
+ * The in-place tail-block extension case is handled at command start:
+ * syncReplStartCommand captures c->sync_repl_boundary_node (the prior tail),
+ * so the first _addReplyPayloadToList call for this command forces a fresh
+ * node instead of extending the prior tail's spare bytes — so all of this
+ * command's listNodes are properly captured here.
+ *
+ * Always creates a chunk if called (the caller's gate at server.c decides
+ * whether to call). An empty reply_list is legal — see Shape A (zero-byte
+ * chunks for CLIENT REPLY OFF/SKIP and other empty-reply chunked commands):
+ * the chunk's presence at the queue head still gates subsequent replies on
+ * its captured woff.
+ *
+ * read_dirty records the chunk kind so drainSyncPendingReplies knows which
+ * durability dimension(s) gate it (the conditions themselves are evaluated live
+ * at drain against the current config, not captured here):
+ *   - read_dirty == 0: a write chunk (woff = the write's repl offset) or a
+ *     passthrough chunk (woff = 0 — a non-propagating reply queued behind an
+ *     earlier pending chunk to preserve RESP order). Gated by the WRITE-side
+ *     config: syncReplWaitLocalAof() (local AOF fsync under appendfsync
+ *     bgalways).
+ *   - read_dirty == 1: a read-dirty chunk — a pure read whose key has an unacked
+ *     write, tagged with that write's woff. Gated instead by the
+ *     sync-replication-block-reads dimensions, so a held read waits only on the
+ *     durability the operator asked reads to wait for.
+ * The three call sites in call() pass write -> 0, read-dirty -> 1, passthrough -> 0. */
+void syncReplFinishCommand(client *c, long long woff, int read_dirty, const syncReplCookie *sr) {
+    if (!sr->active) return;
+
+    /* Log the response while it is still in c->buf/c->reply. Once parked,
+     * these bytes are no longer visible to prepareForNextCommand()'s logger.
+     * Reset the logging state after recording it to avoid logging it twice. */
+    if (reqresAppendResponse(c))
+        reqresReset(c, 1);
+
+    /* Read the boundary node (c->reply's tail at command start) before
+     * clearing it: everything after it is this command's own reply. */
+    listNode *boundary = c->sync_repl_boundary_node;
+
+    /* Release the outermost bracket before moving its captured reply. This
+     * also clears the boundary for commands that produced no bytes. */
+    syncReplEndCommand(c, sr);
+
+    size_t bufpos_delta = ((size_t)c->bufpos > sr->bufpos_start)
+        ? (size_t)c->bufpos - sr->bufpos_start : 0;
+    listNode *new_first = boundary ? boundary->next : listFirst(c->reply);
+
+    syncReplyChunk *chunk = zmalloc(sizeof(*chunk));
+    chunk->woff = woff;
+    chunk->read_dirty = read_dirty;
+    chunk->enqueue_us = getMonotonicUs();
+    chunk->reply_list = listCreate();
+    listSetFreeMethod(chunk->reply_list, freeClientReplyValue);
+    listSetDupMethod(chunk->reply_list, dupClientReplyValue);
+
+    /* 1. Promote inline-buf delta into a fresh clientReplyBlock.
+     *    The bytes carry their typed records (PLAIN_REPLY / BULK_STR_REF
+     *    headers); memcpy preserves the bulkStrRef pointer+refcount
+     *    structure, so robj refcounts remain held by the moved bytes.
+     *    Accounting: bytes go directly into c->sync_repl_pending_mem (and the
+     *    global counter) — they never lived in c->reply_bytes. */
+    if (bufpos_delta > 0) {
+        size_t usable_size;
+        clientReplyBlock *block = zmalloc_usable(bufpos_delta + sizeof(clientReplyBlock), &usable_size);
+        block->size = usable_size - sizeof(clientReplyBlock);
+        block->used = bufpos_delta;
+        block->buf_encoded = c->buf_encoded;
+        memcpy(block->buf, c->buf + sr->bufpos_start, bufpos_delta);
+        listAddNodeTail(chunk->reply_list, block);
+        c->sync_repl_pending_mem += block->size;
+
+        /* Shrink the inline buf back: the bytes now live in the chunk. */
+        c->bufpos = (int)sr->bufpos_start;
+        /* If the inline buf is now empty, allow future commands to start
+         * fresh (avoid spurious encoded-mode allocations for plain replies). */
+        if (c->bufpos == 0) c->buf_encoded = 0;
+    }
+
+    /* 2. Move newly-appended listNodes from c->reply to chunk->reply_list.
+     *    Plain pointer surgery; no deep copy of the underlying blocks, so
+     *    BULK_STR_REF zero-copy refs and their robj refcounts stay intact.
+     *    Accounting: shift each block's bytes from c->reply_bytes to
+     *    c->sync_repl_pending_mem. This keeps the invariant
+     *    "c->reply empty => c->reply_bytes == 0". */
+    listNode *ln = new_first;
+    while (ln) {
+        listNode *next = ln->next;
+        clientReplyBlock *block = listNodeValue(ln);
+        size_t bsize = block ? block->size : 0;
+        listUnlinkNode(c->reply, ln);
+        listLinkNodeTail(chunk->reply_list, ln);
+        if (bsize > 0) {
+            c->reply_bytes -= bsize;
+            c->sync_repl_pending_mem += bsize;
+        }
+        ln = next;
+    }
+
+    /* 3. Park the chunk on the client and bump bookkeeping. Account for its
+     *    current per-chunk overhead; release derives it again before
+     *    listJoin() empties reply_list. */
+    if (c->sync_repl_pending_replies == NULL)
+        c->sync_repl_pending_replies = listCreate();
+    int was_empty = (listLength(c->sync_repl_pending_replies) == 0);
+    listAddNodeTail(c->sync_repl_pending_replies, chunk);
+    server.sync_repl_pending_chunks++; /* gauge: one more chunk parked */
+    c->sync_repl_pending_mem += syncReplyChunkOverhead(chunk);
+    if (was_empty) linkClientToSyncPending(c);
+    server.stat_sync_repl_hold_depth_count++;
+    /* Depth seen by this command on arrival, including itself (the chunk is
+     * already linked above). hold_depth_sum/hold_depth_count gives the
+     * saturation-safe "avg commands blocked together". */
+    server.stat_sync_repl_hold_depth_sum += listLength(c->sync_repl_pending_replies);
+
+    /* Apply existing output-buffer-limit policy now that we've grown
+     * the client's pending bytes. getClientOutputBufferMemoryUsage
+     * already accounts for sync_repl_pending_mem. */
+    closeClientOnOutputBufferLimitReached(c, 1);
+}
+
+/* Reply holding (appendfsync bgalways): decides, once it is known whether the
+ * bracketed work propagated anything (by comparing server.master_repl_offset
+ * against the offset captured before that work ran), whether to chunk the
+ * accumulated reply on the resulting offset, or queue it passthrough behind
+ * existing chunks. Shared tail end of any syncReplStartCommand/...(work)/
+ * finish bracket where the caller already knows a reply was actually
+ * produced (i.e. it isn't guarded by a CLIENT_BLOCKED check — see
+ * syncReplFinishOrDeferChunk below for that case). Used directly by callers
+ * whose "work" is not call() itself and so has no natural pre-work offset
+ * field to read (e.g. module.c's blocked-client reply callbacks, which pass
+ * their own locally captured pre-callback offset). Unlike
+ * syncReplFinishOrDeferChunk, these callers don't participate in
+ * sync-replication-block-reads' dirty-read tracking, so this always chunks
+ * with read_dirty=0. */
+void syncReplFinishByOffset(client *c, long long pre_work_repl_offset, const syncReplCookie *sr) {
+    if (!sr->active) return;
+
+    if (server.master_repl_offset > pre_work_repl_offset) {
+        /* Propagation happened — chunk the reply on the resulting offset. */
+        c->woff = server.master_repl_offset;
+        syncReplFinishCommand(c, c->woff, 0, sr);
+    } else if (c->sync_repl_pending_replies && listLength(c->sync_repl_pending_replies) > 0) {
+        /* Nothing propagated, but the client still has pending chunks from
+         * earlier commands. RESP ordering requires this reply to queue behind
+         * them. Use woff=0 (passthrough — drains as soon as the head chunk
+         * does). */
+        syncReplFinishCommand(c, 0, 0, sr);
+    } else {
+        syncReplEndCommand(c, sr);
+    }
+}
+
+/* Sync-replication: common tail end of a
+ * syncReplStartCommand/...(work)/finish bracket, once it is known that any
+ * propagation the bracketed work triggered has already been flushed into
+ * server.master_repl_offset (i.e. execution_nesting was back to 0 at the
+ * relevant afterCommand() call). Decides whether to chunk the accumulated
+ * reply on the resulting offset, queue it passthrough behind existing
+ * chunks, defer to a later out-of-call() callback because the client
+ * blocked again, or (sync-replication-block-reads) chunk a pure read that
+ * touched dirty data on the highest unacked woff it needs to wait for.
+ * Shared by call() (top-level dispatch, where nesting is 0 throughout so
+ * the flush already happened by the time this runs) and unblockClientOnKey
+ * (blocked.c; a blocked command's reissue wraps call() in its own
+ * enterExecutionUnit, so call() itself can't observe the flush — blocked.c
+ * calls this only after its own afterCommand()). Mirrors the chunking
+ * decision in call(); see the comments there for the offset-arithmetic
+ * rationale. Unlike syncReplFinishByOffset, this also folds in the
+ * expire/evict offset subtraction and the dirty-read
+ * branch, so it is NOT implemented on top of that simpler helper. */
+void syncReplFinishOrDeferChunk(client *c, const syncReplCookie *sr) {
+    if (!sr->active) return;
+
+    if (c->flags & CLIENT_BLOCKED) {
+        /* The command blocked again, so its reply has not been produced yet —
+         * it will be generated later in the unblock completion callback,
+         * OUTSIDE call() (e.g. a blocking-async FLUSH replying from
+         * unblockClientForAsyncFlush). Chunking here would only park an empty
+         * placeholder, so defer to that callback, which brackets the reply
+         * itself. Clear the boundary node set at command entry, since no
+         * chunk is produced here to clear it. */
+        syncReplEndCommand(c, sr);
+        return;
+    }
+    /* Offset advance net of the lazy-expiry contribution: it was already
+     * subtracted into the baseline captured at processCommand entry, so
+     * re-forming the same combination here and subtracting once yields
+     * (M-M0) - (E-E0) without needing a field per counter. */
+    long long real_advance = (server.master_repl_offset - server.sync_repl_expire_offset) -
+                             c->sync_repl_pre_command_offset;
+    if (server.sync_repl_block_reads) {
+        long long evict_advance = server.sync_repl_evict_offset - c->sync_repl_pre_command_evict_offset;
+        real_advance -= evict_advance;
+    }
+    long long read_dirty_woff = 0;
+    if (real_advance <= 0 && server.sync_repl_block_reads && c->cmd) {
+        /* Nested call()s already recorded what they read: EXEC's subcommands and
+         * a script's inner commands, both while their keys and selected DB were
+         * still known (an outer script's declared keys cannot describe them, since
+         * the script may SELECT another DB). A dirty key recorded by a lazy expiry
+         * in there only gets its offset when this outer command propagates, so that
+         * case waits on c->woff. */
+        read_dirty_woff = c->sync_repl_read_woff;
+        if (c->sync_repl_read_dirty && c->woff > read_dirty_woff)
+            read_dirty_woff = c->woff;
+        /* EXEC itself has no key arguments or READONLY flag to look up. */
+        if (c->cmd->proc != execCommand) {
+            long long woff = syncReadDirtyDependency(c, c->current_pending_cmd);
+            if (woff > read_dirty_woff) read_dirty_woff = woff;
+        }
+    }
+    if (real_advance > 0) {
+        /* Propagation happened — chunk the reply on the resulting offset. */
+        c->woff = server.master_repl_offset;
+        syncReplFinishCommand(c, c->woff, 0, sr);
+    } else if (read_dirty_woff > 0) {
+        /* A pure read touched one or more keys with an unacked write, or named
+         * a key in a DB with an unacked FLUSHDB/FLUSHALL/SWAPDB. Defer its
+         * reply until the highest such offset is acked. */
+        syncReplFinishCommand(c, read_dirty_woff, 1, sr);
+    } else if (c->sync_repl_pending_replies && listLength(c->sync_repl_pending_replies) > 0) {
+        /* Nothing propagated, but the client still has pending chunks from
+         * earlier commands. RESP ordering requires this reply to queue behind
+         * them. Use woff=0 (passthrough — drains as soon as the head chunk
+         * does). */
+        syncReplFinishCommand(c, 0, 0, sr);
+    } else {
+        syncReplEndCommand(c, sr);
+    }
+}
+
+/* Splice one releasable pending chunk's blocks back into c->reply (head-of-
+ * pending to tail-of-reply, preserving command order) and free the chunk,
+ * updating all bookkeeping. The caller has already decided this chunk may be
+ * released. */
+static void syncReplReleaseChunk(client *c, listNode *ln) {
+    syncReplyChunk *chunk = listNodeValue(ln);
+
+    /* Derive both values before listJoin(), which empties reply_list and would
+     * otherwise lose the block bytes and per-block overhead term. Transfer the
+     * block bytes back into the c->reply accounting domain before splicing. */
+    size_t chunk_bytes = syncReplyChunkBytes(chunk);
+    size_t chunk_overhead = syncReplyChunkOverhead(chunk);
+    if (chunk_bytes > 0) {
+        c->sync_repl_pending_mem -= chunk_bytes;
+        c->reply_bytes += chunk_bytes;
+    }
+
+    listJoin(c->reply, chunk->reply_list);
+
+    /* Metric: accumulate hold time before freeing. */
+    server.stat_sync_repl_hold_latency_usec += elapsedUs(chunk->enqueue_us);
+
+    c->sync_repl_pending_mem -= chunk_overhead;
+    listRelease(chunk->reply_list); /* now empty after listJoin */
+    zfree(chunk);
+    listDelNode(c->sync_repl_pending_replies, ln);
+    server.sync_repl_pending_chunks--; /* gauge: one chunk released */
+
+    if (listLength(c->sync_repl_pending_replies) == 0) {
+        unlinkClientFromSyncPending(c);
+    }
+}
+
+/* Called after splicing released chunk(s) back into c->reply, from the main
+ * thread's beforeSleep (not from any read event on c's own connection).
+ * installClientWriteHandler() touches c->conn->el, owned by whichever thread
+ * the connection currently belongs to -- unsafe to call directly here unless
+ * we know that's the main thread's own loop. isClientMustHandledByMainThread()
+ * (iothread.c) pins a client to the main thread for as long as it has a
+ * parked chunk, so running_tid should already read MAIN by the time we get
+ * here; but during the hand-back window (processClientsFromIOThread() hasn't
+ * picked this client up yet) it can still read as an IO thread. Route through
+ * putClientInPendingWriteQueue() -- the same main-thread-only queue
+ * prepareClientToWrite() uses -- instead of touching conn directly; if not
+ * yet on the main thread, skip for now and let the pin above pull it back on
+ * its own. Also skip a client already on its way out: installing a write
+ * handler for it is pointless and freeClient() will discard the bytes. */
+static void syncReplArmWriteHandler(client *c) {
+    if (!c->conn || listLength(c->reply) == 0 || (c->flags & CLIENT_CLOSE_ASAP))
+        return;
+    if (c->running_tid == IOTHREAD_MAIN_THREAD_ID)
+        putClientInPendingWriteQueue(c);
+}
+
+/* Drain chunks whose durability conditions are satisfied back into c->reply.
+ * Invoked from beforeSleep() once fsynced_reploff advances and from
+ * replicationCron. Constraints are evaluated against the current config
+ * each call — not captured at enqueue — so an operator config change
+ * can release pending chunks even after their original constraints became
+ * unsatisfiable. */
+void drainSyncPendingReplies(client *c) {
+    if (!c->sync_repl_pending_replies) return;
+
+    listNode *ln;
+    while ((ln = listFirst(c->sync_repl_pending_replies)) != NULL) {
+        syncReplyChunk *chunk = listNodeValue(ln);
+
+        /* Check durability conditions against the CURRENT config (not captured
+         * at enqueue), so an operator CONFIG SET can release stuck chunks.
+         *
+         * Which conditions apply depends on the chunk kind:
+         *  - write/passthrough chunks (read_dirty==0): the write-side config —
+         *    local AOF fsync (syncReplWaitLocalAof: appendfsync bgalways).
+         *  - read-dirty chunks (read_dirty==1): the sync-replication-block-reads
+         *    dimension, so a held read waits only on what the operator asked for. */
+        int apply_local;
+        if (chunk->read_dirty) {
+            apply_local = syncReplBlockReadsLocalActive();
+            /* Only an actual demotion leaves writes needing reconciliation.
+             * Disabling local read protection on an ordinary replica removes
+             * its fsync dependency; it must not strand already-held replies. */
+            if (server.masterhost != NULL && server.sync_repl_dirty_from_demotion) break;
+        } else {
+            apply_local = syncReplWaitLocalAof();
+        }
+        if (apply_local && server.fsynced_reploff < chunk->woff) break;
+
+        syncReplReleaseChunk(c, ln);
+    }
+
+    syncReplArmWriteHandler(c);
+}
+
+/* Serve every held sync-rep reply on every pending client by flushing its
+ * captured bytes, bypassing the normal ack gate. Called when a successful
+ * PARTIAL resync confirms the unreconciled writes those reads were waiting on are
+ * now committed by the new master: the resync continues a single replid
+ * lineage from our offset, so the new master has agreed it holds the same
+ * history up to (and past) every held woff. Unlike a full resync — which
+ * replaces the dataset and must DISCONNECT held reads, since their captured
+ * replies may have been rolled back — here the captured values are valid, so
+ * we serve them and the client sees neither a disconnect nor a timeout.
+ *
+ * No-op if the local-AOF dimension is engaged: then a held read-dirty chunk is
+ * waiting on this replica's own AOF fsync (replica semantics), which a partial
+ * resync does not satisfy, so those stay gated by the normal drain. */
+void releaseSyncPendingReadsHeldByDemotion(void) {
+    if (syncReplBlockReadsLocalActive()) return;
+    listIter li;
+    listNode *ln;
+    listRewind(server.sync_repl_pending_clients, &li);
+    while ((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);
+        /* Drain all chunks head-first (preserving RESP order). The last one
+         * unlinks c from sync_repl_pending_clients; the saved li.next keeps the
+         * outer walk safe. */
+        while (c->sync_repl_pending_replies &&
+               listLength(c->sync_repl_pending_replies) > 0)
+            syncReplReleaseChunk(c, listFirst(c->sync_repl_pending_replies));
+        syncReplArmWriteHandler(c);
+    }
+}
+
+/* Phase-5 helper: tear down every client currently holding sync-rep
+ * pending chunks. Used by replicationSetMaster (demotion) and similar
+ * role-change paths where master_repl_offset will no longer advance and
+ * chunks could otherwise hang forever. */
+void disconnectAllSyncRepPendingClients(const char *reason) {
+    unsigned long n = listLength(server.sync_repl_pending_clients);
+    if (n == 0) return;
+
+    listIter li;
+    listNode *ln;
+    listRewind(server.sync_repl_pending_clients, &li);
+    while ((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);
+        freeClientAsync(c);
+    }
+    server.stat_sync_repl_role_loss_disconnects += n;
+    serverLog(LL_NOTICE,
+        "Disconnecting %lu sync-replication client(s) with pending replies: %s",
+        n, reason);
+}
+
+/* If syncReplWaitLocalAof() was disarmed (appendfsync switched away from
+ * bgalways), the very next drainSyncPendingReplies() would release every chunk
+ * still parked on server.sync_repl_pending_clients unconditionally, acking a
+ * write whose durability was never confirmed. Disconnect those clients first
+ * instead, the same way stopAppendOnly() and replicationSetMaster()'s demotion
+ * handling do. */
+void disconnectSyncRepPendingClientsIfAofGateDisarmed(const char *reason) {
+    if (!syncReplWaitLocalAof() && listLength(server.sync_repl_pending_clients) > 0) {
+        disconnectAllSyncRepPendingClients(reason);
+    }
+}
+
+/* Called from freeClient(): release any unsent chunks. Must release
+ * BULK_STR_REF refcounts and adjust reply_bytes the same way the
+ * normal send path does. */
+void freeSyncPendingReplies(client *c) {
+    if (!c->sync_repl_pending_replies) return;
+
+    listIter li;
+    listNode *ln;
+    monotime now = getMonotonicUs();
+    listRewind(c->sync_repl_pending_replies, &li);
+    while ((ln = listNext(&li))) {
+        syncReplyChunk *chunk = listNodeValue(ln);
+        /* Count the wait time of disconnected pending chunks too so the
+         * hold-latency metric isn't undercounted for timeout/OBL kills. */
+        server.stat_sync_repl_hold_latency_usec += now - chunk->enqueue_us;
+        freeSyncReplyChunkContents(c, chunk);
+        zfree(chunk);
+    }
+    /* gauge: drop all still-parked chunks at once (O(1), listLength is cached) */
+    server.sync_repl_pending_chunks -= listLength(c->sync_repl_pending_replies);
+    listRelease(c->sync_repl_pending_replies);
+    c->sync_repl_pending_replies = NULL;
+    c->sync_repl_pending_mem = 0;
+    c->sync_repl_bracket_active = 0;
+    c->sync_repl_boundary_node = NULL;
+    unlinkClientFromSyncPending(c);
 }
 
 /* Returns the total client's memory usage. */
@@ -5542,7 +6236,11 @@ int closeClientOnOutputBufferLimitReached(client *c, int async) {
     serverAssert(c->reply_bytes < SIZE_MAX-(1024*64)); /* actual memory only, logical memory may exceed SIZE_MAX */
     /* Note that c->reply_bytes is irrelevant for replica clients
      * (they use the global repl buffers). */
-    if ((c->reply_bytes == 0 && c->reply_bytes_shared == 0 && !clientTypeIsSlave(c)) ||
+    /* "Nothing pending" early-out must include sync-rep chunk memory
+     * (bytes and per-chunk overhead alike), otherwise a client whose only
+     * pending data lives in chunks would never get OBL-disconnected. */
+    if ((c->reply_bytes == 0 && c->reply_bytes_shared == 0 &&
+         c->sync_repl_pending_mem == 0 && !clientTypeIsSlave(c)) ||
         c->flags & CLIENT_CLOSE_ASAP) return 0;
     if (checkClientOutputBufferLimits(c)) {
         sds client = catClientInfoString(sdsempty(),c);

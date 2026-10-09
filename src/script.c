@@ -694,8 +694,32 @@ void scriptCall(scriptRunCtx *run_ctx, sds *err) {
     if (run_ctx->repl_flags & PROPAGATE_REPL) {
         call_flags |= CMD_CALL_PROPAGATE_REPL;
     }
+
+    /* sync-replication-block-reads: this nested call() holds no reply of its
+     * own, and the outer script's key arguments refer to its caller's DB while
+     * this command may read a DB selected inside the script. So accumulate the
+     * read dependencies on the real outer client, whose reply is held after
+     * propagation (also for scripts nested inside EXEC or RM_Call). Writes are
+     * included: one taking a no-op path propagates nothing yet reports the same
+     * state a read would (see syncReadDirtyDependency), and one that does
+     * propagate makes the outer reply wait on a later offset anyway. */
+    client *sync_read_client = server.sync_repl_block_reads ? server.current_client : NULL;
+    unsigned long dirtied_keys_before = 0;
+    if (sync_read_client) {
+        /* A script's client builds no pendingCommand to reuse. */
+        long long woff = syncReadDirtyDependency(c, NULL);
+        if (woff > sync_read_client->sync_repl_read_woff)
+            sync_read_client->sync_repl_read_woff = woff;
+        dirtied_keys_before = syncReplDirtyKeysRecordCount(sync_read_client);
+    }
+
     call(c, call_flags);
     serverAssert((c->flags & CLIENT_BLOCKED) == 0);
+
+    /* Lazy expiry adds its dependency during call(), but its offset is only
+     * assigned when the outer execution unit drains the dirty-key records. */
+    if (sync_read_client && syncReplDirtyKeysRecordCount(sync_read_client) > dirtied_keys_before)
+        sync_read_client->sync_repl_read_dirty = 1;
 
     if (server.fire_keyed_jobs_between_subcommands)
         firePerKeyJobsBetweenSubcommands();

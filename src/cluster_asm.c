@@ -3177,7 +3177,7 @@ static void propagateTrimSlots(slotRangeArray *slots) {
 
     enterExecutionUnit(1, 0);
 
-    alsoPropagateForced(-1, argv, argc, PROPAGATE_AOF | PROPAGATE_REPL);
+    alsoPropagateForced(-1, argv, argc, PROPAGATE_AOF | PROPAGATE_REPL, REDIS_OP_REPL_OFFSET_NONE);
 
     exitExecutionUnit();
     postExecutionUnitOperations();
@@ -4074,6 +4074,6 @@ int asmModulePropagateForSlotMigration(struct redisCommand *cmd, robj **argv, in
     /* This array is only an argv carrier: propagateModuleCommands() and
      * propagateModuleCommandsAtEnd() write op->argv straight to the migration
      * stream, never through propagateNow(). So dbid, target and duration are unused. */
-    redisOpArrayAppend(target, 0, argvcopy, argc, 0, 0);
+    redisOpArrayAppend(target, 0, argvcopy, argc, 0, 0, REDIS_OP_REPL_OFFSET_NONE);
     return C_OK;
 }

@@ -154,6 +154,23 @@ proc wait_for_condition {maxtries delay e _else_ elsescript} {
     }
 }
 
+# Wait for the specified expression to stop changing
+proc wait_for_stable {maxtries delay e} {
+    set prev [uplevel 1 $e]
+    while {[incr maxtries -1] >= 0} {
+        after $delay
+        set res [uplevel 1 $e]
+        if {$prev == $res} {
+            break
+        }
+        set prev $res
+    }
+    if {$maxtries == -1} {
+        set context "(context: [info frame -1])"
+        fail "failed getting $e, currently $prev to be stable in $context"
+    }
+}
+
 # Run body until condition evaluates to true, up to max_iter attempts.
 proc assert_with_retry {max_iter iter_var body condition} {
     if {$max_iter < 1} {

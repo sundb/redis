@@ -187,6 +187,25 @@ proc wait_for_ofs_sync {r1 r2} {
     }
 }
 
+
+# Returns 1 if rd's channel became readable within ms milliseconds, 0 if the
+# window elapsed with no data. Used to prove a deferred/held reply's bytes
+# haven't leaked onto the socket early, and (inverted) to prove a reply that
+# must NOT be deferred arrives promptly. Races a `vwait` against an
+# `after`-driven timer so it doesn't block the event loop like a plain
+# `after ms` would.
+proc reply_arrived_within {rd ms} {
+    set fd [$rd channel]
+    global __reply_arrived_flag
+    set __reply_arrived_flag 0
+    fileevent $fd readable [list set ::__reply_arrived_flag 1]
+    set timer [after $ms [list set ::__reply_arrived_flag 0]]
+    vwait ::__reply_arrived_flag
+    after cancel $timer
+    fileevent $fd readable {}
+    return $__reply_arrived_flag
+}
+
 proc wait_done_loading r {
     wait_for_condition 50 100 {
         [catch {$r ping} e] == 0

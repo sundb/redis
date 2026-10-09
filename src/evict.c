@@ -739,13 +739,25 @@ int performEvictions(void) {
             long long key_mem_freed;
             db = server.db+bestdbid;
 
+            int nested = server.execution_nesting != 0;
+            long long repl_offset_before = server.master_repl_offset;
+
             enterExecutionUnit(1, 0);
             robj *keyobj = createStringObject(bestkey,sdslen(bestkey));
             deleteEvictedKeyAndPropagate(db, keyobj, &key_mem_freed);
-            decrRefCount(keyobj);
             exitExecutionUnit();
             /* Propagate the DEL command */
             postExecutionUnitOperations();
+
+            /* A nested DEL gets its woff only when the outer unit flushes. */
+            if (server.sync_repl_block_reads && server.masterhost == NULL) {
+                if (nested) {
+                    syncReplDirtyKeyRecord(server.current_client, db->id, keyobj);
+                } else if (server.master_repl_offset > repl_offset_before) {
+                    syncReplDirtyKeysUpsert(db->id, keyobj->ptr, server.master_repl_offset);
+                }
+            }
+            decrRefCount(keyobj);
 
             mem_freed += key_mem_freed;
             keys_freed++;

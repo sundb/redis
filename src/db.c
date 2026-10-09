@@ -1220,6 +1220,16 @@ void keyModified(client *c, redisDb *db, robj *key, robj *val, int signal) {
         touchWatchedKey(db,key);
         trackingInvalidateKey(c,key,1);
     }
+    /* Sync-replication read-blocking: buffer this write, to be drained into the
+     * global dirty-keys dict with its final offset when the outermost call()
+     * ends. A non-NULL c means a genuine command write; eviction/expiration DELs
+     * arrive through deleteKeyAndPropagate with c == NULL and are tracked
+     * separately, so expiry stays untracked by default. Buffer onto
+     * server.current_client rather than c: for Lua/FCALL c is the engine's
+     * reused fake client and for RM_Call a pooled temp client, neither of which
+     * ever runs the draining call() (the buffer would leak, tracking lost). */
+    if (c && syncReplShouldTrackDirty())
+        syncReplDirtyKeyRecord(server.current_client, db->id, key);
 }
 
 void signalFlushedDb(int dbid, int async, slotRangeArray *slots) {
@@ -1331,11 +1341,26 @@ void unblockClientForAsyncFlush(uint64_t client_id, struct slotRangeArray *slots
     /* Don't update blocked_us since command was processed in bg by lazy_free thread */
     updateStatsOnUnblock(c, 0 /*blocked_us*/, elapsedUs(c->bstate.lazyfreeStartTime), 0);
 
+    /* Sync-replication: a default (SYNC) FLUSH ran as a blocking-async flush,
+     * so its "+OK" is produced here, in the BIO completion callback, OUTSIDE the
+     * call() cycle where sync-rep chunking happens. The flush already propagated
+     * and advanced master_repl_offset during the original call() (captured in
+     * c->woff). Bracket the reply with syncReplBeginCommand/syncReplFinishCommand
+     * so it lands in a chunk gated on that woff instead of leaking straight to
+     * the socket. Without this the client gets +OK for a FLUSH that no replica
+     * has acked yet — a failover would then resurrect the "flushed" keyspace,
+     * contradicting the reply already returned. The non-blocking flush path
+     * (e.g. FLUSH ASYNC) replies inside flushCommandCommon's caller during
+     * call() and is chunked by the gate there, so it is unaffected. */
+    syncReplCookie sync_rep = syncReplBeginCommand(c);
+
     /* Only SFLUSH command pass user data pointer. */
     if (slots)
         replySlotsFlush(c, slots);
     else
         addReply(c, shared.ok);
+
+    syncReplFinishCommand(c, c->woff, 0, &sync_rep);
 
     /* mark client as unblocked */
     unblockClient(c, 1);
@@ -1353,6 +1378,85 @@ void unblockClientForAsyncFlush(uint64_t client_id, struct slotRangeArray *slots
 
     /* restore current_client */
     server.current_client = old_client;
+}
+
+/* ---- sync-replication-block-reads: per-DB dirty offset ------------------
+ *
+ * FLUSHDB/FLUSHALL/SWAPDB wipe or shuffle whole keyspaces, so there is no
+ * specific key to mark dirty in the per-key dict. Instead we stamp the
+ * affected DB(s) with the command's replication offset; a named-key read in
+ * that DB then defers until the stamp is durable. The buffer-and-drain plumbing
+ * mirrors the per-key path (keyModified → c->dirtied_*_this_command → drained at
+ * the outermost call() epilogue with the final woff), so it inherits the same
+ * MULTI/EXEC and replica-role woff handling.
+ *
+ * DB ids are pointer-encoded into the per-command list as (dbid + 2): db 0 -> 2,
+ * the "all DBs" marker (-1, from FLUSHALL) -> 1, so a stored value is never NULL. */
+#define SYNC_DIRTY_DB_ALL (-1)
+#define SYNC_DIRTY_DB_ENCODE(id) ((void *)(intptr_t)((id) + 2))
+#define SYNC_DIRTY_DB_DECODE(v)  ((int)(intptr_t)(v) - 2)
+
+/* Stamp one DB's dirty_repl_offset to max(existing, woff), maintaining the
+ * server.sync_repl_dirty_dbs_count on the 0 -> non-zero transition. woff <= 0 is a
+ * no-op (a flush that didn't propagate has nothing to wait for). */
+static void syncReplDirtyDbBump(int dbid, long long woff) {
+    if (woff <= 0) return;
+    serverAssert(dbid >= 0 && dbid < server.dbnum);
+    redisDb *db = &server.db[dbid];
+    if (db->dirty_repl_offset == 0) server.sync_repl_dirty_dbs_count++;
+    if (woff > db->dirty_repl_offset) db->dirty_repl_offset = woff;
+}
+
+/* Buffer a wholesale-modified DB id (the one actually emptied/swapped by the
+ * caller) onto the per-command list, lazily created. dbid == SYNC_DIRTY_DB_ALL
+ * marks every DB (FLUSHALL). The woff is unknown here (propagation hasn't
+ * finished for compound commands), so it is applied at drain time.
+ *
+ * Callers pass server.current_client — the OUTERMOST-call client whose call()
+ * epilogue runs the drain — not the executing client. They differ for scripts
+ * (a redis.call("FLUSHALL") executes on the engine's fake client, but the drain
+ * fires at the EVAL's epilogue on the real client) and agree for top-level
+ * commands, MULTI/EXEC, and a replica applying the master stream. This mirrors
+ * the lazy-expiry recording (keyModified's lazy-expiry path) and keeps the
+ * engine client's buffer from accumulating entries that never drain.
+ * Gated by role like the per-key path: on a primary the feature switch, on a
+ * replica only when the local-AOF dimension is engageable. */
+void syncReplDirtyDbsRecord(client *c, int dbid) {
+    if (!c || !syncReplShouldTrackDirty()) return;
+    if (!c->sync_repl_dirty_dbs) c->sync_repl_dirty_dbs = listCreate();
+    listAddNodeTail(c->sync_repl_dirty_dbs, SYNC_DIRTY_DB_ENCODE(dbid));
+}
+
+/* Drain c->sync_repl_dirty_dbs into the per-DB dirty_repl_offset with the command's
+ * final woff, then empty it (the list object stays reusable). The ALL marker
+ * stamps every DB. No free-method is set on the list (it holds encoded ints,
+ * not allocations), so listEmpty just frees the node shells. */
+void syncReplDirtyDbsDrain(client *c, long long woff) {
+    list *dbs = c->sync_repl_dirty_dbs;
+    if (!dbs || listLength(dbs) == 0) return;
+
+    listNode *ln;
+    listIter li;
+
+    listRewind(dbs, &li);
+    while ((ln = listNext(&li)) != NULL) {
+        int dbid = SYNC_DIRTY_DB_DECODE(listNodeValue(ln));
+        if (dbid == SYNC_DIRTY_DB_ALL) {
+            for (int j = 0; j < server.dbnum; j++) syncReplDirtyDbBump(j, woff);
+        } else {
+            syncReplDirtyDbBump(dbid, woff);
+        }
+    }
+    listEmpty(dbs);
+}
+
+/* Clear all per-DB dirty offsets and the counter. Called on role change beside
+ * syncReplDirtyKeysFlush(): the offsets reference the outgoing role's offset space
+ * and would otherwise never be acked once this node stops advancing it. */
+void syncReplDirtyDbsFlush(void) {
+    if (server.sync_repl_dirty_dbs_count == 0) return;
+    for (int j = 0; j < server.dbnum; j++) server.db[j].dirty_repl_offset = 0;
+    server.sync_repl_dirty_dbs_count = 0;
 }
 
 /* Common flush command implementation for FLUSHALL, FLUSHDB and SFLUSH.
@@ -1381,6 +1485,13 @@ int flushCommandCommon(client *c, int type, int flags, slotRangeArray *slots) {
     /* Without the forceCommandPropagation, when DB(s) was already empty,
      * FLUSHALL\FLUSHDB will not be replicated nor put into the AOF. */
     forceCommandPropagation(c, PROPAGATE_REPL | PROPAGATE_AOF);
+
+    /* sync-replication-block-reads: stamp the flushed DB(s) so a later named-key
+     * read in them defers until this flush is durable. FLUSH_TYPE_ALL marks all
+     * DBs; FLUSH_TYPE_DB / FLUSH_TYPE_SLOTS mark the selected DB (a slot-range
+     * flush over-blocks the whole DB, which is safe). Applied with the command's
+     * final woff at the call() epilogue. */
+    syncReplDirtyDbsRecord(server.current_client, (type == FLUSH_TYPE_ALL) ? SYNC_DIRTY_DB_ALL : c->db->id);
 
     /* if blocking ASYNC, block client and add completion job request to BIO lazyfree
      * worker's queue. To be called and reply with OK only after all preceding pending
@@ -2750,6 +2861,10 @@ void swapdbCommand(client *c) {
         moduleFireServerEvent(REDISMODULE_EVENT_SWAPDB,0,&si);
         server.dirty++;
         server.stat_cluster_incompatible_ops++;
+        /* sync-replication-block-reads: both DBs were wholesale-shuffled, so a
+         * named-key read in either must defer until the swap is durable. */
+        syncReplDirtyDbsRecord(server.current_client, id1);
+        syncReplDirtyDbsRecord(server.current_client, id2);
         addReply(c,shared.ok);
     }
 }
@@ -2891,7 +3006,26 @@ static void deleteKeyAndPropagate(redisDb *db, robj *keyobj, int notify_type, lo
 
     notifyKeyspaceEvent(notify_type, notify_name,keyobj, db->id);
     keyModified(NULL, db, keyobj, NULL, 1);
-    propagateDeletion(db, keyobj, lazy_flag);
+
+    /* Carry the deletion type to whichever path actually propagates it, so
+     * synchronous replication can credit the resulting offset there. */
+    redisOpReplOffsetType repl_offset_type = (notify_type == NOTIFY_EXPIRED) ?
+        REDIS_OP_REPL_OFFSET_LAZY_EXPIRE : REDIS_OP_REPL_OFFSET_EVICTION;
+    propagateDeletion(db, keyobj, lazy_flag, repl_offset_type);
+
+    /* sync-replication-block-reads: under -on-expire, also record the
+     * expiring key as dirty, so a later (or same-command) read of it defers
+     * until the expiry-DEL acks and then returns nil. Buffered on the
+     * command's client and drained at call() end, which covers lazy expiry
+     * only — active expire from cron has current_client == NULL and is
+     * deliberately not tracked (the read-blocking tests disable it).
+     * Eviction records directly after an immediate flush, or falls back to
+     * this same client buffer when an outer execution unit defers its DEL. */
+    if (syncReplShouldTrackDirty() && notify_type == NOTIFY_EXPIRED &&
+        server.sync_repl_block_reads_on_expire)
+    {
+        syncReplDirtyKeyRecord(server.current_client, db->id, keyobj);
+    }
 
     if (notify_type == NOTIFY_EXPIRED)
         server.stat_expiredkeys++;
@@ -2930,8 +3064,14 @@ void deleteEvictedKeyAndPropagate(redisDb *db, robj *keyobj, long long *key_mem_
  *    In this the caller must remember to call
  *    postExecutionUnitOperations, preferably just after a
  *    single deletion batch, so that DEL/UNLINK will NOT be wrapped
- *    in MULTI/EXEC */
-void propagateDeletion(redisDb *db, robj *key, int lazy) {
+ *    in MULTI/EXEC
+ *
+ * 'repl_offset_type' classifies the replication offset advance caused by this
+ * deletion (see the field of the same name in redisOp). The offset is
+ * attributed to the corresponding reply-holding exclusion instead of being
+ * counted as a real write, at actual flush time in propagatePendingCommands()
+ * -- see syncReplFinishOrDeferChunk()'s use of those offsets. */
+void propagateDeletion(redisDb *db, robj *key, int lazy, redisOpReplOffsetType repl_offset_type) {
     robj *argv[2];
 
     argv[0] = lazy ? shared.unlink : shared.del;
@@ -2941,7 +3081,7 @@ void propagateDeletion(redisDb *db, robj *key, int lazy) {
 
     /* If the master decided to delete a key we must propagate it to replicas no matter what.
      * Even if module executed a command without asking for propagation. */
-    alsoPropagateForced(db->id,argv,2,PROPAGATE_AOF|PROPAGATE_REPL);
+    alsoPropagateForced(db->id,argv,2,PROPAGATE_AOF|PROPAGATE_REPL,repl_offset_type);
 
     decrRefCount(argv[0]);
     decrRefCount(argv[1]);

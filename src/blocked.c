@@ -238,6 +238,21 @@ int blockedClientMayTimeout(client *c) {
  * send it a reply of some kind. After this function is called,
  * unblockClient() will be called with the same client as argument. */
 void replyToBlockedClientTimedOut(client *c) {
+    /* Reply holding (appendfsync bgalways): except BLOCKED_MODULE (which
+     * brackets itself), every branch below writes its reply straight into
+     * c's reply buffer, outside call(). Only BLOCKED_LAZYFREE's FLUSH
+     * actually propagated a write (before it blocked, offset saved in
+     * c->woff) -- a timeout never pops anything itself, that's the ready-key
+     * path's job. So BLOCKED_LAZYFREE gates on c->woff directly; the rest
+     * just need passthrough ordering against whatever propagated since entry. */
+    if (c->bstate.btype == BLOCKED_MODULE) {
+        moduleBlockedClientTimedOut(c);
+        return;
+    }
+
+    long long pre_repl_offset = server.master_repl_offset;
+    syncReplCookie sync_rep = syncReplBeginCommand(c);
+
     if (c->bstate.btype == BLOCKED_LAZYFREE) {
         /* SFLUSH: reply with empty array, FLUSH*: reply with OK */
         if (c->cmd && c->cmd->proc == sflushCommand)
@@ -256,11 +271,17 @@ void replyToBlockedClientTimedOut(client *c) {
         addReplyArrayLen(c,2);
         addReplyLongLong(c,server.fsynced_reploff >= c->bstate.reploffset);
         addReplyLongLong(c,replicationCountAOFAcksByOffset(c->bstate.reploffset));
-    } else if (c->bstate.btype == BLOCKED_MODULE) {
-        moduleBlockedClientTimedOut(c);
     } else {
         serverPanic("Unknown btype in replyToBlockedClientTimedOut().");
     }
+
+    if (c->bstate.btype == BLOCKED_LAZYFREE)
+        /* FLUSH propagated before blocking, at c->woff, not "now" --
+         * pre_repl_offset wouldn't see it, so chunk on c->woff directly. */
+        syncReplFinishCommand(c, c->woff, 0, &sync_rep);
+    else
+        /* Nothing propagated here; just needs ordering vs pending chunks. */
+        syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
 }
 
 /* If one or more clients are blocked on the SHUTDOWN command, this function
@@ -304,11 +325,29 @@ void disconnectAllBlockedClients(void) {
                 continue;
 
             if (c->bstate.btype == BLOCKED_LAZYFREE) {
+                /* Reply holding (appendfsync bgalways): the FLUSH already
+                 * propagated and advanced master_repl_offset (captured in
+                 * c->woff) before this client blocked (forceCommandPropagation()
+                 * runs inside the original call(), before
+                 * blockClientForAsyncFlush() suspends it) — same situation as
+                 * the normal completion path in unblockClientForAsyncFlush(),
+                 * so gate this reply on c->woff the same way. Without this, the
+                 * client would get an unconditional +OK for a write that
+                 * disconnectAllSyncRepPendingClients() (called right after this
+                 * loop, in replicationSetMaster()) is specifically trying to
+                 * avoid acking. If the reply does end up chunked here, that
+                 * call picks this client up via server.sync_repl_pending_clients
+                 * and disconnects it instead of letting the +OK go out. */
+                syncReplCookie sync_rep = syncReplBeginCommand(c);
+
                 /* SFLUSH: reply with empty array, FLUSH*: reply with OK */
                 if (c->cmd && c->cmd->proc == sflushCommand)
                     addReplyArrayLen(c, 0);
                 else
                     addReply(c, shared.ok);
+
+                syncReplFinishCommand(c, c->woff, 0, &sync_rep);
+
                 updateStatsOnUnblock(c, 0, 0, 0);
                 c->flags &= ~CLIENT_PENDING_COMMAND;
                 unblockClient(c, 1);
@@ -743,6 +782,17 @@ static void unblockClientOnKey(client *c, robj *key) {
     if (c->flags & CLIENT_PENDING_COMMAND) {
         c->flags &= ~CLIENT_PENDING_COMMAND;
         c->flags |= CLIENT_REEXECUTING_COMMAND;
+
+        /* Reply holding (appendfsync bgalways): this reissue's own call() runs
+         * with execution_nesting == 1 (the enterExecutionUnit below), so call()
+         * skips its usual syncReplStartCommand/syncReplFinishCommand bracketing
+         * (see the comment on sync_rep in call()) — that bracketing must
+         * happen here instead, around the whole reissue, so it can be finished
+         * only after propagation has actually flushed (which itself waits for
+         * execution_nesting == 0, i.e. after this function's own afterCommand()
+         * call below). */
+        syncReplCookie sync_rep = syncReplBeginCommand(c);
+
         /* We want the command processing and the unblock handler (see RM_Call 'K' option)
          * to run atomically, this is why we must enter the execution unit here before
          * running the command, and exit the execution unit after calling the unblock handler (if exists).
@@ -767,6 +817,13 @@ static void unblockClientOnKey(client *c, robj *key) {
         }
         exitExecutionUnit();
         afterCommand(c);
+
+        /* call() ran inside this execution unit, so its dirty records could
+         * not be drained there. Propagation has now established the final
+         * offset; record the keys before checking whether to hold the reply. */
+        syncReplDirtyDrainClient(c, server.master_repl_offset);
+        syncReplFinishOrDeferChunk(c, &sync_rep);
+
         /* Clear the CLIENT_REEXECUTING_COMMAND flag after the proc is executed. */
         c->flags &= ~CLIENT_REEXECUTING_COMMAND;
         server.current_client = old_client;
@@ -814,8 +871,20 @@ void unblockClientOnTimeout(client *c) {
 /* Unblock a client which is currently Blocked with error.
  * If err_str is provided it will be used to reply to the blocked client */
 void unblockClientOnError(client *c, const char *err_str) {
-    if (err_str)
+    if (err_str) {
+        /* Reply holding (appendfsync bgalways): this writes straight into
+         * c's reply buffer, entirely outside call(). An error reply never
+         * propagates a write itself, so this only needs ordering
+         * (passthrough) protection against an earlier, still-parked reply
+         * on the same connection -- same reasoning as
+         * replyToBlockedClientTimedOut(). */
+        long long pre_repl_offset = server.master_repl_offset;
+        syncReplCookie sync_rep = syncReplBeginCommand(c);
+
         addReplyError(c, err_str);
+
+        syncReplFinishByOffset(c, pre_repl_offset, &sync_rep);
+    }
     updateStatsOnUnblock(c, 0, 0, 1);
     if (c->flags & CLIENT_PENDING_COMMAND)
         c->flags &= ~CLIENT_PENDING_COMMAND;
@@ -830,8 +899,19 @@ void blockedBeforeSleep(void) {
     handleClaimableStreamEntries();
 
     /* Unblock all the clients blocked for synchronous replication
-     * in WAIT or WAITAOF. */
-    if (listLength(server.clients_waiting_acks))
+     * in WAIT or WAITAOF. Also drains sync-replication chunked replies and, at
+     * its tail, advances the dirty-key cleanup as the durable frontier moves.
+     * Dirty-key/DB tracking (syncReplShouldTrackDirty) is gated only by the
+     * block-reads switch, independent of whether any write's reply is actually
+     * held (clientSyncRepActive, which on a primary also requires replicas>0
+     * or a local-AOF requirement) — so a non-empty dict/dirty-DB count does NOT
+     * imply a client is parked in sync_repl_pending_clients, on either role.
+     * Trigger on it explicitly here, or dirty entries would grow unbounded
+     * under a write-only workload (e.g. block-reads on with replicas=0 and no
+     * AOF requirement on a primary). */
+    if (listLength(server.clients_waiting_acks) ||
+        listLength(server.sync_repl_pending_clients) ||
+        syncReplDirtyStateExists())
         processClientsWaitingReplicas();
 
     /* Try to process blocked clients every once in while.

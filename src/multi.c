@@ -179,6 +179,13 @@ void execCommand(client *c) {
 
     c->all_argv_len_sum = c->mstate.argv_len_sums;
 
+    /* sync-replication-block-reads: a lazy expiry inside a subcommand buffers a
+     * DEL whose woff is only assigned when this EXEC's execution unit
+     * propagates. The buffer is not drained between subcommands (nested call()s
+     * leave execution_nesting non-zero), so one snapshot here is enough to tell
+     * afterwards whether that happened. */
+    unsigned long dirtied_keys_before = syncReplDirtyKeysRecordCount(c);
+
     /* Skip ACL check for the AOF client while server loading. */
     int skip_acl_check = server.loading && c->id == CLIENT_ID_AOF;
 
@@ -223,6 +230,15 @@ void execCommand(client *c) {
                 "following reason: %s", reason);
         } else {
             c->mstate.executing_cmd = j;
+
+            /* Nested call() does not hold individual replies. Capture each
+             * subcommand's dependency now, before argv or the selected DB
+             * changes, so the outer EXEC can hold its entire reply on the
+             * maximum. Writes count too: one that turns out to be a no-op
+             * propagates nothing but still reports unacked state. */
+            long long woff = syncReadDirtyDependency(c, c->mstate.commands[j]);
+            if (woff > c->sync_repl_read_woff) c->sync_repl_read_woff = woff;
+
             if (c->id == CLIENT_ID_AOF)
                 call(c,CMD_CALL_NONE);
             else
@@ -255,6 +271,11 @@ void execCommand(client *c) {
     c->cmd = c->realcmd = orig_cmd;
     c->all_argv_len_sum = orig_all_argv_len_sum;
     discardTransaction(c);
+
+    /* A lazy expiry inside a subcommand only got its offset when this EXEC's
+     * execution unit propagated, so the outer finish has to wait on c->woff too. */
+    if (server.sync_repl_block_reads && syncReplDirtyKeysRecordCount(c) > dirtied_keys_before)
+        c->sync_repl_read_dirty = 1;
 
     server.in_exec = 0;
 }
