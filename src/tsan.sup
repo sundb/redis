@@ -7,6 +7,16 @@ signal:printCrashReport
 # https://github.com/jemalloc/jemalloc/issues/2621
 race:malloc_mutex_trylock_final
 
+# redis-benchmark with --threads shares one hdr_histogram across worker threads:
+# they record latencies via hdr_record_value_atomic (atomic increments to the
+# counts/min/max/total) while thread 0's showThroughput reads it with non-atomic
+# accessors (hdr_mean) and periodically resets current_sec via hdr_reset, to
+# print live throughput. The displayed stats are approximate by design, so these
+# races are benign and not worth per-bucket synchronization. hdr_histogram is
+# only accessed concurrently by redis-benchmark; the server uses it from the
+# main thread only. The final benchmark report runs after all workers stopped.
+race:hdr_histogram.c
+
 # A race can happen on conn->last_errno if replica client is reading/writing
 # data in IO thread and main thread is calling connAddrPeerName for some reason
 # (f.e genRedisInfoString/roleCommand...).
