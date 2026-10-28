@@ -79,6 +79,7 @@ typedef int (*listpackValidateEntryCB)(unsigned char *p, unsigned int head_count
 int lpValidateIntegrity(unsigned char *lp, size_t size, int deep,
                         listpackValidateEntryCB entry_cb, void *cb_userdata);
 unsigned char *lpValidateFirst(unsigned char *lp);
+unsigned char *lpWidenBoundaryBacklen(unsigned char *lp, size_t *len);
 int lpValidateNext(unsigned char *lp, unsigned char **pp, size_t lpbytes);
 unsigned int lpCompare(unsigned char *p, unsigned char *s, uint32_t slen, long long *cached_longval, int *cached_valid);
 void lpRandomPair(unsigned char *lp, unsigned long total_count,

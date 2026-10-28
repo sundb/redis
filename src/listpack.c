@@ -335,25 +335,29 @@ static inline int lpEncodeGetType(unsigned char *ele, uint32_t size, unsigned ch
  * of the previous element of size 'l', in the target buffer 'buf'.
  * The function returns the number of bytes used to encode it, from
  * 1 to 5. If 'buf' is NULL the function just returns the number of bytes
- * needed in order to encode the backlen. */
+ * needed in order to encode the backlen.
+ *
+ * 16383, 2097151 and 268435455 are encoded in one byte more than they
+ * strictly need, with a leading zero byte. This is the form written by every
+ * version except Redis 8.8 and 8.10, see lpWidenBoundaryBacklen(). */
 static inline unsigned long lpEncodeBacklen(unsigned char *buf, uint64_t l) {
     if (l <= 127) {
         if (buf) buf[0] = l;
         return 1;
-    } else if (l <= 16383) {
+    } else if (l < 16383) {
         if (buf) {
             buf[0] = l>>7;
             buf[1] = (l&127)|128;
         }
         return 2;
-    } else if (l <= 2097151) {
+    } else if (l < 2097151) {
         if (buf) {
             buf[0] = l>>14;
             buf[1] = ((l>>7)&127)|128;
             buf[2] = (l&127)|128;
         }
         return 3;
-    } else if (l <= 268435455) {
+    } else if (l < 268435455) {
         if (buf) {
             buf[0] = l>>21;
             buf[1] = ((l>>14)&127)|128;
@@ -379,11 +383,11 @@ static inline unsigned long lpEncodeBacklen(unsigned char *buf, uint64_t l) {
 static inline unsigned long lpEncodeBacklenBytes(uint64_t l) {
     if (l <= 127) {
         return 1;
-    } else if (l <= 16383) {
+    } else if (l < 16383) {
         return 2;
-    } else if (l <= 2097151) {
+    } else if (l < 2097151) {
         return 3;
-    } else if (l <= 268435455) {
+    } else if (l < 268435455) {
         return 4;
     } else {
         return 5;
@@ -1795,6 +1799,64 @@ static inline void lpAssertValidEntry(unsigned char* lp, size_t lpbytes, unsigne
     assert(lpValidateNext(lp, &p, lpbytes));
 }
 
+/* Rewrite the narrower backlen of the entries found by
+ * lpWidenBoundaryBacklen() into 'dst', or just count them if 'dst' is NULL. */
+static size_t lpWidenBoundaryBacklenTo(unsigned char *lp, size_t bytes, unsigned char *dst) {
+    unsigned char *p = lp + LP_HDR_SIZE, *eof = lp + bytes - 1, *copied = lp;
+    size_t widened = 0;
+
+    while (p < eof && *p != LP_EOF) {
+        uint32_t lenbytes = lpCurrentEncodedSizeBytes(p[0]);
+        if (!lenbytes || lenbytes >= (size_t)(eof - p)) break;
+        unsigned long entrylen = lpCurrentEncodedSizeUnsafe(p);
+        if (entrylen >= (size_t)(eof - p)) break;
+        unsigned long backlen = lpEncodeBacklenBytes(entrylen);
+
+        /* The narrower form starts with 127 instead of a zero byte. */
+        if ((entrylen == 16383 || entrylen == 2097151 || entrylen == 268435455) &&
+            entrylen + backlen - 1 <= (size_t)(eof - p) && p[entrylen] == 127 &&
+            lpDecodeBacklen(p + entrylen + backlen - 2) == entrylen)
+        {
+            if (dst) {
+                memcpy(dst, copied, p + entrylen - copied);
+                dst += p + entrylen - copied;
+                dst += lpEncodeBacklen(dst, entrylen);
+            }
+            backlen--;
+            widened++;
+            copied = p + entrylen + backlen;
+        }
+        p += entrylen + backlen;
+    }
+    if (dst) memcpy(dst, copied, lp + bytes - copied);
+    return widened;
+}
+
+/* Redis 8.8 and 8.10 (RDB 14 and 15) wrote the backlen of
+ * entries whose encoded length is 16383, 2097151 or 268435455 in one byte less
+ * than every other version, which lpEncodeBacklenBytes() doesn't read. Convert
+ * them to the wider form in a listpack of 'len' bytes loaded from such an RDB.
+ * Returns the listpack, reallocated if anything changed, and updates 'len'.
+ *
+ * The listpack is not validated yet: the walk stops at the first entry that
+ * doesn't fit, leaving it to the integrity check that follows. */
+unsigned char *lpWidenBoundaryBacklen(unsigned char *lp, size_t *len) {
+    size_t bytes = *len;
+
+    /* Smaller listpacks can't hold such an entry. */
+    if (bytes < LP_HDR_SIZE + 16383 || lpGetTotalBytes(lp) != bytes) return lp;
+
+    size_t widened = lpWidenBoundaryBacklenTo(lp, bytes, NULL);
+    if (widened == 0 || bytes + widened > UINT32_MAX) return lp;
+
+    unsigned char *dst = lp_malloc(bytes + widened);
+    lpWidenBoundaryBacklenTo(lp, bytes, dst);
+    lpSetTotalBytes(dst, bytes + widened);
+    lp_free(lp);
+    *len = bytes + widened;
+    return dst;
+}
+
 /* Validate the integrity of the data structure.
  * when `deep` is 0, only the integrity of the header is validated.
  * when `deep` is 1, we scan all the entries one by one. */
@@ -2831,9 +2893,9 @@ int listpackTest(int argc, char *argv[], int flags) {
     }
 
     TEST("Backlen encode/decode at width boundaries") {
-        /* Body lengths where backlen widens; maxima per width must use the
-         * minimum byte count and round-trip (lpEncodeBacklen vs
-         * lpEncodeBacklenBytes and lpDecodeBacklen). */
+        /* Body lengths where backlen widens must round-trip (lpEncodeBacklen
+         * vs lpEncodeBacklenBytes and lpDecodeBacklen). The three maxima per
+         * width use one byte more, with a leading zero byte. */
         const uint64_t cases[] = {
             128ULL,
             16382ULL,
@@ -2853,6 +2915,51 @@ int listpackTest(int argc, char *argv[], int flags) {
             assert(n == lpEncodeBacklenBytes(enclen));
             assert(lpEncodeBacklen(enc, enclen) == n);
             assert(lpDecodeBacklen(enc + n - 1) == enclen);
+            if (enclen == 16383 || enclen == 2097151 || enclen == 268435455)
+                assert(enc[0] == 0);
+        }
+    }
+
+    TEST("Widen the narrower boundary backlen written by Redis 8.8 and 8.10") {
+        const size_t enclens[] = {16383, 2097151};
+        for (size_t i = 0; i < sizeof(enclens) / sizeof(enclens[0]); i++)
+        for (int tail = 0; tail <= 1; tail++) {
+            const size_t enclen = enclens[i], wide = lpEncodeBacklenBytes(enclen);
+            /* "head", the boundary entry with the narrower backlen and,
+             * unless it is the last entry, "tail". */
+            size_t bytes = LP_HDR_SIZE + 6 + enclen + wide - 1 + 6 * tail + 1;
+            unsigned char *lp = lp_malloc(bytes), *p = lp + LP_HDR_SIZE;
+            lpSetTotalBytes(lp, bytes);
+            lpSetNumElements(lp, 2 + tail);
+            memcpy(p, "\x84head\x05", 6);
+            p += 6;
+            memset(p, 'a', enclen);
+            p[0] = LP_ENCODING_32BIT_STR;
+            p[1] = (enclen - 5) & 0xff;
+            p[2] = (enclen - 5) >> 8;
+            p[3] = (enclen - 5) >> 16;
+            p[4] = 0;
+            memset(p + enclen, 0xff, wide - 1);
+            p[enclen] = 127;
+            if (tail) memcpy(p + enclen + wide - 1, "\x84tail\x05", 6);
+            lp[bytes - 1] = LP_EOF;
+            assert(!lpValidateIntegrity(lp, bytes, 1, NULL, NULL));
+
+            size_t len = bytes;
+            lp = lpWidenBoundaryBacklen(lp, &len);
+            assert(len == bytes + 1 && lpBytes(lp) == len);
+            assert(lpValidateIntegrity(lp, len, 1, NULL, NULL));
+            p = lpNext(lp, lpFirst(lp));
+            int64_t vlen;
+            assert(lpGet(p, &vlen, NULL) && vlen == (int64_t)enclen - 5);
+            assert(lpLast(lp) == (tail ? lpNext(lp, p) : p));
+            if (tail) verifyEntry(lpLast(lp), (unsigned char*)"tail", 4);
+            verifyEntry(lpPrev(lp, p), (unsigned char*)"head", 4);
+
+            /* Already in the wider form: nothing to do. */
+            unsigned char *same = lp;
+            assert(lpWidenBoundaryBacklen(lp, &len) == same && len == lpBytes(lp));
+            lpFree(lp);
         }
     }
 

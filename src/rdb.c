@@ -2805,16 +2805,24 @@ void rdbClearHashTemplates(void) {
  * NULL unless hash-rdb-load-min-template-entries > 0. */
 static rdbLoadTemplateCtx *rdb_load_tmpl_ctx = NULL;
 
+/* Listpacks saved by Redis 8.8 and 8.10 (RDB 14 and 15) may have a narrower
+ * backlen this version can't read, see lpWidenBoundaryBacklen(). */
+static unsigned char *rdbWidenListpackBacklen(unsigned char *lp, size_t *len, int rdbver) {
+    if (rdbver == 14 || rdbver == 15) lp = lpWidenBoundaryBacklen(lp, len);
+    return lp;
+}
+
 /* Load and validate a TMPL_LP listpack blob whose first entry is a template ID.
  * Returns the listpack and if 'id_out' is non-NULL, the encoded id.
  * On failure, frees the blob and returns NULL. */
-static unsigned char *rdbLoadTmplLpBlob(rio *rdb, int deep, long long *id_out) {
+static unsigned char *rdbLoadTmplLpBlob(rio *rdb, int deep, long long *id_out, int rdbver) {
     size_t encoded_len;
     unsigned char *lp = rdbGenericLoadStringObject(rdb, RDB_LOAD_PLAIN, &encoded_len);
     if (lp == NULL || encoded_len == 0) {
         zfree(lp);
         return NULL;
     }
+    lp = rdbWidenListpackBacklen(lp, &encoded_len, rdbver);
 
     if (deep) server.stat_dump_payload_sanitizations++;
     if (!lpValidateIntegrity(lp, encoded_len, deep, NULL, NULL)) {
@@ -2879,7 +2887,7 @@ typedef struct {
 /* Read the fields_fmt byte and the field-names section of a template RESTORE
  * payload, filling 'out'. Returns C_OK or C_ERR (on C_ERR corruption is already
  * reported and there is nothing for the caller to free). */
-static int rdbLoadTemplateFields(rio *rdb, int deep, rdbTmplFields *out) {
+static int rdbLoadTemplateFields(rio *rdb, int deep, rdbTmplFields *out, int rdbver) {
     *out = (rdbTmplFields) {0};
 
     uint64_t fmt = rdbLoadLen(rdb, NULL);
@@ -2891,6 +2899,7 @@ static int rdbLoadTemplateFields(rio *rdb, int deep, rdbTmplFields *out) {
         size_t blen;
         unsigned char *blob = rdbGenericLoadStringObject(rdb, RDB_LOAD_PLAIN, &blen);
         if (blob == NULL) return C_ERR;
+        if (blen) blob = rdbWidenListpackBacklen(blob, &blen, rdbver);
 
         if (blen == 0 || !lpValidateIntegrity(blob, blen, deep, NULL, NULL)) {
             rdbReportCorruptRDB("template field blob integrity check failed.");
@@ -3006,7 +3015,7 @@ static void rdbDiscardTemplateFields(rdbTmplFields *out) {
  *   no fields with expiration or it is not a hash, then it will set be to
  *   EB_EXPIRE_TIME_INVALID.
  */
-robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
+robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error, int rdbver)
 {
     robj *o = NULL, *ele, *dec;
     uint64_t len;
@@ -3364,10 +3373,10 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
          * The template is created only after the values blob validates, so a
          * value error never leaves an unreferenced template behind. */
         rdbTmplFields tf;
-        if (rdbLoadTemplateFields(rdb, deep_integrity_validation, &tf) != C_OK)
+        if (rdbLoadTemplateFields(rdb, deep_integrity_validation, &tf, rdbver) != C_OK)
             return NULL;
 
-        unsigned char *lp = rdbLoadTmplLpBlob(rdb, deep_integrity_validation, NULL);
+        unsigned char *lp = rdbLoadTmplLpBlob(rdb, deep_integrity_validation, NULL, rdbver);
         if (lp == NULL || !rdbCheckTmplLpCount(lp, tf.field_count)) {
             rdbDiscardTemplateFields(&tf);
             return NULL;
@@ -3384,7 +3393,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         }
         /* TMPL_LP compact: The first listpack entry is the template ID */
         long long src_id;
-        unsigned char *lp = rdbLoadTmplLpBlob(rdb, deep_integrity_validation, &src_id);
+        unsigned char *lp = rdbLoadTmplLpBlob(rdb, deep_integrity_validation, &src_id, rdbver);
         if (lp == NULL)
             return NULL;
 
@@ -3413,7 +3422,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
          * created only after the values load, so a value error never leaves an
          * unreferenced template behind. */
         rdbTmplFields tf;
-        if (rdbLoadTemplateFields(rdb, deep_integrity_validation, &tf) != C_OK)
+        if (rdbLoadTemplateFields(rdb, deep_integrity_validation, &tf, rdbver) != C_OK)
             return NULL;
 
         sds *values = rdbLoadSdsArray(rdb, tf.field_count, "template-array values");
@@ -3653,7 +3662,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
             }
 
             if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
-                lp = data;
+                lp = rdbWidenListpackBacklen(data, &encoded_len, rdbver);
                 if (deep_integrity_validation) server.stat_dump_payload_sanitizations++;
                 if (!lpValidateIntegrity(lp, encoded_len, deep_integrity_validation, NULL, NULL)) {
                     rdbReportCorruptRDB("Listpack integrity check failed.");
@@ -3719,6 +3728,10 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
         unsigned char *encoded =
             rdbGenericLoadStringObject(rdb,RDB_LOAD_PLAIN,&encoded_len);
         if (encoded == NULL) return NULL;
+        if (rdbtype == RDB_TYPE_SET_LISTPACK || rdbtype == RDB_TYPE_ZSET_LISTPACK ||
+            rdbtype == RDB_TYPE_HASH_LISTPACK || rdbtype == RDB_TYPE_HASH_LISTPACK_EX_PRE_GA ||
+            rdbtype == RDB_TYPE_HASH_LISTPACK_EX)
+            encoded = rdbWidenListpackBacklen(encoded, &encoded_len, rdbver);
 
         o = createObject(OBJ_STRING, encoded); /* Obj type fixed below. */
 
@@ -4036,6 +4049,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error)
                 decrRefCount(o);
                 return NULL;
             }
+            lp = rdbWidenListpackBacklen(lp, &lp_size, rdbver);
             if (deep_integrity_validation) server.stat_dump_payload_sanitizations++;
             if (!streamValidateListpackIntegrity(lp, lp_size, deep_integrity_validation)) {
                 rdbReportCorruptRDB("Stream listpack integrity check failed.");
@@ -5086,7 +5100,7 @@ static int rdbLoadRioWithLoadingCtxInternal(rio *rdb, int rdbflags, rdbSaveInfo 
             goto eoferr;
         }
         /* Read value */
-        val = rdbLoadObject(type,rdb,key,db->id,&error);
+        val = rdbLoadObject(type,rdb,key,db->id,&error,rdbver);
 
         /* Check if the key already expired. This function is used when loading
          * an RDB file from disk, either at startup, or when an RDB was
