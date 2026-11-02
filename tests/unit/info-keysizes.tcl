@@ -971,6 +971,29 @@ start_server {tags {external:skip needs:debug} overrides {key-memory-histograms 
         verify_keymem_non_empty r {lists sets zsets hashes streams}
     }
 
+    test "KEY-MEMORY-STATS - ZRANGESTORE into its own source keeps histograms consistent" {
+        r FLUSHALL
+        assert_equal OK [r DEBUG KEYSIZES-HIST-ASSERT 1]
+        assert_equal OK [r DEBUG ALLOCSIZE-SLOTS-ASSERT 1]
+        foreach count {10 240} {
+            set args {}
+            for {set i 0} {$i < $count} {incr i} { lappend args $i m$i }
+            # Replacing the source with fewer members or all of them, and
+            # deleting it with an empty result, must account the source
+            # before the store replaces or frees it. The debug assertions
+            # recompute both histograms and the per-slot sizes after each
+            # command.
+            foreach {dst range} {k {0 4} k {0 -1} k {999 1000} other {0 4}} {
+                r FLUSHALL
+                r ZADD k {*}$args
+                r ZRANGESTORE $dst k {*}$range
+                assert_equal PONG [r PING]
+            }
+        }
+        assert_equal OK [r DEBUG KEYSIZES-HIST-ASSERT 0]
+        assert_equal OK [r DEBUG ALLOCSIZE-SLOTS-ASSERT 0]
+    }
+
     test "KEY-MEMORY-STATS - Stream keys should appear in key memory histogram" {
         r FLUSHALL
         for {set i 1} {$i <= 8} {incr i} { r XADD mystream $i-1 f v }

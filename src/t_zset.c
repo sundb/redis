@@ -3720,6 +3720,9 @@ struct zrange_result_handler {
     int                                  reverse;
     int                                  should_emit_array_length;
     zbtreeAppendBatch                   *append_batch;
+    robj                                *srckey;
+    kvobj                               *srcobj;
+    size_t                               src_oldsize;
     zrangeResultBeginFunction            beginResultEmission;
     zrangeResultFinalizeFunction         finalizeResultEmission;
     zrangeResultEmitCBufferFunction      emitResultFromCBuffer;
@@ -3855,12 +3858,34 @@ static void zrangeResultEmitLongLongForStore(zrange_result_handler *handler,
     serverAssert(retval);
 }
 
+/* Record the source allocation size before the range is read. */
+static void zrangeResultHandlerSourceTrack(zrange_result_handler *handler,
+    robj *key, kvobj *zobj)
+{
+    if (!server.memory_tracking_enabled) return;
+    handler->srckey = key;
+    handler->srcobj = zobj;
+    handler->src_oldsize = kvobjAllocSize(zobj);
+}
+
+/* Account the source allocation size change once. ZRANGESTORE calls this
+ * before storing, since the destination may be the source itself, which
+ * the store then replaces or deletes. */
+static void zrangeResultHandlerSourceAccount(zrange_result_handler *handler) {
+    if (handler->srcobj == NULL) return;
+    client *c = handler->client;
+    updateSlotAllocSize(c->db, getKeySlot(handler->srckey->ptr), handler->srcobj,
+                        handler->src_oldsize, kvobjAllocSize(handler->srcobj));
+    handler->srcobj = NULL;
+}
+
 static void zrangeResultFinalizeStore(zrange_result_handler *handler, size_t result_count)
 {
     if (handler->append_batch) {
         zbtreeAppendBatchFinish(handler->append_batch);
         handler->append_batch = NULL;
     }
+    zrangeResultHandlerSourceAccount(handler);
     if (result_count) {
         setKey(handler->client, handler->client->db, handler->dstkey, &handler->dstobj, 0);
         addReplyLongLong(handler->client, result_count);
@@ -4535,7 +4560,6 @@ void zrangeGenericCommand(zrange_result_handler *handler, int argc_start, int st
     zlexrangespec lexrange;
     int minidx = argc_start + 1;
     int maxidx = argc_start + 2;
-    size_t oldsize = 0;
 
     /* Options common to all */
     long opt_start = 0;
@@ -4648,8 +4672,7 @@ void zrangeGenericCommand(zrange_result_handler *handler, int argc_start, int st
     if (checkType(c,zobj,OBJ_ZSET)) goto cleanup;
 
     /* Step 4: Pass this to the command-specific handler. */
-    if (server.memory_tracking_enabled)
-        oldsize = kvobjAllocSize(zobj);
+    zrangeResultHandlerSourceTrack(handler, key, zobj);
     switch (rangetype) {
     case ZRANGE_AUTO:
     case ZRANGE_RANK:
@@ -4667,8 +4690,9 @@ void zrangeGenericCommand(zrange_result_handler *handler, int argc_start, int st
             opt_offset, opt_limit, direction == ZRANGE_DIRECTION_REVERSE);
         break;
     }
-    if (server.memory_tracking_enabled)
-        updateSlotAllocSize(c->db, getKeySlot(key->ptr), zobj, oldsize, kvobjAllocSize(zobj));
+    /* Do not use zobj here: ZRANGESTORE may have replaced or deleted it.
+     * This is a no-op if the store already accounted the source. */
+    zrangeResultHandlerSourceAccount(handler);
 
     /* Instead of returning here, we'll just fall-through the clean-up. */
 
