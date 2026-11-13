@@ -2557,7 +2557,6 @@ typedef struct {
     int encoding;
     double weight;
     size_t oldsize;
-    int noscore; /* Skip B+ tree score decoding when reading this input. */
 
     union {
         /* Set iterators. */
@@ -2617,9 +2616,6 @@ typedef struct {
     long long ell;
     double score;
 } zsetopval;
-
-/* zuiNext() clears a zsetopval per member, so keep it small. */
-static_assert(sizeof(zsetopval) <= 80, "zsetopval grew past 80 bytes");
 
 typedef union _iterset iterset;
 typedef union _iterzset iterzset;
@@ -2812,9 +2808,7 @@ int zuiNext(zsetopsrc *op, zsetopval *val) {
         } else if (op->encoding == OBJ_ENCODING_BTREE) {
             const unsigned char *ele;
             size_t len;
-            /* Keep zuiNextBatched() in sync. */
-            if (!zbtreeIteratorNext(&it->bt.iter, 1, &ele, &len,
-                                    op->noscore ? NULL : &val->score))
+            if (!zbtreeIteratorNext(&it->bt.iter, 1, &ele, &len, &val->score))
                 return 0;
             val->estr = (unsigned char *)ele;
             val->elen = len;
@@ -2827,50 +2821,29 @@ int zuiNext(zsetopsrc *op, zsetopval *val) {
     return 1;
 }
 
-/* Members of a B+ tree input decoded a batch at a time. They point into the
- * set and are valid only while it is not modified. */
-#define ZUI_BATCH_SIZE 16
-typedef struct {
-    zbtreeIteratorElement ele[ZUI_BATCH_SIZE];
-    unsigned int pos, len;
-} zuiBatch;
-
-/* zuiNext() for a B+ tree input, taking members from 'batch'. A nonzero
- * 'remaining' (LIMIT) caps a refill at the number of matches still needed. */
-static inline int zuiNextBatched(zsetopsrc *op, zsetopval *val,
-                                 zuiBatch *batch, unsigned long remaining)
+/* zuiNext() for a B+ tree input, without clearing 'val' and dispatching on
+ * the encoding for every member. With a 'cursor' the members are read through
+ * it and the scores are not decoded. 'val' must have been zeroed before the
+ * first call. */
+static inline int zuiNextBtree(zsetopsrc *op, zsetopval *val,
+                               zbtreeMemberCursor *cursor)
 {
-    if (batch->pos == batch->len) {
-        unsigned int want = ZUI_BATCH_SIZE;
-        if (remaining && remaining < ZUI_BATCH_SIZE)
-            want = (unsigned int)remaining;
-        batch->len = zbtreeIteratorNextBatch(&op->iter.zset.bt.iter, 1,
-                                             batch->ele, want, !op->noscore);
-        batch->pos = 0;
-        if (batch->len == 0) return 0;
-    }
-    const zbtreeIteratorElement *e = &batch->ele[batch->pos++];
+    const unsigned char *ele;
+    size_t len;
 
-    /* Set what zuiNext() would. The fields it zeroes and that are not set
-     * here are read only once a flag says they are valid. */
     zuiDiscardDirtyValue(val);
+    if (cursor) {
+        if ((ele = zbtreeMemberCursorNext(cursor, 1, &len)) == NULL) return 0;
+    } else {
+        if (!zbtreeIteratorNext(&op->iter.zset.bt.iter, 1, &ele, &len,
+                                &val->score))
+            return 0;
+    }
     val->flags = 0;
     val->ele = NULL;
-    val->estr = (unsigned char *)e->ele;
-    val->elen = e->len;
-    val->ell = 0;
-    val->score = op->noscore ? 0 : e->score;
+    val->estr = (unsigned char *)ele;
+    val->elen = len;
     return 1;
-}
-
-/* zuiNext() for the input ZINTER iterates, using zuiNextBatched() when
- * 'batch' is not NULL. 'limit' and 'cardinality' are those of ZINTERCARD. */
-static inline int zuiInterNext(zsetopsrc *op, zsetopval *val, zuiBatch *batch,
-                               long limit, unsigned long cardinality)
-{
-    if (batch == NULL) return zuiNext(op, val);
-    return zuiNextBatched(op, val, batch,
-                          limit ? (unsigned long)limit - cardinality : 0);
 }
 
 int zuiLongLongFromValue(zsetopval *val) {
@@ -2921,7 +2894,7 @@ sds zuiNewSdsFromValue(zsetopval *val) {
     }
 }
 
-static inline int zuiBufferFromValue(zsetopval *val) {
+int zuiBufferFromValue(zsetopval *val) {
     if (val->estr == NULL) {
         if (val->ele != NULL) {
             val->elen = sdslen(val->ele);
@@ -2946,9 +2919,8 @@ static inline uint32_t zuiMemberHash(zsetopval *val) {
 
 /* Find value pointed to by val in the source pointer to by op. When found,
  * return 1 and store its score in *score, unless score is NULL. Return 0
- * otherwise. With 'reuse_hash', compute the member hash on first use and
- * cache it in 'val' for the other inputs. */
-int zuiFind(zsetopsrc *op, zsetopval *val, double *score, int reuse_hash) {
+ * otherwise. */
+int zuiFind(zsetopsrc *op, zsetopval *val, double *score) {
     if (op->subject == NULL)
         return 0;
 
@@ -2963,14 +2935,11 @@ int zuiFind(zsetopsrc *op, zsetopval *val, double *score, int reuse_hash) {
         }
     } else if (op->type == OBJ_ZSET) {
         if (op->encoding == OBJ_ENCODING_BTREE) {
-            zuiBufferFromValue(val);
-            if (reuse_hash) {
-                uint32_t hash = zuiMemberHash(val);
-                return zbtreeScoreRawWithHash(op->subject->ptr, hash,
-                                              val->estr, val->elen, score);
-            }
-            return zbtreeScoreRaw(op->subject->ptr, val->estr, val->elen,
-                                  score);
+            /* The hash is cached in 'val', so that looking the member up in
+             * several B+ tree inputs hashes it once. */
+            uint32_t hash = zuiMemberHash(val);
+            return zbtreeScoreRawWithHash(op->subject->ptr, hash,
+                                          val->estr, val->elen, score);
         }
 
         zuiSdsFromValue(val);
@@ -3126,7 +3095,7 @@ static void zdiffAlgorithm1(zsetopsrc *src, long setnum, zset *dstzset, size_t *
              * check for a duplicate set in the zsetChooseDiffAlgorithm
              * function, but we're leaving it for future-proofing. */
             if (src[j].subject == src[0].subject ||
-                zuiFind(&src[j],&zval,&value,0)) {
+                zuiFind(&src[j],&zval,&value)) {
                 exists = 1;
                 break;
             }
@@ -3416,36 +3385,26 @@ void zunionInterDiffGenericCommand(client *c, robj *dstkey, int numkeysIndex, in
         dstobj = createZsetObject();
         dstzset = dstobj->ptr;
     }
+    memset(&zval, 0, sizeof(zval));
 
     if (op == SET_OP_INTER) {
-        /* Counting with a single distinct input: no need to iterate. */
-        int single_input = cardinality_only;
-        for (j = 1; j < setnum && single_input; j++)
-            single_input = src[j].subject == src[0].subject;
-
-        if (single_input) {
-            cardinality = zuiLength(&src[0]);
-            if (limit && cardinality > (unsigned long)limit)
-                cardinality = (unsigned long)limit;
-        } else if (zuiLength(&src[0]) > 0) {
-            /* Skip everything if the smallest input is empty. Precondition:
-             * as src[0] is non-empty and the inputs are ordered by size, all
-             * src[i > 0] are non-empty too. */
-            src[0].noscore = cardinality_only;
-            /* Sharing the member hash pays off from three inputs. */
-            int reuse_hash = setnum > 2;
+        /* Skip everything if the smallest input is empty. */
+        if (zuiLength(&src[0]) > 0) {
+            /* Precondition: as src[0] is non-empty and the inputs are ordered
+             * by size, all src[i > 0] are non-empty too. */
+            int btree = src[0].type == OBJ_ZSET &&
+                        src[0].encoding == OBJ_ENCODING_BTREE;
             zuiInitIterator(&src[0]);
-            /* Read a B+ tree src[0] in batches, see zuiNextBatched(). */
-            zuiBatch batchbuf;
-            zuiBatch *batch = NULL;
-            if (src[0].type == OBJ_ZSET &&
-                src[0].encoding == OBJ_ENCODING_BTREE)
-            {
-                batch = &batchbuf;
-                batch->pos = batch->len = 0;
+            /* ZINTERCARD needs membership only, so it reads a B+ tree
+             * src[0] through a member cursor, which decodes no scores. */
+            zbtreeMemberCursor cursorbuf, *cursor = NULL;
+            if (btree && cardinality_only) {
+                cursor = &cursorbuf;
+                zbtreeMemberCursorInit(cursor, &src[0].iter.zset.bt.iter);
             }
-            memset(&zval, 0, sizeof(zval));
-            while (zuiInterNext(&src[0], &zval, batch, limit, cardinality)) {
+            while (btree ? zuiNextBtree(&src[0],&zval,cursor) :
+                           zuiNext(&src[0],&zval))
+            {
                 double score, value;
 
                 score = zuiWeightedScore(zval.score, src[0].weight, aggregate);
@@ -3457,15 +3416,14 @@ void zunionInterDiffGenericCommand(client *c, robj *dstkey, int numkeysIndex, in
                     if (src[j].subject == src[0].subject) {
                         value = zuiWeightedScore(zval.score, src[j].weight, aggregate);
                         zunionInterAggregate(&score,value,aggregate);
-                        continue;
-                    }
-                    /* ZINTERCARD needs membership only. */
-                    double *target = cardinality_only ? NULL : &value;
-                    int found = zuiFind(&src[j], &zval, target, reuse_hash);
-                    if (!found) break;
-                    if (!cardinality_only) {
+                    } else if (zuiFind(&src[j],&zval,
+                                       cardinality_only ? NULL : &value))
+                    {
+                        if (cardinality_only) continue;
                         value = zuiWeightedScore(value, src[j].weight, aggregate);
                         zunionInterAggregate(&score,value,aggregate);
+                    } else {
+                        break;
                     }
                 }
 
@@ -3473,8 +3431,12 @@ void zunionInterDiffGenericCommand(client *c, robj *dstkey, int numkeysIndex, in
                 if (j == setnum && cardinality_only) {
                     cardinality++;
 
-                    /* Stop searching after reaching the limit. */
-                    if (limit && cardinality >= (unsigned long)limit) break;
+                    /* We stop the searching after reaching the limit. */
+                    if (limit && cardinality >= (unsigned long)limit) {
+                        /* Cleanup before we break the zuiNext loop. */
+                        zuiDiscardDirtyValue(&zval);
+                        break;
+                    }
                 } else if (j == setnum) {
                     tmp = zuiNewSdsFromValue(&zval);
                     znode = zslInsert(dstzset->zsl,score,tmp);
@@ -3484,15 +3446,12 @@ void zunionInterDiffGenericCommand(client *c, robj *dstkey, int numkeysIndex, in
                     sdsfree(tmp); /* zslInsert copied it, we can free our copy */
                 }
             }
-            zuiDiscardDirtyValue(&zval);
             zuiClearIterator(&src[0]);
         }
     } else if (op == SET_OP_UNION) {
         dictIterator di;
         dictEntry *de;
         double score;
-
-        memset(&zval, 0, sizeof(zval));
 
         if (setnum) {
             /* Our union is at least as large as the largest set.
@@ -5324,8 +5283,7 @@ void zrandmemberWithCountCommand(client *c, long l, int withscores) {
         goto out;
     }
 
-    /* Zero the fields this caller does not set, such as 'noscore'. */
-    zsetopsrc src = {0};
+    zsetopsrc src;
     zsetopval zval;
     src.subject = zsetobj;
     src.type = zsetobj->type;

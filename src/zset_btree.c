@@ -179,6 +179,9 @@
 
 #define ZBT_PACKED_SHORT 254
 #define ZBT_PACKED_EXTERNAL 255
+/* zbtreeMemberCursorNext() decodes the one-byte length form inline. */
+static_assert(ZBTREE_RECORD_INLINE_MAX == ZBT_PACKED_SHORT - 1,
+              "ZBTREE_RECORD_INLINE_MAX must match the packed record format");
 #define ZBT_EXTERNAL_HASH_OFFSET 1
 #define ZBT_EXTERNAL_LENGTH_OFFSET \
     (ZBT_EXTERNAL_HASH_OFFSET + sizeof(uint32_t))
@@ -496,7 +499,7 @@ static void zbtScoreLeafWriteScore(zbtScoreLeaf *leaf, unsigned int pos,
 }
 
 /* Decode the score at logical position 'pos'. */
-static double zbtScoreLeafScore(zbtScoreLeaf *leaf, unsigned int pos) {
+static inline double zbtScoreLeafScore(zbtScoreLeaf *leaf, unsigned int pos) {
     unsigned int bits = leaf->score_bits;
     uint64_t delta = 0;
 
@@ -4153,48 +4156,35 @@ int zbtreeIteratorNext(zbtreeIterator *iter, int reverse,
     return 1;
 }
 
-/* zbtreeIteratorNext() for up to 'max' elements of the current leaf,
- * locating the offset array once. */
-unsigned int zbtreeIteratorNextBatch(zbtreeIterator *iter, int reverse,
-                                     zbtreeIteratorElement *out,
-                                     unsigned int max, int withscores)
+/* Load the leaf the cursor's iterator points to and move the iterator to the
+ * following leaf. Return zero at the end. */
+int zbtreeMemberCursorRefill(zbtreeMemberCursor *cursor, int reverse) {
+    zbtScoreLeaf *leaf = cursor->iter.leaf;
+    if (leaf == NULL) return 0;
+
+    unsigned int pos = cursor->iter.pos;
+    cursor->leaf = (const unsigned char *)leaf;
+    cursor->offset = zbtScoreLeafOffsets(leaf) +
+                     zbtScoreLeafPhysicalPos(leaf, pos);
+    cursor->step = (!reverse == !leaf->reversed) ? 1 : -1;
+    if (reverse) {
+        cursor->left = pos + 1;
+        leaf = leaf->prev;
+        cursor->iter.leaf = leaf;
+        cursor->iter.pos = leaf ? leaf->n.count - 1 : 0;
+    } else {
+        cursor->left = leaf->n.count - pos;
+        cursor->iter.leaf = leaf->next;
+        cursor->iter.pos = 0;
+    }
+    return 1;
+}
+
+/* Return the member of a record and store its length in 'len'. */
+const unsigned char *zbtreeRecordMember(const unsigned char *record,
+                                        size_t *len)
 {
-    zbtScoreLeaf *leaf = iter->leaf;
-    if (leaf == NULL || max == 0) return 0;
-
-    unsigned int pos = iter->pos, count = leaf->n.count, n;
-    const uint16_t *offsets = zbtScoreLeafOffsets(leaf);
-    if (reverse) {
-        n = pos + 1 < max ? pos + 1 : max;
-    } else {
-        n = count - pos < max ? count - pos : max;
-    }
-
-    for (unsigned int i = 0; i < n; i++) {
-        unsigned int lpos = reverse ? pos - i : pos + i;
-        unsigned int ppos = zbtScoreLeafPhysicalPos(leaf, lpos);
-        out[i].ele = zbtPackedData((unsigned char *)leaf + offsets[ppos],
-                                   &out[i].len);
-        if (withscores) out[i].score = zbtScoreLeafScore(leaf, lpos);
-    }
-
-    if (reverse) {
-        if (pos >= n) {
-            iter->pos = pos - n;
-        } else {
-            leaf = leaf->prev;
-            iter->leaf = leaf;
-            iter->pos = leaf ? leaf->n.count - 1 : 0;
-        }
-    } else {
-        if (pos + n < count) {
-            iter->pos = pos + n;
-        } else {
-            iter->leaf = leaf->next;
-            iter->pos = 0;
-        }
-    }
-    return n;
+    return zbtPackedData(record, len);
 }
 
 /* Return the rank where a score bound would be inserted. Complete children
@@ -5511,73 +5501,6 @@ int zsetBtreeTest(int argc, char **argv, int flags) {
         zbtreeFree(zs);
         zfree(order);
         zfree(gone);
-    }
-
-    printf("Testing B+ tree batched iteration matches single steps\n");
-    {
-        /* Both leaf layouts, and the long inline and external forms. */
-        zbtreeSet *zs = zbtreeCreate();
-        char buf[400];
-        for (int i = 0; i < 600; i++) {
-            int k = i < 300 ? 300 - i : i + 1;
-            size_t len = k % 7 == 0 ? 260 : (k % 11 == 0 ? 360 : 0);
-            if (len) {
-                memset(buf, 'a' + k % 26, len);
-                snprintf(buf, 16, "%d:", k);
-                buf[strlen(buf)] = '-';
-            } else {
-                len = snprintf(buf, sizeof(buf), "m:%d", k);
-            }
-            sds ele = sdsnewlen(buf, len);
-            double score;
-            zbtreeInsertPosition position;
-            serverAssert(!zbtreeFindForAdd(zs, ele, &score, &position));
-            zbtreeInsertNew(zs, k * 0.5, ele, &position);
-            sdsfree(ele);
-        }
-        int same = 1;
-        for (int reverse = 0; reverse <= 1; reverse++) {
-            for (unsigned int max = 1; max <= 20; max++) {
-                for (int withscores = 0; withscores <= 1; withscores++) {
-                    zbtreeIterator one, many;
-                    zbtreeIteratorElement out[20];
-                    unsigned long seen = 0;
-                    zbtreeIteratorStart(zs, reverse, &one);
-                    zbtreeIteratorStart(zs, reverse, &many);
-                    unsigned int n;
-                    while ((n = zbtreeIteratorNextBatch(&many, reverse, out,
-                                                        max, withscores)))
-                    {
-                        same = same && n <= max;
-                        for (unsigned int i = 0; i < n; i++) {
-                            const unsigned char *e;
-                            size_t len;
-                            double score;
-                            same = same && zbtreeIteratorNext(&one, reverse,
-                                                              &e, &len,
-                                                              &score) &&
-                                   e == out[i].ele && len == out[i].len &&
-                                   (!withscores || score == out[i].score);
-                        }
-                        seen += n;
-                    }
-                    same = same && seen == zbtreeLength(zs) &&
-                           !zbtreeIteratorNext(&one, reverse, NULL, NULL,
-                                               NULL) &&
-                           zbtreeIteratorNextBatch(&many, reverse, out, max,
-                                                   withscores) == 0;
-                }
-            }
-        }
-        int reversed = 0, forward = 0;
-        for (zbtScoreLeaf *l = zs->score_first; l; l = l->next) {
-            if (l->reversed) reversed++;
-            else forward++;
-        }
-        test_cond("Batched iteration covers both leaf layouts",
-                  reversed > 0 && forward > 0);
-        test_cond("Batched iteration returns the single-step sequence", same);
-        zbtreeFree(zs);
     }
 
     printf("Testing B+ tree memory when end deletions stop at one member\n");

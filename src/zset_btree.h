@@ -36,13 +36,6 @@ typedef struct {
     unsigned int pos;
 } zbtreeIterator;
 
-/* An element returned by zbtreeIteratorNextBatch(). */
-typedef struct {
-    const unsigned char *ele;
-    size_t len;
-    double score;
-} zbtreeIteratorElement;
-
 /* This state exists only while active defragmentation is visiting a large
  * sorted set. It is kept by the defragmenter, not in every zset. */
 typedef struct {
@@ -143,12 +136,46 @@ int zbtreeIteratorStart(const zbtreeSet *zs, int reverse,
                         zbtreeIterator *iter);
 int zbtreeIteratorNext(zbtreeIterator *iter, int reverse,
                        const unsigned char **ele, size_t *len, double *score);
-/* Return up to 'max' elements of the current leaf, as zbtreeIteratorNext()
- * would, and advance past them. Return zero at the end or for a zero 'max'.
- * Scores are left unset without 'withscores'. */
-unsigned int zbtreeIteratorNextBatch(zbtreeIterator *iter, int reverse,
-                                     zbtreeIteratorElement *out,
-                                     unsigned int max, int withscores);
+/* Reads the members from an iterator's position on, one leaf at a time: the
+ * per-leaf work is done once in zbtreeMemberCursorRefill() and the common
+ * step is inline. Valid only until the set is modified. */
+typedef struct {
+    zbtreeIterator iter;       /* Where the next refill reads from. */
+    const unsigned char *leaf; /* Leaf the offsets are relative to. */
+    const uint16_t *offset;    /* Record offset of the next member. */
+    int step;                  /* Direction over the offset array. */
+    unsigned int left;         /* Members left in this leaf. */
+} zbtreeMemberCursor;
+
+/* A member record whose first byte is at most this value is that length
+ * followed by the member. zbtreeRecordMember() decodes the other forms. */
+#define ZBTREE_RECORD_INLINE_MAX 253
+int zbtreeMemberCursorRefill(zbtreeMemberCursor *cursor, int reverse);
+const unsigned char *zbtreeRecordMember(const unsigned char *record,
+                                        size_t *len);
+
+static inline void zbtreeMemberCursorInit(zbtreeMemberCursor *cursor,
+                                          const zbtreeIterator *iter)
+{
+    cursor->iter = *iter;
+    cursor->left = 0;
+}
+
+/* Return the next member and store its length in 'len', NULL at the end. */
+static inline const unsigned char *
+zbtreeMemberCursorNext(zbtreeMemberCursor *cursor, int reverse, size_t *len) {
+    if (cursor->left == 0 && !zbtreeMemberCursorRefill(cursor, reverse))
+        return NULL;
+    const unsigned char *record = cursor->leaf + *cursor->offset;
+    cursor->offset += cursor->step;
+    cursor->left--;
+    if (record[0] <= ZBTREE_RECORD_INLINE_MAX) {
+        *len = record[0];
+        return record + 1;
+    }
+    return zbtreeRecordMember(record, len);
+}
+
 unsigned long zbtreeCountByScore(const zbtreeSet *zs, double min, int minex,
                                  double max, int maxex);
 
