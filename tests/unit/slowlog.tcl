@@ -626,10 +626,14 @@ if {$system_name eq {linux} && ![catch {exec which taskset renice}]} {
             # SETs are too short for the slowlog; the cycle check catches it. One
             # wakeup needs enough work (10 x 1000 SETs) to be preempted mid-cycle.
             # Some SETs may still be preempted, so the per-command counter isn't checked.
+            # Under valgrind every SET is far slower, so a wakeup with much fewer
+            # of them is preempted just the same, while the full load takes more
+            # than ten minutes at the lowest priority.
+            set numsets [expr {$::valgrind ? 100 : 1000}]
             r config set slowlog-log-slower-than 1000
             set before [s eventloop_off_cpu_events]
             set buf {}
-            for {set i 0} {$i < 1000} {incr i} { append buf "SET k$i v\r\n" }
+            for {set i 0} {$i < $numsets} {incr i} { append buf "SET k$i v\r\n" }
             set clients {}
             for {set c 0} {$c < 10} {incr c} { lappend clients [redis_deferring_client] }
             set busy {}
@@ -637,7 +641,7 @@ if {$system_name eq {linux} && ![catch {exec which taskset renice}]} {
                 start_busy_loops $starve_cpu busy
                 foreach rd $clients { $rd write $buf; $rd flush }
                 foreach rd $clients {
-                    for {set i 0} {$i < 1000} {incr i} { $rd read }
+                    for {set i 0} {$i < $numsets} {incr i} { $rd read }
                 }
             } msg]
             stop_busy_loops $busy

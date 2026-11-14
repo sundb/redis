@@ -953,13 +953,17 @@ tags "modules external:skip" {
             assert_match {*rehashing target*} [r debug htstats 0 full]
         }
 
+        # Each round hits the bad case with a probability of 25% or more, so a
+        # few rounds are enough for valgrind, where a round takes seconds.
+        set lookup_probes_rounds [expr {$::valgrind ? 10 : 40}]
+
         proc lookup_probes_expires {} {
             scan [regexp -inline {expires=(\d+)} [r info keyspace]] expires=%d
         }
 
         # About 25% of the rounds hit the bad case without the fix.
         test {SET EX on existing keys keeps the TTL on the right key while KSN callbacks do lookups} {
-            for {set round 0} {$round < 40} {incr round} {
+            for {set round 0} {$round < $lookup_probes_rounds} {incr round} {
                 lookup_probes_start_shrink r$round
                 r keyspace.lookup_probes 1
                 for {set i 0} {$i < 512} {incr i} {
@@ -974,7 +978,7 @@ tags "modules external:skip" {
 
         # About 30% of the rounds hit the bad case without the fix.
         test {SET EX on new keys keeps the TTL on the right key while KSN callbacks do lookups} {
-            for {set round 0} {$round < 40} {incr round} {
+            for {set round 0} {$round < $lookup_probes_rounds} {incr round} {
                 lookup_probes_start_shrink r$round
                 r keyspace.lookup_probes 1
                 for {set i 0} {$i < 512} {incr i} {
@@ -990,7 +994,7 @@ tags "modules external:skip" {
         # stale link overwrites another key, which then goes missing. About half
         # the rounds hit the bad case without the fix.
         test {SET IFEQ updates the right key while the keyspace dict is shrinking} {
-            for {set round 0} {$round < 40} {incr round} {
+            for {set round 0} {$round < $lookup_probes_rounds} {incr round} {
                 lookup_probes_start_shrink r$round
                 for {set i 0} {$i < 512} {incr i} {
                     assert_equal OK [r set r$round:$i v2 IFEQ value:$i]

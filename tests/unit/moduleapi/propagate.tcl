@@ -1013,7 +1013,7 @@ test {Replicas that was marked as CLIENT_CLOSE_ASAP should not keep the replicat
 # a module thread (not the main thread): pauseIOThreadsRange() then asserts
 # pthread_equal(pthread_self(), server.main_thread_id) and the server aborts.
 test {CLIENT TRACKING REDIRECT to a client on an IO thread survives invalidation from a module thread} {
-    start_server [list overrides [list loadmodule "$testmodule" io-threads 4] tags {"external:skip"}] {
+    start_server [list overrides [list loadmodule "$testmodule" io-threads 4] tags {"iothreads external:skip"}] {
         # R is the redirect target: a plain RESP3 client, pinned to one of the IO threads.
         set R [redis_deferring_client]
         $R HELLO 3

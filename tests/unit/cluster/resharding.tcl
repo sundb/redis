@@ -34,8 +34,14 @@ test "Enable AOF in all the instances" {
 # - The test continues while the resharding is in progress.
 # - At the end of the test, we wait for the resharding process to stop.
 # - Finally the keys are checked to see if they contain the value they should.
-set numkeys 50000
-set numops 200000
+# Valgrind makes every operation much slower, so use a smaller dataset there.
+if {$::valgrind} {
+    set numkeys 5000
+    set numops 20000
+} else {
+    set numkeys 50000
+    set numops 200000
+}
 set start_node_port [srv 0 port]
 set cluster [redis_cluster 127.0.0.1:$start_node_port]
 if {$::tls} {

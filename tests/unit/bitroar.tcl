@@ -477,7 +477,8 @@ start_server {tags {"bitmap" "bitmap-roaring" "needs:debug" "cluster:skip"}} {
         # Alternating bits give one set-bit run per two bits, so 1MB holds 4M
         # runs. Verify that identical bits have the same digest across
         # different construction histories and DUMP/RESTORE round-trips.
-        set bytes 1048576
+        # Valgrind gets a smaller bitmap, the full one takes minutes there.
+        set bytes [expr {$::valgrind ? 131072 : 1048576}]
         set raw [string repeat [binary format H* 55] $bytes]
         r del bitmap:digest:frag:converted bitmap:digest:frag:bitfield \
             bitmap:digest:frag:cleared bitmap:digest:frag:converted:restored \
