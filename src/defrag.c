@@ -1128,6 +1128,15 @@ static void defragIdmpProducer(idmpProducer *producer) {
     if (newdict)
         producer->idmp_dict = newdict;
 
+    /* Defrag the dict entries. The keys (idmpEntry) are also linked in the
+     * producer's list, so they are defragged below while walking that list. */
+    unsigned long cursor = 0;
+    dictDefragFunctions defragfns = {.defragAlloc = activeDefragAlloc};
+    do {
+        cursor = dictScanDefrag(producer->idmp_dict, cursor,
+                                scanCallbackCountScanned, &defragfns, NULL);
+    } while (cursor != 0);
+
     idmpEntry *prev = NULL;
     idmpEntry *entry = producer->idmp_head;
     while (entry != NULL) {
